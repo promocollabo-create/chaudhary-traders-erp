@@ -144,6 +144,7 @@ const DEFAULT_SETTINGS = {
   exchangeCounter: 1,
   creditNoteCounter: 1,
   promiseCounter: 1,
+  transferCounter: 1,
   logoUrl: "",
 };
 const DEFAULT_BRANCHES = [{ id: "branch_main", name: "Main Branch" }];
@@ -183,6 +184,7 @@ function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl }) {
     { id: "creditNotes", label: "Credit Notes", icon: "📝" },
     { id: "ledger", label: "Ledger", icon: "≡" },
     { id: "payments", label: "Payments", icon: "◎" },
+    { id: "outstandingTransfer", label: "Outstanding Transfer", icon: "⇄" },
     { id: "bookings", label: "Advance Booking", icon: "▦" },
     { id: "orders", label: "Daily Orders", icon: "☎" },
     { id: "promises", label: "Promise To Pay", icon: "🤝" },
@@ -373,13 +375,19 @@ function isPaymentLinkedToCancelledInvoice(payment, invoices) {
 // ledger lines (Feature 6). Promise-created lines are informational only
 // (0 debit / 0 credit) so they never change the running balance; only the
 // actual payment (already logged as a Payment entry) affects the balance.
+// Outstanding Transfer feature: also optionally takes `transfers` ([]
+// default, same backward-compatible pattern). Only "Active" transfers
+// affect the balance — a "Reversed" transfer is excluded entirely, which
+// automatically restores both customers' balances to what they were
+// before the transfer (same pattern as Deleted returns/exchanges above).
+// This is NOT a payment and never touches the payments table.
 //
 // BUGFIX (partial qty): Sales Return / Exchange ledger lines now also carry
 // the returned / new quantity (in the invoice line's own unit — Feet,
 // Meter, KG, Liter, Sq.Ft, etc.) so the Ledger view can show "what quantity
 // moved", not just the money amount. Quantities are rounded with roundQty
 // to avoid floating point drift (e.g. 5.999999999 instead of 6).
-function computeLedgerForCustomer(customer, invoices, payments, returns = [], exchanges = [], promises = []) {
+function computeLedgerForCustomer(customer, invoices, payments, returns = [], exchanges = [], promises = [], transfers = []) {
   const entries = [];
   invoices
     .filter((i) => i.customerId === customer.id && !isInvoiceCancelled(i))
@@ -421,6 +429,21 @@ function computeLedgerForCustomer(customer, invoices, payments, returns = [], ex
     .forEach((p) =>
       entries.push({ date: p.promiseDate, type: `Promise Created (${p.status})`, ref: p.code, debit: 0, credit: 0, id: p.id })
     );
+  transfers
+    .filter((t) => t.status === "Active" && (t.fromCustomerId === customer.id || t.toCustomerId === customer.id))
+    .forEach((t) => {
+      if (t.fromCustomerId === customer.id) {
+        entries.push({
+          date: t.date, type: "Outstanding Transfer Out", ref: t.code, debit: 0, credit: t.amount,
+          id: t.id + "_out", counterparty: t.toCustomerName, note: t.reason,
+        });
+      } else {
+        entries.push({
+          date: t.date, type: "Outstanding Transfer In", ref: t.code, debit: t.amount, credit: 0,
+          id: t.id + "_in", counterparty: t.fromCustomerName, note: t.reason,
+        });
+      }
+    });
   entries.sort((a, b) => new Date(a.date) - new Date(b.date));
   let bal = Number(customer.openingBalance) || 0;
   const withBalance = entries.map((e) => {
@@ -547,12 +570,19 @@ function promiseWithComputed(promise) {
   return { ...promise, paidAmount: paid, remainingAmount: remaining, status: computePromiseStatus(promise) };
 }
 
+/* ---------------- Outstanding Transfer helpers ---------------- */
+
+const TRANSFER_STATUS_TONE = {
+  Active: "bg-emerald-100 text-emerald-700",
+  Reversed: "bg-slate-200 text-slate-600",
+};
+
 /* ---------------- Dashboard ---------------- */
 
-function Dashboard({ customers, invoices, payments, returns, exchanges, promises, leads, bookings, onOpenPromises }) {
+function Dashboard({ customers, invoices, payments, returns, exchanges, promises, transfers, leads, bookings, onOpenPromises }) {
   const outstandingTotal = useMemo(() => {
-    return customers.reduce((sum, c) => sum + computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises).outstanding, 0);
-  }, [customers, invoices, payments, returns, exchanges, promises]);
+    return customers.reduce((sum, c) => sum + computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers).outstanding, 0);
+  }, [customers, invoices, payments, returns, exchanges, promises, transfers]);
 
   const todaySales = useMemo(() => {
     const t = todayISO();
@@ -710,14 +740,14 @@ function CustomerForm({ initial, branches, currentUser, onSave, onCancel }) {
   );
 }
 
-function Customers({ customers, invoices, payments, returns, exchanges, promises, saveCustomer, deleteCustomer, openLedger, branches, currentUser }) {
+function Customers({ customers, invoices, payments, returns, exchanges, promises, transfers, saveCustomer, deleteCustomer, openLedger, branches, currentUser }) {
   const [modal, setModal] = useState(null); // null | 'new' | customer object
   const [q, setQ] = useState("");
 
   const rows = customers
     .filter((c) => c.name.toLowerCase().includes(q.toLowerCase()) || (c.phone || "").includes(q))
     .map((c) => {
-      const { outstanding } = computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises);
+      const { outstanding } = computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers);
       return { ...c, outstanding };
     });
 
@@ -785,10 +815,10 @@ function Customers({ customers, invoices, payments, returns, exchanges, promises
 
 /* ---------------- Ledger view ---------------- */
 
-function LedgerView({ customers, invoices, payments, returns, exchanges, promises, focusId, setFocusId, settings }) {
+function LedgerView({ customers, invoices, payments, returns, exchanges, promises, transfers, focusId, setFocusId, settings }) {
   const customer = customers.find((c) => c.id === focusId) || customers[0];
   if (!customer) return <div className="text-slate-400">Pehle koi customer add karein.</div>;
-  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises);
+  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers);
   const myPromises = (promises || []).filter((p) => p.customerId === customer.id && p.status !== "Deleted").map(promiseWithComputed);
 
   function downloadPDF() {
@@ -840,7 +870,10 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
             {entries.map((e) => (
               <tr key={e.id} className="border-t border-slate-100">
                 <td className="px-4 py-2">{fmtDate(e.date)}</td>
-                <td className="px-4 py-2">{e.type}{e.invoiceNumber ? <span className="text-slate-400"> ({e.invoiceNumber})</span> : ""}</td>
+                <td className="px-4 py-2">
+                  {e.type}{e.invoiceNumber ? <span className="text-slate-400"> ({e.invoiceNumber})</span> : ""}
+                  {e.counterparty ? <span className="text-slate-400"> — {e.counterparty}</span> : ""}
+                </td>
                 <td className="px-4 py-2 text-slate-500">{e.ref}</td>
                 <td className="px-4 py-2 text-right text-slate-500 text-xs">{qtyCell(e)}</td>
                 <td className="px-4 py-2 text-right text-red-600">{e.debit ? fmtMoney(e.debit) : ""}</td>
@@ -964,7 +997,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
 
 /* ---------------- Invoices ---------------- */
 
-function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
+function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
   const isEdit = !!editingInvoice;
   const [customerId, setCustomerId] = useState(editingInvoice?.customerId || prefill?.customerId || customers[0]?.id || "");
   const [date, setDate] = useState(editingInvoice?.date || todayISO());
@@ -993,7 +1026,7 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const previousOutstanding = isEdit
     ? (editingInvoice.previousOutstanding || 0)
     : selectedCustomer
-    ? computeLedgerForCustomer(selectedCustomer, invoices, payments, returns, exchanges, promises).outstanding
+    ? computeLedgerForCustomer(selectedCustomer, invoices, payments, returns, exchanges, promises, transfers).outstanding
     : 0;
 
   // Previously used "Issued To" names for this customer, so staff can
@@ -1461,7 +1494,7 @@ function buildInvoiceWaMessage(invoice, settings) {
   return lines.join("\n");
 }
 
-function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
+function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
   const [showForm, setShowForm] = useState(false);
   const [editingInvoice, setEditingInvoice] = useState(null);
   const [viewing, setViewing] = useState(null);
@@ -1555,6 +1588,7 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
             returns={returns}
             exchanges={exchanges}
             promises={promises}
+            transfers={transfers}
             prefill={editingInvoice ? null : prefill}
             editingInvoice={editingInvoice}
             currentUser={currentUser}
@@ -1650,7 +1684,7 @@ function InvoiceHistoryPage({ invoices, auditLog }) {
 
       <h2 className="text-xl font-black uppercase tracking-tight mb-2">Audit Log</h2>
       <div className="text-xs text-slate-400 mb-4 max-w-2xl">
-        Sales Return, Exchange, Delete Return, Delete Exchange, Promise To Pay, aur Invoice Status Change ki har action yahan record hoti hai — user, date, time aur reason ke saath.
+        Sales Return, Exchange, Delete Return, Delete Exchange, Promise To Pay, Outstanding Transfer, aur Invoice Status Change ki har action yahan record hoti hai — user, date, time aur reason ke saath.
       </div>
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
@@ -2237,6 +2271,182 @@ function Payments({ customers, payments, promises, savePayment }) {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+/* ---------------- Outstanding Transfer ---------------- */
+
+function OutstandingTransferPage({ customers, invoices, payments, returns, exchanges, promises, transfers, currentUser, onCreateTransfer, onReverseTransfer }) {
+  const [showForm, setShowForm] = useState(false);
+  const [fromCustomerId, setFromCustomerId] = useState("");
+  const [toCustomerId, setToCustomerId] = useState("");
+  const [fromSearch, setFromSearch] = useState("");
+  const [toSearch, setToSearch] = useState("");
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("");
+  const [reversing, setReversing] = useState(null);
+  const [reverseReason, setReverseReason] = useState("");
+
+  const fromCustomer = customers.find((c) => c.id === fromCustomerId);
+  const toCustomer = customers.find((c) => c.id === toCustomerId);
+
+  const fromOutstanding = fromCustomer
+    ? computeLedgerForCustomer(fromCustomer, invoices, payments, returns, exchanges, promises, transfers).outstanding
+    : 0;
+  const toOutstanding = toCustomer
+    ? computeLedgerForCustomer(toCustomer, invoices, payments, returns, exchanges, promises, transfers).outstanding
+    : 0;
+
+  const amtNum = Number(amount) || 0;
+  const fromAfter = fromOutstanding - amtNum;
+  const toAfter = toOutstanding + amtNum;
+
+  const filteredFrom = customers.filter((c) => c.name.toLowerCase().includes(fromSearch.toLowerCase()));
+  const filteredTo = customers.filter((c) => c.name.toLowerCase().includes(toSearch.toLowerCase()) && c.id !== fromCustomerId);
+
+  function resetForm() {
+    setFromCustomerId(""); setToCustomerId(""); setFromSearch(""); setToSearch(""); setAmount(""); setReason("");
+  }
+
+  function submit() {
+    if (!fromCustomerId || !toCustomerId) { alert("From aur To Customer select karein."); return; }
+    if (fromCustomerId === toCustomerId) { alert("From aur To Customer same nahi ho sakte."); return; }
+    if (!amtNum || amtNum <= 0) { alert("Transfer amount 0 se zyada hona chahiye."); return; }
+    if (amtNum > fromOutstanding) { alert("Transfer amount From Customer ke current outstanding se zyada nahi ho sakta."); return; }
+    if (!reason.trim()) { alert("Reason likhna zaroori hai."); return; }
+    if (!confirm(`Rs. ${amtNum.toLocaleString()} outstanding ${fromCustomer.name} se ${toCustomer.name} ke khate mein transfer karna hai. Continue?`)) return;
+    onCreateTransfer({
+      fromCustomerId, fromCustomerName: fromCustomer.name,
+      toCustomerId, toCustomerName: toCustomer.name,
+      amount: amtNum, reason: reason.trim(),
+    });
+    resetForm();
+    setShowForm(false);
+  }
+
+  function confirmReverse() {
+    if (!reverseReason.trim()) { alert("Reverse ki wajah likhein."); return; }
+    onReverseTransfer(reversing, reverseReason.trim());
+    setReversing(null); setReverseReason("");
+  }
+
+  const sorted = [...transfers].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const canReverse = currentUser?.role === "admin";
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Outstanding Transfer</h2>
+        <Btn onClick={() => setShowForm(true)} disabled={customers.length < 2}>+ New Outstanding Transfer</Btn>
+      </div>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Ek customer ka outstanding balance doosre customer ke khate mein move karein. Ye payment receive nahi hai aur cash transaction nahi hai — sirf udhaar/outstanding balance ek account se doosre account mein move hota hai.
+      </div>
+
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Transfer #</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">From Customer</th>
+              <th className="px-4 py-2">To Customer</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Reason</th>
+              <th className="px-4 py-2">Created By</th><th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={9} className="px-4 py-6 text-center text-slate-400">Koi outstanding transfer nahi hua abhi tak.</td></tr>}
+            {sorted.map((t) => (
+              <tr key={t.id} className={`border-t border-slate-100 ${t.status === "Reversed" ? "opacity-50" : ""}`}>
+                <td className="px-4 py-2 font-black text-blue-700">{t.code}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(t.date)}</td>
+                <td className="px-4 py-2 font-bold">{t.fromCustomerName}</td>
+                <td className="px-4 py-2 font-bold">{t.toCustomerName}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(t.amount)}</td>
+                <td className="px-4 py-2 text-slate-500 text-xs">{t.reason}</td>
+                <td className="px-4 py-2 text-slate-500">{t.createdBy}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${TRANSFER_STATUS_TONE[t.status] || "bg-slate-100 text-slate-500"}`}>{t.status}</span>
+                  {t.status === "Reversed" && t.reverseReason && (
+                    <div className="text-[10px] text-slate-400 mt-1">Reason: {t.reverseReason}</div>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  {t.status !== "Reversed" && canReverse && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setReversing(t)}>Reverse</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {showForm && (
+        <Modal title="New Outstanding Transfer" onClose={() => { setShowForm(false); resetForm(); }}>
+          <Field label="From Customer">
+            <input className={`${inputCls} mb-1`} placeholder="Search customer..." value={fromSearch} onChange={(e) => setFromSearch(e.target.value)} />
+            <select className={inputCls} value={fromCustomerId} onChange={(e) => { setFromCustomerId(e.target.value); if (e.target.value === toCustomerId) setToCustomerId(""); }}>
+              <option value="">Select Customer</option>
+              {filteredFrom.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          {fromCustomer && (
+            <div className="text-xs text-slate-500 mb-3">
+              Current Outstanding: <span className={`font-black ${fromOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(fromOutstanding)}</span>
+            </div>
+          )}
+
+          <Field label="To Customer">
+            <input className={`${inputCls} mb-1`} placeholder="Search customer..." value={toSearch} onChange={(e) => setToSearch(e.target.value)} />
+            <select className={inputCls} value={toCustomerId} onChange={(e) => setToCustomerId(e.target.value)}>
+              <option value="">Select Customer</option>
+              {filteredTo.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          {toCustomer && (
+            <div className="text-xs text-slate-500 mb-3">
+              Current Outstanding: <span className={`font-black ${toOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(toOutstanding)}</span>
+            </div>
+          )}
+
+          <Field label="Transfer Amount (Rs)">
+            <input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} />
+          </Field>
+          <Field label="Reason / Note">
+            <input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Customer A ki request par amount Customer B ke khate mein transfer kiya gaya." />
+          </Field>
+
+          {fromCustomer && toCustomer && (
+            <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
+              <div className="font-black uppercase text-[11px] text-slate-500 mb-1">Balance Preview</div>
+              <div className="flex justify-between"><span>{fromCustomer.name} — Before</span><span className="font-bold">{fmtMoney(fromOutstanding)}</span></div>
+              <div className="flex justify-between"><span>{fromCustomer.name} — After</span><span className="font-black text-red-600">{fmtMoney(fromAfter)}</span></div>
+              <div className="flex justify-between border-t border-slate-300 pt-1"><span>{toCustomer.name} — Before</span><span className="font-bold">{fmtMoney(toOutstanding)}</span></div>
+              <div className="flex justify-between"><span>{toCustomer.name} — After</span><span className="font-black text-red-600">{fmtMoney(toAfter)}</span></div>
+            </div>
+          )}
+
+          <div className="flex gap-2 mt-4">
+            <Btn onClick={submit}>Transfer Outstanding</Btn>
+            <Btn variant="ghost" onClick={() => { setShowForm(false); resetForm(); }}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {reversing && (
+        <Modal title={`Reverse Transfer ${reversing.code}`} onClose={() => setReversing(null)}>
+          <div className="text-sm text-slate-600 mb-3">
+            Ye transfer reverse karne se <span className="font-bold">{reversing.fromCustomerName}</span> ka outstanding {fmtMoney(reversing.amount)} dobara increase ho jayega aur <span className="font-bold">{reversing.toCustomerName}</span> ka outstanding {fmtMoney(reversing.amount)} decrease ho jayega.
+          </div>
+          <Field label="Reverse Reason">
+            <input className={inputCls} value={reverseReason} onChange={(e) => setReverseReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmReverse}>Confirm Reverse</Btn>
+            <Btn variant="ghost" onClick={() => setReversing(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -3124,7 +3334,7 @@ function Drivers({ drivers, saveDriver, deleteDriver }) {
 
 /* ---------------- Reports ---------------- */
 
-function Reports({ customers, invoices, payments, returns, exchanges, promises, leads, bookings }) {
+function Reports({ customers, invoices, payments, returns, exchanges, promises, transfers, leads, bookings }) {
   const [from, setFrom] = useState(todayISO().slice(0, 8) + "01");
   const [to, setTo] = useState(todayISO());
   const [promiseTab, setPromiseTab] = useState("today");
@@ -3137,7 +3347,7 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
 
   const byCustomer = {};
   customers.forEach((c) => {
-    const { outstanding } = computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises);
+    const { outstanding } = computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers);
     if (outstanding !== 0) byCustomer[c.name] = outstanding;
   });
 
@@ -3249,7 +3459,7 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
 
 /* ---------------- Sales Assistant ---------------- */
 
-function SalesAssistant({ customers, invoices, payments, returns, exchanges, promises }) {
+function SalesAssistant({ customers, invoices, payments, returns, exchanges, promises, transfers }) {
   const [customerId, setCustomerId] = useState(customers[0]?.id || "");
   const [lang, setLang] = useState("ur");
   const [audience, setAudience] = useState("Builder");
@@ -3260,7 +3470,7 @@ function SalesAssistant({ customers, invoices, payments, returns, exchanges, pro
 
   if (customers.length === 0) return <div className="text-slate-400">Pehle Customers tab mein customer add karein.</div>;
 
-  const outstanding = customer ? computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises).outstanding : 0;
+  const outstanding = customer ? computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers).outstanding : 0;
   const message = MESSAGE_TEMPLATES[lang][audience](customer?.name || "", outstanding);
 
   function copy() {
@@ -3349,11 +3559,11 @@ function CementEstimator() {
 
 /* ---------------- Customer Portal ---------------- */
 
-function CustomerPortal({ currentUser, customers, invoices, payments, returns, exchanges, promises, settings, offers, onLogout }) {
+function CustomerPortal({ currentUser, customers, invoices, payments, returns, exchanges, promises, transfers, settings, offers, onLogout }) {
   const [viewing, setViewing] = useState(null);
   const customer = customers.find((c) => c.id === currentUser.id);
   if (!customer) return <div className="p-6">Account nahi mila, admin se rabta karein.</div>;
-  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises);
+  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers);
   const myInvoices = [...invoices].filter((i) => i.customerId === customer.id).sort((a, b) => new Date(b.date) - new Date(a.date));
 
   const activeOffers = (offers || []).filter((o) => o.active);
@@ -3657,10 +3867,11 @@ export default function App() {
   const [creditNotes, setCreditNotes] = useState([]);
   const [auditLog, setAuditLog] = useState([]);
   const [promises, setPromises] = useState([]);
+  const [outstandingTransfers, setOutstandingTransfers] = useState([]);
 
   useEffect(() => {
     (async () => {
-      const [u, s, c, p, i, pay, bk, ld, dr, ord, br, off, ret, exc, cn, al, pr] = await Promise.all([
+      const [u, s, c, p, i, pay, bk, ld, dr, ord, br, off, ret, exc, cn, al, pr, ot] = await Promise.all([
         storeGet("ct-users", DEFAULT_USERS),
         storeGet("ct-settings", DEFAULT_SETTINGS),
         storeGet("ct-customers", []),
@@ -3678,10 +3889,11 @@ export default function App() {
         storeGet("ct-creditnotes", []),
         storeGet("ct-auditlog", []),
         storeGet("ct-promises", []),
+        storeGet("ct-outstandingtransfers", []),
       ]);
       setUsers(u); setSettings(s); setCustomers(c); setProducts(p);
       setInvoices(i); setPayments(pay); setBookings(bk); setLeads(ld); setDrivers(dr); setOrders(ord); setBranches(br); setOffers(off);
-      setReturns(ret); setExchanges(exc); setCreditNotes(cn); setAuditLog(al); setPromises(pr);
+      setReturns(ret); setExchanges(exc); setCreditNotes(cn); setAuditLog(al); setPromises(pr); setOutstandingTransfers(ot);
       if (u.length === 0) { setUsers(DEFAULT_USERS); await storeSet("ct-users", DEFAULT_USERS); }
       setLoading(false);
     })();
@@ -3697,7 +3909,7 @@ export default function App() {
       "ct-bookings": setBookings, "ct-leads": setLeads, "ct-drivers": setDrivers,
       "ct-orders": setOrders, "ct-branches": setBranches, "ct-offers": setOffers,
       "ct-returns": setReturns, "ct-exchanges": setExchanges, "ct-creditnotes": setCreditNotes,
-      "ct-auditlog": setAuditLog, "ct-promises": setPromises,
+      "ct-auditlog": setAuditLog, "ct-promises": setPromises, "ct-outstandingtransfers": setOutstandingTransfers,
     };
     const channel = supabase
       .channel("kv_store-changes")
@@ -3728,6 +3940,7 @@ export default function App() {
     creditNotes: (v) => { setCreditNotes(v); storeSet("ct-creditnotes", v); },
     auditLog: (v) => { setAuditLog(v); storeSet("ct-auditlog", v); },
     promises: (v) => { setPromises(v); storeSet("ct-promises", v); },
+    outstandingTransfers: (v) => { setOutstandingTransfers(v); storeSet("ct-outstandingtransfers", v); },
   };
 
   function upsert(list, item) {
@@ -3738,8 +3951,8 @@ export default function App() {
 
   // Feature 13 (Phase 2) / Feature 16 (Phase 3): Audit Log helper. Records
   // every Return, Exchange, Delete Return, Delete Exchange, Promise
-  // Created/Edited/Completed/Cancelled/Broken/Deleted, and Invoice Status
-  // Change with user/date/time/reason.
+  // Created/Edited/Completed/Cancelled/Broken/Deleted, Outstanding Transfer
+  // Created/Reversed, and Invoice Status Change with user/date/time/reason.
   function logAudit(action, reference, reason) {
     const entry = {
       id: uid("al"), action, reference,
@@ -4027,6 +4240,49 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, promises.length]);
 
+  // ---------- Outstanding Transfer ----------
+
+  // Create Outstanding Transfer — moves outstanding balance from one
+  // customer to another. This is NOT a payment: it never touches the
+  // payments table, and both sides' ledger entries are derived purely
+  // from the transfer record inside computeLedgerForCustomer.
+  function createOutstandingTransfer(data) {
+    const counter = settings.transferCounter || 1;
+    const code = "OT-" + String(counter).padStart(4, "0");
+    const transfer = {
+      id: uid("ot"), code, status: "Active", date: todayISO(),
+      ...data,
+      createdBy: currentUser?.name || currentUser?.username || "Unknown",
+      createdAt: new Date().toISOString(),
+    };
+    persist.outstandingTransfers([...outstandingTransfers, transfer]);
+    persist.settings({ ...settings, transferCounter: counter + 1 });
+    logAudit(
+      "Outstanding Transfer",
+      `${code} — ${data.fromCustomerName} → ${data.toCustomerName} — Rs ${Number(data.amount).toLocaleString()}`,
+      data.reason
+    );
+  }
+
+  // Reverse Outstanding Transfer (admin-only, per UI gating) — soft-marks
+  // the transfer as Reversed. Since computeLedgerForCustomer only counts
+  // "Active" transfers, this automatically restores both customers'
+  // balances to what they were before the transfer.
+  function reverseOutstandingTransfer(transfer, reason) {
+    const updated = {
+      ...transfer, status: "Reversed",
+      reversedBy: currentUser?.name || currentUser?.username || "Unknown",
+      reversedAt: new Date().toISOString(),
+      reverseReason: reason,
+    };
+    persist.outstandingTransfers(upsert(outstandingTransfers, updated));
+    logAudit(
+      "Outstanding Transfer Reversed",
+      `${transfer.code} — ${transfer.fromCustomerName} → ${transfer.toCustomerName}`,
+      reason
+    );
+  }
+
   // Feature 12: Global search — resolves INV-xxxx / RET-xxxx-xx / EX-xxxx-xx
   // to the linked invoice and opens its detail (with full Return/Exchange history).
   function runGlobalSearch(query) {
@@ -4048,8 +4304,10 @@ export default function App() {
       setFocusInvoiceId(invoiceId);
     } else if (promises.some((p) => p.code.toUpperCase() === q)) {
       setPage("promises");
+    } else if (outstandingTransfers.some((t) => t.code.toUpperCase() === q)) {
+      setPage("outstandingTransfer");
     } else {
-      alert("Koi invoice, return, exchange ya promise is number se nahi mila.");
+      alert("Koi invoice, return, exchange, promise ya transfer is number se nahi mila.");
     }
   }
 
@@ -4082,6 +4340,7 @@ export default function App() {
         returns={returns}
         exchanges={exchanges}
         promises={promises}
+        transfers={outstandingTransfers}
         settings={settings}
         offers={offers}
         onLogout={() => setCurrentUser(null)}
@@ -4107,6 +4366,7 @@ export default function App() {
     if (data.creditNotes) persist.creditNotes(data.creditNotes);
     if (data.auditLog) persist.auditLog(data.auditLog);
     if (data.promises) persist.promises(data.promises);
+    if (data.outstandingTransfers) persist.outstandingTransfers(data.outstandingTransfers);
   }
 
   // Invoice EDIT: recompute totals, keep number/id, tag docStatus, log history,
@@ -4197,12 +4457,15 @@ export default function App() {
   const visibleExchanges = myBranchId ? exchanges.filter((e) => visibleCustomerIds.has(e.customerId)) : exchanges;
   const visibleCreditNotes = myBranchId ? creditNotes.filter((c) => visibleCustomerIds.has(c.customerId)) : creditNotes;
   const visiblePromises = myBranchId ? promises.filter((p) => visibleCustomerIds.has(p.customerId)) : promises;
+  const visibleTransfers = myBranchId
+    ? outstandingTransfers.filter((t) => visibleCustomerIds.has(t.fromCustomerId) || visibleCustomerIds.has(t.toCustomerId))
+    : outstandingTransfers;
 
   const pages = {
-    dashboard: <Dashboard customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} leads={visibleLeads} bookings={visibleBookings} onOpenPromises={() => setPage("promises")} />,
+    dashboard: <Dashboard customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} leads={visibleLeads} bookings={visibleBookings} onOpenPromises={() => setPage("promises")} />,
     customers: (
       <Customers
-        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises}
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers}
         saveCustomer={saveCustomer} deleteCustomer={deleteCustomer} openLedger={openLedger}
         branches={branches} currentUser={currentUser}
       />
@@ -4210,7 +4473,7 @@ export default function App() {
     invoices: (
       <Invoices
         customers={visibleCustomers} products={products} drivers={drivers} invoices={visibleInvoices} payments={visiblePayments}
-        returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises}
+        returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers}
         bookings={visibleBookings} settings={settings} currentUser={currentUser} saveInvoice={saveInvoice}
         updateInvoice={updateInvoice} cancelInvoice={cancelInvoiceFn}
         prefill={invoicePrefill} onClearPrefill={() => setInvoicePrefill(null)} onBookingFulfilled={markBookingFulfilled} onOrderFulfilled={markOrderFulfilled}
@@ -4222,8 +4485,15 @@ export default function App() {
     returns: <SalesReturnPage customers={visibleCustomers} invoices={visibleInvoices} returns={visibleReturns} exchanges={visibleExchanges} currentUser={currentUser} onCreateReturn={createSalesReturn} onDeleteReturn={deleteSalesReturn} />,
     exchange: <ExchangePage customers={visibleCustomers} products={products} invoices={visibleInvoices} returns={visibleReturns} exchanges={visibleExchanges} currentUser={currentUser} onCreateExchange={createExchangeFn} onDeleteExchange={deleteExchangeFn} />,
     creditNotes: <CreditNotesPage creditNotes={visibleCreditNotes} onLinkInvoice={linkCreditNoteToInvoice} />,
-    ledger: <LedgerView customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} focusId={ledgerFocusId} setFocusId={setLedgerFocusId} settings={settings} />,
+    ledger: <LedgerView customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} focusId={ledgerFocusId} setFocusId={setLedgerFocusId} settings={settings} />,
     payments: <Payments customers={visibleCustomers} payments={visiblePayments} promises={visiblePromises} savePayment={savePayment} />,
+    outstandingTransfer: (
+      <OutstandingTransferPage
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns}
+        exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} currentUser={currentUser}
+        onCreateTransfer={createOutstandingTransfer} onReverseTransfer={reverseOutstandingTransfer}
+      />
+    ),
     bookings: (
       <Bookings
         customers={visibleCustomers} products={products} bookings={visibleBookings} saveBooking={saveBooking}
@@ -4247,14 +4517,14 @@ export default function App() {
     products: <Products products={products} saveProduct={saveProduct} deleteProduct={deleteProduct} />,
     drivers: <Drivers drivers={drivers} saveDriver={saveDriver} deleteDriver={deleteDriver} />,
     offers: <Offers offers={offers} saveOffer={saveOffer} deleteOffer={deleteOffer} />,
-    reports: <Reports customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} leads={visibleLeads} bookings={visibleBookings} />,
-    assistant: <SalesAssistant customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} />,
+    reports: <Reports customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} leads={visibleLeads} bookings={visibleBookings} />,
+    assistant: <SalesAssistant customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} />,
     estimator: <CementEstimator />,
     settings: (
       <Settings
         settings={settings} saveSettings={saveSettings} users={users} saveUser={saveUser} deleteUser={deleteUser}
         currentUser={currentUser} onRestore={handleRestore}
-        allData={{ users, settings, customers, products, invoices, payments, bookings, leads, drivers, orders, branches, offers, returns, exchanges, creditNotes, auditLog, promises }}
+        allData={{ users, settings, customers, products, invoices, payments, bookings, leads, drivers, orders, branches, offers, returns, exchanges, creditNotes, auditLog, promises, outstandingTransfers }}
         branches={branches} saveBranch={saveBranch} deleteBranch={deleteBranch}
       />
     ),
@@ -4282,7 +4552,7 @@ export default function App() {
           <div className="flex-1 max-w-xs">
             <input
               className={`${inputCls} text-xs`}
-              placeholder="Search INV-xxxx / RET-xxxx-xx / EX-xxxx-xx / PTP-xxxx..."
+              placeholder="Search INV-xxxx / RET-xxxx-xx / EX-xxxx-xx / PTP-xxxx / OT-xxxx..."
               value={globalSearch}
               onChange={(e) => setGlobalSearch(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { runGlobalSearch(globalSearch); setGlobalSearch(""); } }}
