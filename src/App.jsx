@@ -145,6 +145,7 @@ const DEFAULT_SETTINGS = {
   creditNoteCounter: 1,
   promiseCounter: 1,
   transferCounter: 1,
+  adjustmentCounter: 1,
   logoUrl: "",
 };
 const DEFAULT_BRANCHES = [{ id: "branch_main", name: "Main Branch" }];
@@ -185,6 +186,7 @@ function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl }) {
     { id: "ledger", label: "Ledger", icon: "≡" },
     { id: "payments", label: "Payments", icon: "◎" },
     { id: "outstandingTransfer", label: "Outstanding Transfer", icon: "⇄" },
+    { id: "adjustments", label: "Adjustments", icon: "±" },
     { id: "bookings", label: "Advance Booking", icon: "▦" },
     { id: "orders", label: "Daily Orders", icon: "☎" },
     { id: "promises", label: "Promise To Pay", icon: "🤝" },
@@ -382,12 +384,25 @@ function isPaymentLinkedToCancelledInvoice(payment, invoices) {
 // before the transfer (same pattern as Deleted returns/exchanges above).
 // This is NOT a payment and never touches the payments table.
 //
+// Adjustment feature: also optionally takes `adjustments` ([] default,
+// same backward-compatible pattern). Only "Active" adjustments affect the
+// balance — a "Reversed" adjustment is excluded entirely, which
+// automatically restores the balance to what it was before the
+// adjustment (same pattern as transfers/returns/exchanges above). This is
+// NOT a payment or invoice and never touches those tables. Editing an
+// active adjustment updates its own amount/type in place — since the
+// ledger balance is recomputed fresh from every active adjustment's
+// current fields on every render (never stored incrementally), this
+// naturally "reverses the old amount and applies the new one" without
+// needing a separate reversal record, while editHistory keeps the audit
+// trail of what changed.
+//
 // BUGFIX (partial qty): Sales Return / Exchange ledger lines now also carry
 // the returned / new quantity (in the invoice line's own unit — Feet,
 // Meter, KG, Liter, Sq.Ft, etc.) so the Ledger view can show "what quantity
 // moved", not just the money amount. Quantities are rounded with roundQty
 // to avoid floating point drift (e.g. 5.999999999 instead of 6).
-function computeLedgerForCustomer(customer, invoices, payments, returns = [], exchanges = [], promises = [], transfers = []) {
+function computeLedgerForCustomer(customer, invoices, payments, returns = [], exchanges = [], promises = [], transfers = [], adjustments = []) {
   const entries = [];
   invoices
     .filter((i) => i.customerId === customer.id && !isInvoiceCancelled(i))
@@ -444,6 +459,15 @@ function computeLedgerForCustomer(customer, invoices, payments, returns = [], ex
         });
       }
     });
+  adjustments
+    .filter((a) => a.customerId === customer.id && a.status === "Active")
+    .forEach((a) =>
+      entries.push({
+        date: a.date, type: `Adjustment — ${a.category}`, ref: a.code,
+        debit: a.type === "Add" ? a.amount : 0, credit: a.type === "Reduce" ? a.amount : 0,
+        id: a.id, note: a.reason, adjNote: a.note,
+      })
+    );
   entries.sort((a, b) => new Date(a.date) - new Date(b.date));
   let bal = Number(customer.openingBalance) || 0;
   const withBalance = entries.map((e) => {
@@ -577,12 +601,24 @@ const TRANSFER_STATUS_TONE = {
   Reversed: "bg-slate-200 text-slate-600",
 };
 
+/* ---------------- Adjustment helpers ---------------- */
+
+const ADJUSTMENT_CATEGORIES = [
+  "Service / Kaam", "Transport", "Loading", "Unloading", "Labour", "Repair",
+  "Extra Charges", "Discount", "Compensation", "Balance Correction", "Other",
+];
+
+const ADJUSTMENT_STATUS_TONE = {
+  Active: "bg-emerald-100 text-emerald-700",
+  Reversed: "bg-slate-200 text-slate-600",
+};
+
 /* ---------------- Dashboard ---------------- */
 
-function Dashboard({ customers, invoices, payments, returns, exchanges, promises, transfers, leads, bookings, onOpenPromises }) {
+function Dashboard({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, onOpenPromises }) {
   const outstandingTotal = useMemo(() => {
-    return customers.reduce((sum, c) => sum + computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers).outstanding, 0);
-  }, [customers, invoices, payments, returns, exchanges, promises, transfers]);
+    return customers.reduce((sum, c) => sum + computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding, 0);
+  }, [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments]);
 
   const todaySales = useMemo(() => {
     const t = todayISO();
@@ -740,14 +776,14 @@ function CustomerForm({ initial, branches, currentUser, onSave, onCancel }) {
   );
 }
 
-function Customers({ customers, invoices, payments, returns, exchanges, promises, transfers, saveCustomer, deleteCustomer, openLedger, branches, currentUser }) {
+function Customers({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, saveCustomer, deleteCustomer, openLedger, branches, currentUser }) {
   const [modal, setModal] = useState(null); // null | 'new' | customer object
   const [q, setQ] = useState("");
 
   const rows = customers
     .filter((c) => c.name.toLowerCase().includes(q.toLowerCase()) || (c.phone || "").includes(q))
     .map((c) => {
-      const { outstanding } = computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers);
+      const { outstanding } = computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers, adjustments);
       return { ...c, outstanding };
     });
 
@@ -815,14 +851,27 @@ function Customers({ customers, invoices, payments, returns, exchanges, promises
 
 /* ---------------- Ledger view ---------------- */
 
-function LedgerView({ customers, invoices, payments, returns, exchanges, promises, transfers, focusId, setFocusId, settings }) {
+function LedgerView({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, focusId, setFocusId, settings, currentUser, onCreateAdjustment, onUpdateAdjustment, onReverseAdjustment }) {
   const customer = customers.find((c) => c.id === focusId) || customers[0];
+  const [showAdjForm, setShowAdjForm] = useState(false);
+  const [editingAdj, setEditingAdj] = useState(null);
+  const [reversingAdj, setReversingAdj] = useState(null);
+  const [adjReverseReason, setAdjReverseReason] = useState("");
+  const canManageAdj = currentUser?.role === "admin";
+
   if (!customer) return <div className="text-slate-400">Pehle koi customer add karein.</div>;
-  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers);
+  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
   const myPromises = (promises || []).filter((p) => p.customerId === customer.id && p.status !== "Deleted").map(promiseWithComputed);
+  const myAdjustments = (adjustments || []).filter((a) => a.customerId === customer.id).sort((a, b) => new Date(b.date) - new Date(a.date));
 
   function downloadPDF() {
     window.print();
+  }
+
+  function confirmReverseAdj() {
+    if (!adjReverseReason.trim()) { alert("Reverse ki wajah likhein."); return; }
+    onReverseAdjustment(reversingAdj, adjReverseReason.trim());
+    setReversingAdj(null); setAdjReverseReason("");
   }
 
   // BUGFIX: quantity moved (Invoice / Sales Return / Exchange) is now shown
@@ -848,6 +897,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
           Outstanding: <span className={`font-black ${outstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(outstanding)}</span>
         </div>
         <Btn variant="dark" onClick={downloadPDF}>Download PDF</Btn>
+        <Btn onClick={() => { setEditingAdj(null); setShowAdjForm(true); }}>+ Adjustment</Btn>
       </div>
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
@@ -915,6 +965,85 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
           </tbody>
         </table>
       </div>
+
+      {/* Adjustment History for this customer */}
+      <div className="mt-6 bg-white border border-slate-200 overflow-x-auto print:hidden">
+        <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Adjustment History</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Adj #</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">Type</th>
+              <th className="px-4 py-2">Category</th><th className="px-4 py-2 text-right">Amount</th>
+              <th className="px-4 py-2">Reason</th><th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {myAdjustments.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi adjustment nahi.</td></tr>}
+            {myAdjustments.map((a) => (
+              <tr key={a.id} className={`border-t border-slate-100 ${a.status === "Reversed" ? "opacity-50" : ""}`}>
+                <td className="px-4 py-2 font-black text-blue-700">{a.code}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(a.date)}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${a.type === "Add" ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"}`}>
+                    {a.type === "Add" ? "Add (+)" : "Reduce (-)"}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-slate-500">{a.category}</td>
+                <td className={`px-4 py-2 text-right font-bold ${a.type === "Add" ? "text-red-600" : "text-emerald-600"}`}>{a.type === "Add" ? "+" : "-"}{fmtMoney(a.amount)}</td>
+                <td className="px-4 py-2 text-slate-500 text-xs">{a.reason}</td>
+                <td className="px-4 py-2"><span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${ADJUSTMENT_STATUS_TONE[a.status] || "bg-slate-100 text-slate-500"}`}>{a.status}</span></td>
+                <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                  {a.status !== "Reversed" && canManageAdj && (
+                    <>
+                      <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => { setEditingAdj(a); setShowAdjForm(true); }}>Edit</button>
+                      <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setReversingAdj(a)}>Reverse</button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {showAdjForm && (
+        <Modal title={editingAdj ? `Edit Adjustment ${editingAdj.code}` : "New Adjustment"} onClose={() => { setShowAdjForm(false); setEditingAdj(null); }}>
+          <AdjustmentForm
+            customers={customers}
+            defaultCustomerId={customer.id}
+            invoices={invoices}
+            payments={payments}
+            returns={returns}
+            exchanges={exchanges}
+            promises={promises}
+            transfers={transfers}
+            adjustments={adjustments}
+            initial={editingAdj}
+            currentUser={currentUser}
+            onCancel={() => { setShowAdjForm(false); setEditingAdj(null); }}
+            onSave={(data) => {
+              if (editingAdj) onUpdateAdjustment(editingAdj, data);
+              else onCreateAdjustment(data);
+              setShowAdjForm(false); setEditingAdj(null);
+            }}
+          />
+        </Modal>
+      )}
+
+      {reversingAdj && (
+        <Modal title={`Reverse Adjustment ${reversingAdj.code}`} onClose={() => setReversingAdj(null)}>
+          <div className="text-sm text-slate-600 mb-3">
+            Ye adjustment reverse karne se <span className="font-bold">{reversingAdj.customerName}</span> ka balance is adjustment se pehle wali state mein wapis chala jayega.
+          </div>
+          <Field label="Reverse Reason">
+            <input className={inputCls} value={adjReverseReason} onChange={(e) => setAdjReverseReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmReverseAdj}>Confirm Reverse</Btn>
+            <Btn variant="ghost" onClick={() => setReversingAdj(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
 
       {/* Hidden printable ledger — only rendered visible during print/PDF export */}
       <div id="print-ledger" style={{ display: "none" }}>
@@ -997,7 +1126,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
 
 /* ---------------- Invoices ---------------- */
 
-function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
+function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
   const isEdit = !!editingInvoice;
   const [customerId, setCustomerId] = useState(editingInvoice?.customerId || prefill?.customerId || customers[0]?.id || "");
   const [date, setDate] = useState(editingInvoice?.date || todayISO());
@@ -1026,7 +1155,7 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const previousOutstanding = isEdit
     ? (editingInvoice.previousOutstanding || 0)
     : selectedCustomer
-    ? computeLedgerForCustomer(selectedCustomer, invoices, payments, returns, exchanges, promises, transfers).outstanding
+    ? computeLedgerForCustomer(selectedCustomer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding
     : 0;
 
   // Previously used "Issued To" names for this customer, so staff can
@@ -1494,7 +1623,7 @@ function buildInvoiceWaMessage(invoice, settings) {
   return lines.join("\n");
 }
 
-function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
+function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, adjustments, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
   const [showForm, setShowForm] = useState(false);
   const [editingInvoice, setEditingInvoice] = useState(null);
   const [viewing, setViewing] = useState(null);
@@ -1589,6 +1718,7 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
             exchanges={exchanges}
             promises={promises}
             transfers={transfers}
+            adjustments={adjustments}
             prefill={editingInvoice ? null : prefill}
             editingInvoice={editingInvoice}
             currentUser={currentUser}
@@ -1684,7 +1814,7 @@ function InvoiceHistoryPage({ invoices, auditLog }) {
 
       <h2 className="text-xl font-black uppercase tracking-tight mb-2">Audit Log</h2>
       <div className="text-xs text-slate-400 mb-4 max-w-2xl">
-        Sales Return, Exchange, Delete Return, Delete Exchange, Promise To Pay, Outstanding Transfer, aur Invoice Status Change ki har action yahan record hoti hai — user, date, time aur reason ke saath.
+        Sales Return, Exchange, Delete Return, Delete Exchange, Promise To Pay, Outstanding Transfer, Adjustment, aur Invoice Status Change ki har action yahan record hoti hai — user, date, time aur reason ke saath.
       </div>
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
@@ -2277,7 +2407,7 @@ function Payments({ customers, payments, promises, savePayment }) {
 
 /* ---------------- Outstanding Transfer ---------------- */
 
-function OutstandingTransferPage({ customers, invoices, payments, returns, exchanges, promises, transfers, currentUser, onCreateTransfer, onReverseTransfer }) {
+function OutstandingTransferPage({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, currentUser, onCreateTransfer, onReverseTransfer }) {
   const [showForm, setShowForm] = useState(false);
   const [fromCustomerId, setFromCustomerId] = useState("");
   const [toCustomerId, setToCustomerId] = useState("");
@@ -2292,10 +2422,10 @@ function OutstandingTransferPage({ customers, invoices, payments, returns, excha
   const toCustomer = customers.find((c) => c.id === toCustomerId);
 
   const fromOutstanding = fromCustomer
-    ? computeLedgerForCustomer(fromCustomer, invoices, payments, returns, exchanges, promises, transfers).outstanding
+    ? computeLedgerForCustomer(fromCustomer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding
     : 0;
   const toOutstanding = toCustomer
-    ? computeLedgerForCustomer(toCustomer, invoices, payments, returns, exchanges, promises, transfers).outstanding
+    ? computeLedgerForCustomer(toCustomer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding
     : 0;
 
   const amtNum = Number(amount) || 0;
@@ -2437,6 +2567,231 @@ function OutstandingTransferPage({ customers, invoices, payments, returns, excha
         <Modal title={`Reverse Transfer ${reversing.code}`} onClose={() => setReversing(null)}>
           <div className="text-sm text-slate-600 mb-3">
             Ye transfer reverse karne se <span className="font-bold">{reversing.fromCustomerName}</span> ka outstanding {fmtMoney(reversing.amount)} dobara increase ho jayega aur <span className="font-bold">{reversing.toCustomerName}</span> ka outstanding {fmtMoney(reversing.amount)} decrease ho jayega.
+          </div>
+          <Field label="Reverse Reason">
+            <input className={inputCls} value={reverseReason} onChange={(e) => setReverseReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmReverse}>Confirm Reverse</Btn>
+            <Btn variant="ghost" onClick={() => setReversing(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Adjustment ---------------- */
+
+// Reusable form used both from the per-customer Ledger view ("+ Adjustment"
+// button) and from the standalone Adjustments page. `initial` (when set)
+// puts the form in edit mode for an existing Active adjustment.
+function AdjustmentForm({ customers, defaultCustomerId, invoices, payments, returns, exchanges, promises, transfers, adjustments, initial, currentUser, onSave, onCancel }) {
+  const [customerId, setCustomerId] = useState(initial?.customerId || defaultCustomerId || customers[0]?.id || "");
+  const [custSearch, setCustSearch] = useState("");
+  const [type, setType] = useState(initial?.type || "Add");
+  const [amount, setAmount] = useState(initial?.amount ?? "");
+  const [category, setCategory] = useState(initial?.category || ADJUSTMENT_CATEGORIES[0]);
+  const [reason, setReason] = useState(initial?.reason || "");
+  const [note, setNote] = useState(initial?.note || "");
+  const [date, setDate] = useState(initial?.date || todayISO());
+  const [error, setError] = useState("");
+
+  const customer = customers.find((c) => c.id === customerId);
+  // Current balance BEFORE this adjustment: when editing, the active
+  // adjustment is excluded from the ledger calc so the preview reflects
+  // "balance without this adjustment", then the new amount is applied on
+  // top — this is what makes edit safely reverse-then-reapply.
+  const otherAdjustments = (adjustments || []).filter((a) => a.id !== initial?.id);
+  const currentBalance = customer
+    ? computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, otherAdjustments).outstanding
+    : 0;
+  const amtNum = Number(amount) || 0;
+  const newBalance = type === "Add" ? currentBalance + amtNum : currentBalance - amtNum;
+
+  const filteredCustomers = customers.filter((c) => c.name.toLowerCase().includes(custSearch.toLowerCase()));
+  const isEdit = !!initial;
+
+  function submit() {
+    if (!customerId) { setError("Customer select karein."); return; }
+    if (!amtNum || amtNum <= 0) { setError("Amount 0 se zyada hona chahiye."); return; }
+    if (!reason.trim()) { setError("Reason likhna zaroori hai."); return; }
+    const cust = customers.find((c) => c.id === customerId);
+    setError("");
+    onSave({
+      customerId, customerName: cust.name, type, amount: amtNum, category,
+      reason: reason.trim(), note: note.trim(), date,
+    });
+  }
+
+  return (
+    <div>
+      {!isEdit && (
+        <Field label="Customer">
+          <input className={`${inputCls} mb-1`} placeholder="Search customer..." value={custSearch} onChange={(e) => setCustSearch(e.target.value)} />
+          <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+            <option value="">Select Customer</option>
+            {filteredCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </Field>
+      )}
+      {isEdit && (
+        <div className="text-sm font-bold text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2 mb-3">{customer?.name}</div>
+      )}
+      {customer && (
+        <div className="text-xs text-slate-500 mb-3">
+          Current Balance: <span className={`font-black ${currentBalance > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(currentBalance)}</span>
+        </div>
+      )}
+
+      <Field label="Adjustment Type">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setType("Add")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${type === "Add" ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-300"}`}>Add Balance (+)</button>
+          <button type="button" onClick={() => setType("Reduce")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${type === "Reduce" ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300"}`}>Reduce Balance (-)</button>
+        </div>
+      </Field>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Amount (Rs)">
+          <input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </Field>
+        <Field label="Category">
+          <select className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}>
+            {ADJUSTMENT_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+          </select>
+        </Field>
+      </div>
+
+      <Field label="Reason">
+        <input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Customer ke liye transport service" />
+      </Field>
+      <Field label="Note (optional)">
+        <input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Delivery charges adjustment" />
+      </Field>
+      <Field label="Date">
+        <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
+      </Field>
+
+      {customer && (
+        <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
+          <div className="flex justify-between"><span>Current Balance</span><span className="font-bold">{fmtMoney(currentBalance)}</span></div>
+          <div className="flex justify-between"><span>Adjustment</span><span className={`font-bold ${type === "Add" ? "text-red-600" : "text-emerald-600"}`}>{type === "Add" ? "+" : "-"}{fmtMoney(amtNum)}</span></div>
+          <div className="flex justify-between border-t border-slate-300 pt-1"><span className="font-bold">New Balance</span><span className={`font-black ${newBalance > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(newBalance)}</span></div>
+        </div>
+      )}
+
+      {error && <div className="text-red-600 text-sm font-semibold mt-3">{error}</div>}
+      <div className="flex gap-2 mt-4">
+        <Btn onClick={submit}>{isEdit ? "Save Changes" : "Save Adjustment"}</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function AdjustmentsPage({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, currentUser, onCreateAdjustment, onUpdateAdjustment, onReverseAdjustment }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [reversing, setReversing] = useState(null);
+  const [reverseReason, setReverseReason] = useState("");
+  const [q, setQ] = useState("");
+
+  const canManage = currentUser?.role === "admin";
+
+  const sorted = [...adjustments]
+    .filter((a) => !q.trim() || a.customerName.toLowerCase().includes(q.toLowerCase()) || a.code.toLowerCase().includes(q.toLowerCase()) || a.category.toLowerCase().includes(q.toLowerCase()))
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  function confirmReverse() {
+    if (!reverseReason.trim()) { alert("Reverse ki wajah likhein."); return; }
+    onReverseAdjustment(reversing, reverseReason.trim());
+    setReversing(null); setReverseReason("");
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Adjustments</h2>
+        <Btn onClick={() => { setEditing(null); setShowForm(true); }} disabled={customers.length === 0}>+ Adjustment</Btn>
+      </div>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Kisi customer ke balance ko manually increase ya decrease karein — bina fake invoice ya fake payment ke. Transport, labour, repair, discount, compensation ya balance correction jaisi real business situations ke liye.
+      </div>
+
+      <input className={`${inputCls} mb-3 max-w-xs`} placeholder="Search customer / adj # / category..." value={q} onChange={(e) => setQ(e.target.value)} />
+
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Adj #</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">Customer</th>
+              <th className="px-4 py-2">Type</th><th className="px-4 py-2">Category</th><th className="px-4 py-2 text-right">Amount</th>
+              <th className="px-4 py-2">Reason</th><th className="px-4 py-2">Created By</th><th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-slate-400">Koi adjustment nahi hua abhi tak.</td></tr>}
+            {sorted.map((a) => (
+              <tr key={a.id} className={`border-t border-slate-100 ${a.status === "Reversed" ? "opacity-50" : ""}`}>
+                <td className="px-4 py-2 font-black text-blue-700">{a.code}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(a.date)}</td>
+                <td className="px-4 py-2 font-bold">{a.customerName}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${a.type === "Add" ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"}`}>
+                    {a.type === "Add" ? "Add (+)" : "Reduce (-)"}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-slate-500">{a.category}</td>
+                <td className={`px-4 py-2 text-right font-bold ${a.type === "Add" ? "text-red-600" : "text-emerald-600"}`}>{a.type === "Add" ? "+" : "-"}{fmtMoney(a.amount)}</td>
+                <td className="px-4 py-2 text-slate-500 text-xs">{a.reason}{a.note ? <div className="text-slate-400">{a.note}</div> : null}</td>
+                <td className="px-4 py-2 text-slate-500">{a.createdBy}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${ADJUSTMENT_STATUS_TONE[a.status] || "bg-slate-100 text-slate-500"}`}>{a.status}</span>
+                  {a.status === "Reversed" && a.reverseReason && (
+                    <div className="text-[10px] text-slate-400 mt-1">Reason: {a.reverseReason}</div>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                  {a.status !== "Reversed" && canManage && (
+                    <>
+                      <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => { setEditing(a); setShowForm(true); }}>Edit</button>
+                      <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setReversing(a)}>Reverse</button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {showForm && (
+        <Modal title={editing ? `Edit Adjustment ${editing.code}` : "New Adjustment"} onClose={() => { setShowForm(false); setEditing(null); }}>
+          <AdjustmentForm
+            customers={customers}
+            invoices={invoices}
+            payments={payments}
+            returns={returns}
+            exchanges={exchanges}
+            promises={promises}
+            transfers={transfers}
+            adjustments={adjustments}
+            initial={editing}
+            currentUser={currentUser}
+            onCancel={() => { setShowForm(false); setEditing(null); }}
+            onSave={(data) => {
+              if (editing) onUpdateAdjustment(editing, data);
+              else onCreateAdjustment(data);
+              setShowForm(false); setEditing(null);
+            }}
+          />
+        </Modal>
+      )}
+
+      {reversing && (
+        <Modal title={`Reverse Adjustment ${reversing.code}`} onClose={() => setReversing(null)}>
+          <div className="text-sm text-slate-600 mb-3">
+            Ye adjustment reverse karne se <span className="font-bold">{reversing.customerName}</span> ka balance is adjustment se pehle wali state mein wapis chala jayega. Original adjustment aur ye reversal dono history mein visible rahenge.
           </div>
           <Field label="Reverse Reason">
             <input className={inputCls} value={reverseReason} onChange={(e) => setReverseReason(e.target.value)} autoFocus />
@@ -3334,7 +3689,7 @@ function Drivers({ drivers, saveDriver, deleteDriver }) {
 
 /* ---------------- Reports ---------------- */
 
-function Reports({ customers, invoices, payments, returns, exchanges, promises, transfers, leads, bookings }) {
+function Reports({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings }) {
   const [from, setFrom] = useState(todayISO().slice(0, 8) + "01");
   const [to, setTo] = useState(todayISO());
   const [promiseTab, setPromiseTab] = useState("today");
@@ -3347,9 +3702,16 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
 
   const byCustomer = {};
   customers.forEach((c) => {
-    const { outstanding } = computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers);
+    const { outstanding } = computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers, adjustments);
     if (outstanding !== 0) byCustomer[c.name] = outstanding;
   });
+
+  // Adjustments in range (kept separate from sales/payment totals so
+  // reports never conflate real business adjustments with actual sales
+  // revenue or cash collected).
+  const adjustmentsInRange = (adjustments || []).filter((a) => a.status === "Active" && a.date >= from && a.date <= to);
+  const adjustmentsAddTotal = adjustmentsInRange.filter((a) => a.type === "Add").reduce((s, a) => s + a.amount, 0);
+  const adjustmentsReduceTotal = adjustmentsInRange.filter((a) => a.type === "Reduce").reduce((s, a) => s + a.amount, 0);
 
   function exportCSV() {
     const rows = [["Invoice", "Customer", "Date", "Total", "Received", "Balance", "Status"]];
@@ -3400,6 +3762,8 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
         <Stat label="Sales in Range" value={fmtMoney(salesTotal)} />
         <Stat label="Collected in Range" value={fmtMoney(collected)} accent="text-emerald-600" />
         <Stat label="Invoices" value={inRange.length} />
+        <Stat label="Adjustments Added" value={fmtMoney(adjustmentsAddTotal)} accent="text-red-600" />
+        <Stat label="Adjustments Reduced" value={fmtMoney(adjustmentsReduceTotal)} accent="text-emerald-600" />
       </div>
       <div className="bg-white border border-slate-200 mb-8">
         <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Customers with Outstanding Balance</div>
@@ -3459,7 +3823,7 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
 
 /* ---------------- Sales Assistant ---------------- */
 
-function SalesAssistant({ customers, invoices, payments, returns, exchanges, promises, transfers }) {
+function SalesAssistant({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments }) {
   const [customerId, setCustomerId] = useState(customers[0]?.id || "");
   const [lang, setLang] = useState("ur");
   const [audience, setAudience] = useState("Builder");
@@ -3470,7 +3834,7 @@ function SalesAssistant({ customers, invoices, payments, returns, exchanges, pro
 
   if (customers.length === 0) return <div className="text-slate-400">Pehle Customers tab mein customer add karein.</div>;
 
-  const outstanding = customer ? computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers).outstanding : 0;
+  const outstanding = customer ? computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding : 0;
   const message = MESSAGE_TEMPLATES[lang][audience](customer?.name || "", outstanding);
 
   function copy() {
@@ -3559,11 +3923,11 @@ function CementEstimator() {
 
 /* ---------------- Customer Portal ---------------- */
 
-function CustomerPortal({ currentUser, customers, invoices, payments, returns, exchanges, promises, transfers, settings, offers, onLogout }) {
+function CustomerPortal({ currentUser, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, settings, offers, onLogout }) {
   const [viewing, setViewing] = useState(null);
   const customer = customers.find((c) => c.id === currentUser.id);
   if (!customer) return <div className="p-6">Account nahi mila, admin se rabta karein.</div>;
-  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers);
+  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
   const myInvoices = [...invoices].filter((i) => i.customerId === customer.id).sort((a, b) => new Date(b.date) - new Date(a.date));
 
   const activeOffers = (offers || []).filter((o) => o.active);
@@ -3868,10 +4232,11 @@ export default function App() {
   const [auditLog, setAuditLog] = useState([]);
   const [promises, setPromises] = useState([]);
   const [outstandingTransfers, setOutstandingTransfers] = useState([]);
+  const [adjustments, setAdjustments] = useState([]);
 
   useEffect(() => {
     (async () => {
-      const [u, s, c, p, i, pay, bk, ld, dr, ord, br, off, ret, exc, cn, al, pr, ot] = await Promise.all([
+      const [u, s, c, p, i, pay, bk, ld, dr, ord, br, off, ret, exc, cn, al, pr, ot, adj] = await Promise.all([
         storeGet("ct-users", DEFAULT_USERS),
         storeGet("ct-settings", DEFAULT_SETTINGS),
         storeGet("ct-customers", []),
@@ -3890,10 +4255,11 @@ export default function App() {
         storeGet("ct-auditlog", []),
         storeGet("ct-promises", []),
         storeGet("ct-outstandingtransfers", []),
+        storeGet("ct-adjustments", []),
       ]);
       setUsers(u); setSettings(s); setCustomers(c); setProducts(p);
       setInvoices(i); setPayments(pay); setBookings(bk); setLeads(ld); setDrivers(dr); setOrders(ord); setBranches(br); setOffers(off);
-      setReturns(ret); setExchanges(exc); setCreditNotes(cn); setAuditLog(al); setPromises(pr); setOutstandingTransfers(ot);
+      setReturns(ret); setExchanges(exc); setCreditNotes(cn); setAuditLog(al); setPromises(pr); setOutstandingTransfers(ot); setAdjustments(adj);
       if (u.length === 0) { setUsers(DEFAULT_USERS); await storeSet("ct-users", DEFAULT_USERS); }
       setLoading(false);
     })();
@@ -3910,6 +4276,7 @@ export default function App() {
       "ct-orders": setOrders, "ct-branches": setBranches, "ct-offers": setOffers,
       "ct-returns": setReturns, "ct-exchanges": setExchanges, "ct-creditnotes": setCreditNotes,
       "ct-auditlog": setAuditLog, "ct-promises": setPromises, "ct-outstandingtransfers": setOutstandingTransfers,
+      "ct-adjustments": setAdjustments,
     };
     const channel = supabase
       .channel("kv_store-changes")
@@ -3941,6 +4308,7 @@ export default function App() {
     auditLog: (v) => { setAuditLog(v); storeSet("ct-auditlog", v); },
     promises: (v) => { setPromises(v); storeSet("ct-promises", v); },
     outstandingTransfers: (v) => { setOutstandingTransfers(v); storeSet("ct-outstandingtransfers", v); },
+    adjustments: (v) => { setAdjustments(v); storeSet("ct-adjustments", v); },
   };
 
   function upsert(list, item) {
@@ -4283,6 +4651,78 @@ export default function App() {
     );
   }
 
+  // ---------- Adjustment ----------
+
+  // Create Adjustment — manually increases ("Add") or decreases ("Reduce")
+  // a customer's outstanding balance for a real business reason (transport,
+  // labour, repair, discount, compensation, balance correction, etc).
+  // This is NOT a payment or invoice: it never touches the payments or
+  // invoices tables. Ledger effect is derived purely from this record
+  // inside computeLedgerForCustomer.
+  function createOutstandingAdjustment(data) {
+    const counter = settings.adjustmentCounter || 1;
+    const code = "ADJ-" + String(counter).padStart(4, "0");
+    const adjustment = {
+      id: uid("adj"), code, status: "Active",
+      ...data,
+      createdBy: currentUser?.name || currentUser?.username || "Unknown",
+      createdAt: new Date().toISOString(),
+      editHistory: [],
+    };
+    persist.adjustments([...adjustments, adjustment]);
+    persist.settings({ ...settings, adjustmentCounter: counter + 1 });
+    logAudit(
+      "Adjustment Created",
+      `${code} — ${data.customerName} — ${data.type === "Add" ? "+" : "-"}Rs ${Number(data.amount).toLocaleString()} (${data.category})`,
+      data.reason
+    );
+  }
+
+  // Edit Adjustment (admin-only, per UI gating) — updates the same Active
+  // record's type/amount/category/reason/note/date in place. Since the
+  // ledger balance is recomputed fresh from every active adjustment's
+  // current fields (never stored incrementally), this correctly "reverses
+  // the old amount and applies the new one" without corrupting the ledger.
+  // previousValues/newValues are kept in editHistory for a full audit trail.
+  function updateOutstandingAdjustment(original, data) {
+    const editedBy = currentUser?.name || currentUser?.username || "Unknown";
+    const editedAt = new Date().toISOString();
+    const previousValues = { type: original.type, amount: original.amount, category: original.category, reason: original.reason };
+    const newValues = { type: data.type, amount: data.amount, category: data.category, reason: data.reason };
+    const historyEntry = { action: "Edited", editedBy, editedAt, previousValues, newValues };
+    const updated = {
+      ...original, ...data,
+      editHistory: [...(original.editHistory || []), historyEntry],
+    };
+    persist.adjustments(upsert(adjustments, updated));
+    logAudit(
+      "Adjustment Edited",
+      `${original.code} — ${data.customerName} — ${data.type === "Add" ? "+" : "-"}Rs ${Number(data.amount).toLocaleString()} (${data.category})`,
+      `Was: ${original.type === "Add" ? "+" : "-"}Rs ${Number(original.amount).toLocaleString()} (${original.category})`
+    );
+  }
+
+  // Reverse Adjustment (admin-only, per UI gating) — soft-marks the
+  // adjustment as Reversed rather than deleting it. Since
+  // computeLedgerForCustomer only counts "Active" adjustments, this
+  // automatically restores the customer's balance to what it was before
+  // the adjustment while keeping both the original and the reversal
+  // visible in history/audit.
+  function reverseOutstandingAdjustment(adjustment, reason) {
+    const updated = {
+      ...adjustment, status: "Reversed",
+      reversedBy: currentUser?.name || currentUser?.username || "Unknown",
+      reversedAt: new Date().toISOString(),
+      reverseReason: reason,
+    };
+    persist.adjustments(upsert(adjustments, updated));
+    logAudit(
+      "Adjustment Reversed",
+      `${adjustment.code} — ${adjustment.customerName} — ${adjustment.type === "Add" ? "+" : "-"}Rs ${Number(adjustment.amount).toLocaleString()}`,
+      reason
+    );
+  }
+
   // Feature 12: Global search — resolves INV-xxxx / RET-xxxx-xx / EX-xxxx-xx
   // to the linked invoice and opens its detail (with full Return/Exchange history).
   function runGlobalSearch(query) {
@@ -4306,8 +4746,10 @@ export default function App() {
       setPage("promises");
     } else if (outstandingTransfers.some((t) => t.code.toUpperCase() === q)) {
       setPage("outstandingTransfer");
+    } else if (adjustments.some((a) => a.code.toUpperCase() === q)) {
+      setPage("adjustments");
     } else {
-      alert("Koi invoice, return, exchange, promise ya transfer is number se nahi mila.");
+      alert("Koi invoice, return, exchange, promise, transfer ya adjustment is number se nahi mila.");
     }
   }
 
@@ -4341,6 +4783,7 @@ export default function App() {
         exchanges={exchanges}
         promises={promises}
         transfers={outstandingTransfers}
+        adjustments={adjustments}
         settings={settings}
         offers={offers}
         onLogout={() => setCurrentUser(null)}
@@ -4367,6 +4810,7 @@ export default function App() {
     if (data.auditLog) persist.auditLog(data.auditLog);
     if (data.promises) persist.promises(data.promises);
     if (data.outstandingTransfers) persist.outstandingTransfers(data.outstandingTransfers);
+    if (data.adjustments) persist.adjustments(data.adjustments);
   }
 
   // Invoice EDIT: recompute totals, keep number/id, tag docStatus, log history,
@@ -4460,12 +4904,15 @@ export default function App() {
   const visibleTransfers = myBranchId
     ? outstandingTransfers.filter((t) => visibleCustomerIds.has(t.fromCustomerId) || visibleCustomerIds.has(t.toCustomerId))
     : outstandingTransfers;
+  const visibleAdjustments = myBranchId
+    ? adjustments.filter((a) => visibleCustomerIds.has(a.customerId))
+    : adjustments;
 
   const pages = {
-    dashboard: <Dashboard customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} leads={visibleLeads} bookings={visibleBookings} onOpenPromises={() => setPage("promises")} />,
+    dashboard: <Dashboard customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} leads={visibleLeads} bookings={visibleBookings} onOpenPromises={() => setPage("promises")} />,
     customers: (
       <Customers
-        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers}
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments}
         saveCustomer={saveCustomer} deleteCustomer={deleteCustomer} openLedger={openLedger}
         branches={branches} currentUser={currentUser}
       />
@@ -4473,7 +4920,7 @@ export default function App() {
     invoices: (
       <Invoices
         customers={visibleCustomers} products={products} drivers={drivers} invoices={visibleInvoices} payments={visiblePayments}
-        returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers}
+        returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments}
         bookings={visibleBookings} settings={settings} currentUser={currentUser} saveInvoice={saveInvoice}
         updateInvoice={updateInvoice} cancelInvoice={cancelInvoiceFn}
         prefill={invoicePrefill} onClearPrefill={() => setInvoicePrefill(null)} onBookingFulfilled={markBookingFulfilled} onOrderFulfilled={markOrderFulfilled}
@@ -4485,13 +4932,27 @@ export default function App() {
     returns: <SalesReturnPage customers={visibleCustomers} invoices={visibleInvoices} returns={visibleReturns} exchanges={visibleExchanges} currentUser={currentUser} onCreateReturn={createSalesReturn} onDeleteReturn={deleteSalesReturn} />,
     exchange: <ExchangePage customers={visibleCustomers} products={products} invoices={visibleInvoices} returns={visibleReturns} exchanges={visibleExchanges} currentUser={currentUser} onCreateExchange={createExchangeFn} onDeleteExchange={deleteExchangeFn} />,
     creditNotes: <CreditNotesPage creditNotes={visibleCreditNotes} onLinkInvoice={linkCreditNoteToInvoice} />,
-    ledger: <LedgerView customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} focusId={ledgerFocusId} setFocusId={setLedgerFocusId} settings={settings} />,
+    ledger: (
+      <LedgerView
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges}
+        promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments}
+        focusId={ledgerFocusId} setFocusId={setLedgerFocusId} settings={settings} currentUser={currentUser}
+        onCreateAdjustment={createOutstandingAdjustment} onUpdateAdjustment={updateOutstandingAdjustment} onReverseAdjustment={reverseOutstandingAdjustment}
+      />
+    ),
     payments: <Payments customers={visibleCustomers} payments={visiblePayments} promises={visiblePromises} savePayment={savePayment} />,
     outstandingTransfer: (
       <OutstandingTransferPage
         customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns}
-        exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} currentUser={currentUser}
+        exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} currentUser={currentUser}
         onCreateTransfer={createOutstandingTransfer} onReverseTransfer={reverseOutstandingTransfer}
+      />
+    ),
+    adjustments: (
+      <AdjustmentsPage
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns}
+        exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} currentUser={currentUser}
+        onCreateAdjustment={createOutstandingAdjustment} onUpdateAdjustment={updateOutstandingAdjustment} onReverseAdjustment={reverseOutstandingAdjustment}
       />
     ),
     bookings: (
@@ -4517,14 +4978,14 @@ export default function App() {
     products: <Products products={products} saveProduct={saveProduct} deleteProduct={deleteProduct} />,
     drivers: <Drivers drivers={drivers} saveDriver={saveDriver} deleteDriver={deleteDriver} />,
     offers: <Offers offers={offers} saveOffer={saveOffer} deleteOffer={deleteOffer} />,
-    reports: <Reports customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} leads={visibleLeads} bookings={visibleBookings} />,
-    assistant: <SalesAssistant customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} />,
+    reports: <Reports customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} leads={visibleLeads} bookings={visibleBookings} />,
+    assistant: <SalesAssistant customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} />,
     estimator: <CementEstimator />,
     settings: (
       <Settings
         settings={settings} saveSettings={saveSettings} users={users} saveUser={saveUser} deleteUser={deleteUser}
         currentUser={currentUser} onRestore={handleRestore}
-        allData={{ users, settings, customers, products, invoices, payments, bookings, leads, drivers, orders, branches, offers, returns, exchanges, creditNotes, auditLog, promises, outstandingTransfers }}
+        allData={{ users, settings, customers, products, invoices, payments, bookings, leads, drivers, orders, branches, offers, returns, exchanges, creditNotes, auditLog, promises, outstandingTransfers, adjustments }}
         branches={branches} saveBranch={saveBranch} deleteBranch={deleteBranch}
       />
     ),
@@ -4552,7 +5013,7 @@ export default function App() {
           <div className="flex-1 max-w-xs">
             <input
               className={`${inputCls} text-xs`}
-              placeholder="Search INV-xxxx / RET-xxxx-xx / EX-xxxx-xx / PTP-xxxx / OT-xxxx..."
+              placeholder="Search INV-xxxx / RET-xxxx-xx / EX-xxxx-xx / PTP-xxxx / OT-xxxx / ADJ-xxxx..."
               value={globalSearch}
               onChange={(e) => setGlobalSearch(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") { runGlobalSearch(globalSearch); setGlobalSearch(""); } }}
