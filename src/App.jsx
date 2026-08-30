@@ -3689,7 +3689,7 @@ function Drivers({ drivers, saveDriver, deleteDriver }) {
 
 /* ---------------- Reports ---------------- */
 
-function Reports({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings }) {
+function Reports({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, masters, masterPayments, masterAdjustments }) {
   const [from, setFrom] = useState(todayISO().slice(0, 8) + "01");
   const [to, setTo] = useState(todayISO());
   const [promiseTab, setPromiseTab] = useState("today");
@@ -3791,7 +3791,7 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
           <Btn variant="ghost" small onClick={exportPromisePDF}>Export PDF</Btn>
         </div>
       </div>
-      <div className="bg-white border border-slate-200 overflow-x-auto">
+      <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
@@ -3817,6 +3817,8 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
           </tbody>
         </table>
       </div>
+
+      {masters && <MistriReportsBlock customers={customers} invoices={invoices} returns={returns} exchanges={exchanges} masters={masters} masterPayments={masterPayments} masterAdjustments={masterAdjustments} />}
     </div>
   );
 }
