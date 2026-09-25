@@ -587,6 +587,22 @@ function I18nDomBridge() {
       ? '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif'
       : 'Inter, Arial, sans-serif';
 
+    // Build a reverse dictionary as well, so switching back to English
+    // restores the original UI text instead of leaving translated strings behind.
+    const urduToEnglish = {};
+    Object.entries(translations.ur || {}).forEach(([english, urdu]) => {
+      if (urdu && urdu !== english && urduToEnglish[urdu] == null) urduToEnglish[urdu] = english;
+    });
+    Object.entries(statusTranslations || {}).forEach(([english, urdu]) => {
+      if (urdu && urdu !== english && urduToEnglish[urdu] == null) urduToEnglish[urdu] = english;
+    });
+
+    const translateValue = (value) => {
+      if (!value) return value;
+      if (language === "ur") return translations.ur[value] || statusTranslations[value] || value;
+      return urduToEnglish[value] || value;
+    };
+
     const root = document.body;
     const shouldSkip = (node) => {
       const el = node.parentElement;
@@ -597,7 +613,6 @@ function I18nDomBridge() {
     };
 
     const translate = () => {
-      if (language === "en") return;
       const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       const nodes = [];
       let node;
@@ -607,25 +622,26 @@ function I18nDomBridge() {
         const raw = textNode.nodeValue || "";
         const trimmed = raw.trim();
         if (!trimmed || trimmed.length > 180) return;
-        const translated = t(trimmed);
+        const translated = translateValue(trimmed);
         if (translated !== trimmed) {
           textNode.nodeValue = raw.replace(trimmed, translated);
         }
       });
+
       root.querySelectorAll("input[placeholder], textarea[placeholder], [title], [aria-label]").forEach((el) => {
         ["placeholder", "title", "aria-label"].forEach((attr) => {
           if (!el.hasAttribute(attr)) return;
           const value = el.getAttribute(attr);
           if (value && value.length < 180) {
-            const translated = t(value);
+            const translated = translateValue(value);
             if (translated !== value) el.setAttribute(attr, translated);
           }
         });
       });
     };
 
-    // Run after React paints. React may add modal/table content later, so a
-    // lightweight observer translates newly rendered UI strings as well.
+    // React may repaint literal English strings after the language state changes,
+    // so translate after paint and whenever new UI nodes are inserted.
     const raf = requestAnimationFrame(translate);
     const observer = new MutationObserver(() => requestAnimationFrame(translate));
     observer.observe(root, { childList: true, subtree: true });
