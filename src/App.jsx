@@ -1128,7 +1128,15 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
 
 function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
   const isEdit = !!editingInvoice;
+  // Cash Customer / Walk-In: customerType is "Regular" (existing workflow,
+  // unchanged) or "Cash" (no customer account required). The type is fixed
+  // once an invoice is created, so the toggle is only shown for new invoices.
+  const [customerType, setCustomerType] = useState(editingInvoice?.customerType || "Regular");
+  const canChangeCustomerType = !isEdit;
   const [customerId, setCustomerId] = useState(editingInvoice?.customerId || prefill?.customerId || customers[0]?.id || "");
+  const [cashName, setCashName] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerName || "") : "");
+  const [cashPhone, setCashPhone] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerPhone || "") : "");
+  const [cashAddress, setCashAddress] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerAddress || "") : "");
   const [date, setDate] = useState(editingInvoice?.date || todayISO());
   const [items, setItems] = useState(
     editingInvoice
@@ -1151,8 +1159,12 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
 
   const matchedDriver = drivers.find((d) => d.code.toLowerCase() === driverIdInput.trim().toLowerCase());
 
-  const selectedCustomer = customers.find((c) => c.id === customerId);
-  const previousOutstanding = isEdit
+  const selectedCustomer = customerType === "Regular" ? customers.find((c) => c.id === customerId) : null;
+  // Cash Customer / Walk-In never carries an outstanding balance — it has
+  // no customer account, no opening balance, and no ledger of its own.
+  const previousOutstanding = customerType === "Cash"
+    ? 0
+    : isEdit
     ? (editingInvoice.previousOutstanding || 0)
     : selectedCustomer
     ? computeLedgerForCustomer(selectedCustomer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding
@@ -1172,6 +1184,15 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const total = subtotal + (Number(rickshawRent) || 0) + (Number(deliveryCharges) || 0) - (Number(discount) || 0);
   const balanceDue = total - (Number(paymentReceived) || 0);
 
+  // Cash Customer / Walk-In: Invoice Total = Cash Received, always. Keep
+  // the payment field synced to the total so the invoice is always fully
+  // paid with zero outstanding, per the Cash Sale workflow.
+  useEffect(() => {
+    if (customerType === "Cash") {
+      setPaymentReceived(total);
+    }
+  }, [customerType, total]);
+
   function updateItem(id, patch) {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
   }
@@ -1187,20 +1208,39 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   }
 
   function submit() {
-    const customer = customers.find((c) => c.id === customerId);
-    if (!customer) { alert("Pehle customer select karein."); return; }
+    let customer = null;
+    if (customerType === "Regular") {
+      customer = customers.find((c) => c.id === customerId);
+      if (!customer) { alert("Pehle customer select karein."); return; }
+    }
     const cleanItems = items.filter((it) => it.name && Number(it.qty) > 0);
     if (cleanItems.length === 0) { alert("Kam az kam ek item add karein."); return; }
     const issuedTo = issuedToName.trim()
       ? { name: issuedToName.trim(), phone: issuedToPhone.trim(), relation: issuedToRelation, remarks: issuedToRemarks.trim() }
       : null;
 
+    // Cash Customer / Walk-In: no customer account required. Name/phone/
+    // address are optional free-text fields, defaulting to "Cash Customer"
+    // when no name is entered. Invoice Total = Cash Received, so the
+    // invoice is always fully paid with zero outstanding balance.
+    const finalCustomerId = customerType === "Cash" ? (isEdit ? editingInvoice.customerId : uid("cash")) : customerId;
+    const finalCustomerName = customerType === "Cash" ? (cashName.trim() || "Cash Customer") : customer.name;
+    const finalCustomerPhone = customerType === "Cash" ? cashPhone.trim() : (customer.phone || "");
+    const finalCustomerAddress = customerType === "Cash" ? cashAddress.trim() : (customer.address || "");
+    const finalPaymentReceived = customerType === "Cash" ? total : (Number(paymentReceived) || 0);
+    const finalBalanceDue = total - finalPaymentReceived;
+
     const base = {
-      customerId,
-      customerName: customer.name,
-      customerPhone: customer.phone || "",
-      customerAddress: customer.address || "",
-      previousOutstanding,
+      customerId: finalCustomerId,
+      customerName: finalCustomerName,
+      customerPhone: finalCustomerPhone,
+      customerAddress: finalCustomerAddress,
+      customerType,
+      // A Cash Customer / Walk-In invoice belongs to the branch that
+      // created it (there is no customer record to derive the branch
+      // from), so it stays visible in that branch's invoice list.
+      branchId: currentUser?.branchId || "",
+      previousOutstanding: customerType === "Cash" ? 0 : previousOutstanding,
       date,
       // BUGFIX: item qty (which may be a fractional Feet/Meter/KG/Liter/
       // Sq.Ft amount) and total are rounded so the per-unit rate derived
@@ -1216,9 +1256,9 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
       receivedBy,
       subtotal,
       total,
-      paymentReceived: Number(paymentReceived) || 0,
-      balanceDue,
-      status: balanceDue <= 0 ? "Paid" : paymentReceived > 0 ? "Partial" : "Unpaid",
+      paymentReceived: finalPaymentReceived,
+      balanceDue: finalBalanceDue,
+      status: customerType === "Cash" ? "Paid" : (finalBalanceDue <= 0 ? "Paid" : finalPaymentReceived > 0 ? "Partial" : "Unpaid"),
       issuedTo,
     };
 
@@ -1257,16 +1297,49 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
           )}
         </div>
       )}
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Customer">
-          <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
-            {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
+      {canChangeCustomerType ? (
+        <Field label="Customer Type">
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setCustomerType("Regular")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${customerType === "Regular" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>Regular Customer</button>
+            <button type="button" onClick={() => setCustomerType("Cash")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${customerType === "Cash" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>Cash Customer / Walk-In</button>
+          </div>
         </Field>
+      ) : (
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-2">
+          {customerType === "Cash" ? "Cash Customer / Walk-In Invoice" : "Regular Customer Invoice"}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        {customerType === "Regular" && (
+          <Field label="Customer">
+            <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+        )}
         <Field label="Date">
           <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
       </div>
+
+      {customerType === "Cash" && (
+        <div className="bg-blue-50 border border-blue-200 p-3 mb-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700 mb-2">Cash Customer / Walk-In Details (Optional)</div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Customer Name (optional)">
+              <input className={inputCls} placeholder="Cash Customer" value={cashName} onChange={(e) => setCashName(e.target.value)} />
+            </Field>
+            <Field label="Phone Number (optional)">
+              <input className={inputCls} value={cashPhone} onChange={(e) => setCashPhone(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Address (optional)">
+            <input className={inputCls} value={cashAddress} onChange={(e) => setCashAddress(e.target.value)} />
+          </Field>
+          <div className="text-[11px] text-blue-700">Customer account, portal, credit limit ya outstanding ledger nahi banega — sirf cash sale invoice.</div>
+        </div>
+      )}
 
       {selectedCustomer && (
         <div className="bg-slate-50 border border-slate-200 p-3 mb-3 text-sm">
@@ -1349,9 +1422,15 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
         <Field label="Discount (Rs)">
           <input type="number" className={inputCls} value={discount} onChange={(e) => setDiscount(e.target.value)} />
         </Field>
-        <Field label="Payment Received Now (Rs)">
-          <input type="number" className={inputCls} value={paymentReceived} onChange={(e) => setPaymentReceived(e.target.value)} />
-        </Field>
+        {customerType === "Regular" ? (
+          <Field label="Payment Received Now (Rs)">
+            <input type="number" className={inputCls} value={paymentReceived} onChange={(e) => setPaymentReceived(e.target.value)} />
+          </Field>
+        ) : (
+          <Field label="Cash Received (Auto = Total)">
+            <input type="number" className={`${inputCls} bg-slate-100`} value={total} disabled readOnly />
+          </Field>
+        )}
       </div>
 
       <div className="border-t border-slate-200 mt-3 pt-3">
@@ -1459,6 +1538,9 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, onClose, onEdit,
           <div className="text-right">
             <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{invoice.number}</div>
             <div className="text-xs text-slate-500 mt-1">Date: <span className="font-bold text-slate-700">{fmtDate(invoice.date)}</span></div>
+            {invoice.customerType === "Cash" && (
+              <div className="inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</div>
+            )}
             {rs && rs.status !== "Normal" && (
               <div className={`inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 ${RETURN_STATUS_TONE[rs.status]}`}>{rs.status}</div>
             )}
@@ -1665,25 +1747,32 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
     <div>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-black uppercase tracking-tight">Invoices</h2>
-        <Btn onClick={() => setShowForm(true)} disabled={customers.length === 0}>+ New Invoice</Btn>
+        <Btn onClick={() => setShowForm(true)}>+ New Invoice</Btn>
       </div>
-      {customers.length === 0 && <div className="text-slate-400 mb-3">Pehle Customers tab mein customer add karein.</div>}
+      {customers.length === 0 && <div className="text-slate-400 mb-3">Regular customer ke liye pehle Customers tab mein customer add karein — Cash Customer / Walk-In invoice abhi bhi bana sakte hain.</div>}
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-              <th className="px-4 py-2">Number</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Date</th>
+              <th className="px-4 py-2">Number</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Type</th><th className="px-4 py-2">Date</th>
               <th className="px-4 py-2 text-right">Total</th><th className="px-4 py-2 text-right">Due</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Return/Exchange</th>
             </tr>
           </thead>
           <tbody>
-            {sorted.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-slate-400">Koi invoice nahi bana.</td></tr>}
+            {sorted.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi invoice nahi bana.</td></tr>}
             {sorted.map((inv) => {
               const rs = computeInvoiceReturnStatus(inv, returns, exchanges);
               return (
                 <tr key={inv.id} className={`border-t border-slate-100 cursor-pointer hover:bg-slate-50 ${inv.docStatus === "Cancelled" ? "opacity-50" : ""}`} onClick={() => setViewing(inv)}>
                   <td className="px-4 py-2 font-bold text-blue-700">{inv.number}</td>
                   <td className="px-4 py-2">{inv.customerName}</td>
+                  <td className="px-4 py-2">
+                    {inv.customerType === "Cash" ? (
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</span>
+                    ) : (
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-100 text-slate-500">Regular</span>
+                    )}
+                  </td>
                   <td className="px-4 py-2 text-slate-500">{fmtDate(inv.date)}</td>
                   <td className="px-4 py-2 text-right font-bold">{fmtMoney(inv.total)}</td>
                   <td className="px-4 py-2 text-right text-red-600 font-bold">{inv.docStatus !== "Cancelled" && inv.balanceDue > 0 ? fmtMoney(inv.balanceDue) : "-"}</td>
@@ -4455,6 +4544,7 @@ export default function App() {
       persist.payments([...payments, {
         id: uid("pay"), customerId: inv.customerId, customerName: inv.customerName,
         date: inv.date, amount: inv.paymentReceived, method: "Cash", note: `Against ${inv.number}`, invoiceId: inv.id,
+        branchId: inv.branchId || "",
       }]);
     }
   }
@@ -4894,8 +4984,12 @@ export default function App() {
   const myBranchName = branches.find((b) => b.id === myBranchId)?.name || "";
   const visibleCustomers = myBranchId ? customers.filter((c) => c.branchId === myBranchId) : customers;
   const visibleCustomerIds = new Set(visibleCustomers.map((c) => c.id));
-  const visibleInvoices = myBranchId ? invoices.filter((i) => visibleCustomerIds.has(i.customerId)) : invoices;
-  const visiblePayments = myBranchId ? payments.filter((p) => visibleCustomerIds.has(p.customerId)) : payments;
+  const visibleInvoices = myBranchId
+    ? invoices.filter((i) => visibleCustomerIds.has(i.customerId) || (i.customerType === "Cash" && i.branchId === myBranchId))
+    : invoices;
+  const visiblePayments = myBranchId
+    ? payments.filter((p) => visibleCustomerIds.has(p.customerId) || p.branchId === myBranchId)
+    : payments;
   const visibleBookings = myBranchId ? bookings.filter((b) => visibleCustomerIds.has(b.customerId)) : bookings;
   const visibleOrders = myBranchId ? orders.filter((o) => visibleCustomerIds.has(o.customerId)) : orders;
   const visibleLeads = myBranchId ? leads.filter((l) => l.branchId === myBranchId) : leads;
