@@ -5384,6 +5384,10 @@ export default function App() {
     promises: (v) => { setPromises(v); storeSet("ct-promises", v); },
     outstandingTransfers: (v) => { setOutstandingTransfers(v); storeSet("ct-outstandingtransfers", v); },
     adjustments: (v) => { setAdjustments(v); storeSet("ct-adjustments", v); },
+    commissionAgents: (v) => { setCommissionAgents(v); storeSet("ct-commission-agents", v); },
+    commissionRules: (v) => { setCommissionRules(v); storeSet("ct-commission-rules", v); },
+    commissionTransactions: (v) => { setCommissionTransactions(v); storeSet("ct-commission-transactions", v); },
+    commissionPayments: (v) => { setCommissionPayments(v); storeSet("ct-commission-payments", v); },
   };
 
   function upsert(list, item) {
@@ -6074,6 +6078,9 @@ export default function App() {
   const visibleAdjustments = myBranchId
     ? adjustments.filter((a) => visibleCustomerIds.has(a.customerId))
     : adjustments;
+  const visibleCommissionTransactions = myBranchId
+    ? commissionTransactions.filter((tx) => tx.branchId === myBranchId || visibleCustomerIds.has(tx.customerId))
+    : commissionTransactions;
 
   const pages = {
     dashboard: <Dashboard customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} leads={visibleLeads} bookings={visibleBookings} onOpenPromises={() => setPage("promises")} />,
@@ -6088,8 +6095,9 @@ export default function App() {
       <Invoices
         customers={visibleCustomers} products={products} drivers={drivers} invoices={visibleInvoices} payments={visiblePayments}
         returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments}
-        bookings={visibleBookings} settings={settings} currentUser={currentUser} saveInvoice={saveInvoice}
-        updateInvoice={updateInvoice} cancelInvoice={cancelInvoiceFn}
+        bookings={visibleBookings} settings={settings} currentUser={currentUser}
+        commissionAgents={commissionAgents} commissionRules={commissionRules}
+        saveInvoice={saveInvoice} updateInvoice={updateInvoice} cancelInvoice={cancelInvoiceFn}
         prefill={invoicePrefill} onClearPrefill={() => setInvoicePrefill(null)} onBookingFulfilled={markBookingFulfilled} onOrderFulfilled={markOrderFulfilled}
         focusInvoiceId={focusInvoiceId} setFocusInvoiceId={setFocusInvoiceId}
         onGoToReturn={goToReturnInvoice} onGoToExchange={goToExchangeInvoice}
