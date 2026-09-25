@@ -1842,7 +1842,7 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const [date, setDate] = useState(editingInvoice?.date || todayISO());
   const [items, setItems] = useState(
     editingInvoice
-      ? editingInvoice.items.map((it) => ({ id: uid("it"), productId: "", name: it.name, unit: it.unit || "Bag", qty: it.qty, price: it.price }))
+      ? editingInvoice.items.map((it) => ({ id: uid("it"), productId: it.productId || "", name: it.name, unit: it.unit || "Bag", qty: it.qty, price: it.price }))
       : prefill
       ? [{ id: uid("it"), productId: prefill.productId || "", name: prefill.productName || "", unit: prefill.unit || "Bag", qty: prefill.qty || 1, price: prefill.rate || 0 }]
       : [{ id: uid("it"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]
@@ -1966,6 +1966,8 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
       balanceDue: finalBalanceDue,
       status: customerType === "Cash" ? "Paid" : (finalBalanceDue <= 0 ? "Paid" : finalPaymentReceived > 0 ? "Partial" : "Unpaid"),
       issuedTo,
+      commissionAgentId: commissionAgentId || "",
+      commissionAgentName: selectedCommissionAgent?.name || "",
     };
 
     if (isEdit) {
@@ -2039,6 +2041,7 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
         {commissionAgentId && <div className="bg-slate-50 border border-slate-200 p-2">
           <div className="text-[11px] uppercase font-bold text-slate-500">{t("Commission Amount")}</div>
           <div className="text-lg font-black">{fmtMoney(commissionPreview.amount)}</div>
+          <div className="text-[10px] text-slate-500 mt-1">Commission sale ke sath record hoti rahegi; payment minimum {Number(selectedCommissionAgent?.minimumBags) || 100} bags complete hone ke baad unlock hogi.</div>
         </div>}
       </div>
 
@@ -2259,6 +2262,9 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, onClose, onEdit,
             <div className="text-xs text-slate-500 mt-1">Date: <span className="font-bold text-slate-700">{fmtDate(invoice.date)}</span></div>
             {invoice.customerType === "Cash" && (
               <div className="inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</div>
+            )}
+            {invoice.commissionAgentName && (
+              <div className="mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-purple-100 text-purple-700">Commission Agent: {invoice.commissionAgentName}</div>
             )}
             {rs && rs.status !== "Normal" && (
               <div className={`inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 ${RETURN_STATUS_TONE[rs.status]}`}>{rs.status}</div>
@@ -2530,6 +2536,8 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
             prefill={editingInvoice ? null : prefill}
             editingInvoice={editingInvoice}
             currentUser={currentUser}
+            commissionAgents={commissionAgents}
+            commissionRules={commissionRules}
             nextNumber={nextNumber}
             onCancel={closeForm}
             onSave={(inv) => {
@@ -2761,7 +2769,7 @@ function CommissionTable({ rows, agents, currentUser, onApprove, onPay, onCancel
     {sorted.length===0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-slate-400">No commission records.</td></tr>}
     {sorted.map(tx=><tr key={tx.id} className="border-t border-slate-100">
       <td className="px-4 py-2">{fmtDate(tx.date)}</td><td className="px-4 py-2 font-bold">{tx.invoiceNumber}</td><td className="px-4 py-2">{agents.find(a=>a.id===tx.agentId)?.name || tx.agentName}</td><td className="px-4 py-2">{tx.customerName}</td><td className="px-4 py-2">{fmtMoney(tx.saleAmount)}</td><td className="px-4 py-2 font-bold">{fmtMoney(tx.commissionAmount)}</td><td className="px-4 py-2">{fmtMoney(tx.paidAmount)}</td><td className="px-4 py-2">{fmtMoney(tx.remainingAmount)}</td><td className="px-4 py-2">{commissionStatusLabel(tx.status)}</td>
-      <td className="px-4 py-2 flex gap-1">{currentUser.role==="admin" && tx.status==="pending" && <Btn small onClick={()=>onApprove(tx)}>{t("Approve")}</Btn>}{currentUser.role==="admin" && tx.status!=="paid" && tx.status!=="cancelled" && <Btn small variant="ghost" onClick={()=>onPay(tx)}>{t("Pay Commission")}</Btn>}{currentUser.role==="admin" && tx.status!=="paid" && <Btn small variant="danger" onClick={()=>onCancel(tx)}>{t("Cancel")}</Btn>}</td>
+      <td className="px-4 py-2 flex gap-1">{currentUser.role==="admin" && tx.status==="pending" && <Btn small onClick={()=>onApprove(tx)}>{t("Approve")}</Btn>}{currentUser.role==="admin" && tx.status!=="paid" && tx.status!=="cancelled" && ((tx.minimumBags || 100) <= (transactions.filter(x=>x.agentId===tx.agentId && x.status!=="cancelled").reduce((sum,x)=>sum+(Number(x.bagQty)||0),0))) ? <Btn small variant="ghost" onClick={()=>onPay(tx)}>{t("Pay Commission")}</Btn> : currentUser.role==="admin" && tx.status!=="paid" && tx.status!=="cancelled" ? <span className="text-[10px] text-amber-700 font-bold px-2 py-1">{fmtQty(tx.minimumBags || 100)} bags required</span> : null}{currentUser.role==="admin" && tx.status!=="paid" && <Btn small variant="danger" onClick={()=>onCancel(tx)}>{t("Cancel")}</Btn>}</td>
     </tr>)}
     </tbody></table></div>;
 }
@@ -2772,7 +2780,8 @@ function AgentModal({ initial, onClose, onSave }) {
     <Field label="Agent Name"><input className={inputCls} value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></Field>
     <div className="grid grid-cols-2 gap-3"><Field label="Phone"><input className={inputCls} value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})}/></Field><Field label="WhatsApp"><input className={inputCls} value={form.whatsapp} onChange={e=>setForm({...form,whatsapp:e.target.value})}/></Field></div>
     <Field label="Address"><input className={inputCls} value={form.address} onChange={e=>setForm({...form,address:e.target.value})}/></Field>
-    <div className="grid grid-cols-2 gap-3"><Field label="Commission Type"><select className={inputCls} value={form.commissionType} onChange={e=>setForm({...form,commissionType:e.target.value})}>{COMMISSION_TYPES.map(x=><option key={x} value={x}>{x}</option>)}</select></Field><Field label="Commission Rate"><input type="number" className={inputCls} value={form.commissionRate} onChange={e=>setForm({...form,commissionRate:e.target.value})}/></Field></div>
+    <div className="grid grid-cols-2 gap-3"><Field label="Commission Type"><select className={inputCls} value={form.commissionType} onChange={e=>setForm({...form,commissionType:e.target.value})}>{COMMISSION_TYPES.map(x=><option key={x} value={x}>{x}</option>)}</select></Field><Field label="Commission Rate"><input type="number" className={inputCls} value={form.commissionRate} onChange={e=>setForm({...form,commissionRate:e.target.value})}/></Field>
+    <Field label="Minimum Bags Before Payment"><input type="number" min="1" className={inputCls} value={form.minimumBags ?? 100} onChange={e=>setForm({...form,minimumBags:e.target.value})}/></Field></div>
     <Field label="Notes"><textarea className={inputCls} value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></Field>
     <div className="flex gap-2"><Btn onClick={()=>form.name.trim()&&onSave({...form})}>{t("Save")}</Btn><Btn variant="ghost" onClick={onClose}>{t("Cancel")}</Btn></div>
   </Modal>;
@@ -5528,7 +5537,7 @@ export default function App() {
   function saveCommissionAgent(data) {
     if (data.id) { persist.commissionAgents(upsert(commissionAgents, data)); return; }
     const counter = settings.commissionAgentCounter || 1;
-    const agent = { ...data, id: uid("com-agent"), code: "COM-" + String(counter).padStart(4, "0"), createdDate: todayISO(), status: "Active" };
+    const agent = { ...data, minimumBags: Number(data.minimumBags) > 0 ? Number(data.minimumBags) : 100, id: uid("com-agent"), code: "COM-" + String(counter).padStart(4, "0"), createdDate: todayISO(), status: "Active" };
     persist.commissionAgents([...commissionAgents, agent]);
     persist.settings({ ...settings, commissionAgentCounter: counter + 1 });
   }
@@ -5548,10 +5557,13 @@ export default function App() {
     if (!agent) return;
     const calc = calculateCommissionForInvoice(inv, commissionRules, products);
     const existing = commissionTransactions.find(t => t.invoiceId === inv.id);
+    const bagQty = (inv.items || []).reduce((sum, item) => sum + (String(item.unit || "").toLowerCase() === "bag" ? (Number(item.qty) || 0) : 0), 0);
+    const minimumBags = Number(agent.minimumBags) > 0 ? Number(agent.minimumBags) : 100;
     const tx = {
       id: existing?.id || uid("com-tx"),
       agentId: agent.id, agentName: agent.name, invoiceId: inv.id, invoiceNumber: inv.number,
       customerId: inv.customerId, customerName: inv.customerName, saleAmount: Number(inv.total)||0,
+      bagQty, minimumBags,
       commissionType: calc.breakdown[0]?.ruleType || agent.commissionType || "percentage",
       commissionRate: calc.breakdown[0]?.rate || Number(agent.commissionRate)||0,
       commissionAmount: calc.amount, paidAmount: existing?.paidAmount || 0,
@@ -5569,6 +5581,13 @@ export default function App() {
   }
   function payCommission(tx, data) {
     if (currentUser?.role !== "admin") return;
+    const agentInvoices = invoices.filter((inv) => inv.commissionAgentId === tx.agentId && inv.docStatus !== "Cancelled");
+    const soldBags = agentInvoices.reduce((sum, inv) => sum + (inv.items || []).reduce((n, item) => n + (String(item.unit || "").toLowerCase() === "bag" ? (Number(item.qty) || 0) : 0), 0), 0);
+    const minimumBags = Number(tx.minimumBags || commissionAgents.find((a) => a.id === tx.agentId)?.minimumBags) || 100;
+    if (soldBags < minimumBags) {
+      alert(`Commission payment abhi lock hai. ${minimumBags} bags complete hone par payment milegi. Abhi ${soldBags} bags complete hue hain.`);
+      return;
+    }
     const amount = Math.min(Number(data.amount)||0, Number(tx.remainingAmount)||0);
     if (amount <= 0) return;
     const payment = { id: uid("com-pay"), transactionId: tx.id, agentId: tx.agentId, date: data.date, amount, method: data.method, reference: data.reference || "", notes: data.notes || "", paidBy: currentUser?.name || currentUser?.username || "Unknown", createdAt: new Date().toISOString() };
