@@ -2702,7 +2702,7 @@ function CommissionPage({
             <Stat label={t("Outstanding Commission")} value={fmtMoney(outstanding)} />
             <Stat label={t("This Month Commission")} value={fmtMoney(monthTotal)} />
           </div>
-          <CommissionTable rows={visibleTx} agents={agents} currentUser={currentUser} onApprove={approveCommission} onPay={setPaying} onCancel={cancelCommission} />
+          <CommissionTable rows={visibleTx} transactions={transactions} agents={agents} currentUser={currentUser} onApprove={approveCommission} onPay={setPaying} onCancel={cancelCommission} />
         </>
       )}
 
@@ -2760,7 +2760,7 @@ function CommissionPage({
   );
 }
 
-function CommissionTable({ rows, agents, currentUser, onApprove, onPay, onCancel }) {
+function CommissionTable({ rows, transactions = [], agents, currentUser, onApprove, onPay, onCancel }) {
   const sorted=[...rows].sort((a,b)=>new Date(b.date)-new Date(a.date));
   return <div className="bg-white border border-slate-200 overflow-x-auto"><table className="w-full text-sm">
     <thead><tr className="text-left text-[11px] uppercase text-slate-500 border-b">
