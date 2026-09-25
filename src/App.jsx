@@ -2037,6 +2037,9 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
             <option value="">No Commission</option>
             {commissionAgents.filter(a=>a.status==="Active").map(a=><option key={a.id} value={a.id}>{a.code} — {a.name}</option>)}
           </select>
+          {commissionAgents.filter(a=>a.status==="Active").length === 0 && (
+            <div className="text-[11px] text-amber-700 mt-1">No active Commission Agent. Add an agent from Commission first.</div>
+          )}
         </Field>
         {commissionAgentId && <div className="bg-slate-50 border border-slate-200 p-2">
           <div className="text-[11px] uppercase font-bold text-slate-500">{t("Commission Amount")}</div>
@@ -5535,10 +5538,51 @@ export default function App() {
   const deleteUser = (id) => persist.users(users.filter((u) => u.id !== id));
 
   function saveCommissionAgent(data) {
-    if (data.id) { persist.commissionAgents(upsert(commissionAgents, data)); return; }
+    if (data.id) {
+      persist.commissionAgents(upsert(commissionAgents, data));
+      // Keep the agent's default commission settings usable from invoices.
+      // If the agent already has an all-products rule, update it; otherwise
+      // create one so adding an agent is immediately functional.
+      const existingRule = commissionRules.find(r => r.agentId === data.id && !r.productId && (!r.category || r.category === "All Products"));
+      const defaultRule = {
+        ...(existingRule || {}),
+        id: existingRule?.id || uid("com-rule"),
+        agentId: data.id,
+        productId: "",
+        category: "All Products",
+        type: data.commissionType || "percentage",
+        rate: Number(data.commissionRate) || 0,
+        minimumSaleAmount: 0,
+        maximumCommission: 0,
+        startDate: existingRule?.startDate || "",
+        endDate: existingRule?.endDate || "",
+        status: data.status === "Active" ? "Active" : "Inactive",
+        updatedAt: new Date().toISOString(),
+      };
+      persist.commissionRules(upsert(commissionRules, defaultRule));
+      return;
+    }
     const counter = settings.commissionAgentCounter || 1;
     const agent = { ...data, minimumBags: Number(data.minimumBags) > 0 ? Number(data.minimumBags) : 100, id: uid("com-agent"), code: "COM-" + String(counter).padStart(4, "0"), createdDate: todayISO(), status: "Active" };
     persist.commissionAgents([...commissionAgents, agent]);
+    // IMPORTANT: create a default All Products rule at the same time.
+    // This means the newly added agent can immediately be selected on an
+    // invoice and commission is calculated without requiring a second setup.
+    const defaultRule = {
+      id: uid("com-rule"),
+      agentId: agent.id,
+      productId: "",
+      category: "All Products",
+      type: agent.commissionType || "percentage",
+      rate: Number(agent.commissionRate) || 0,
+      minimumSaleAmount: 0,
+      maximumCommission: 0,
+      startDate: "",
+      endDate: "",
+      status: "Active",
+      createdAt: new Date().toISOString(),
+    };
+    persist.commissionRules([...commissionRules, defaultRule]);
     persist.settings({ ...settings, commissionAgentCounter: counter + 1 });
   }
   function deactivateCommissionAgent(agent) {
@@ -6022,7 +6066,20 @@ export default function App() {
       editHistory: [...(oldInv.editHistory || []), historyEntry],
     };
     persist.invoices(upsert(invoices, finalInv));
-    if (finalInv.commissionAgentId) createOrUpdateCommissionForInvoice(finalInv);
+    if (finalInv.commissionAgentId) {
+      createOrUpdateCommissionForInvoice(finalInv);
+    } else {
+      // If an edited invoice removes its commission agent, do not leave the
+      // old commission payable. Keep the transaction for audit history but
+      // mark it cancelled.
+      const oldCommission = commissionTransactions.find(t => t.invoiceId === oldInv.id && t.status !== "cancelled");
+      if (oldCommission) {
+        persist.commissionTransactions(upsert(commissionTransactions, {
+          ...oldCommission, status: "cancelled", remainingAmount: 0,
+          updatedAt: new Date().toISOString(), reason: "Commission agent removed from invoice"
+        }));
+      }
+    }
 
     // Sync the payment record tied to this invoice (created at invoice time).
     const existingPayment = payments.find(
