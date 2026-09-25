@@ -1732,11 +1732,30 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
   const [reversingAdj, setReversingAdj] = useState(null);
   const [adjReverseReason, setAdjReverseReason] = useState("");
   const canManageAdj = currentUser?.role === "admin";
+  // Month-wise download: "" means the full ledger (all time); otherwise a
+  // "YYYY-MM" value scopes both the on-screen table and the printed/PDF
+  // output to that single month, with the Opening Balance row showing the
+  // true running balance carried forward from just before that month.
+  const [monthFilter, setMonthFilter] = useState("");
 
   if (!customer) return <div className="text-slate-400">Pehle koi customer add karein.</div>;
   const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
   const myPromises = (promises || []).filter((p) => p.customerId === customer.id && p.status !== "Deleted").map(promiseWithComputed);
   const myAdjustments = (adjustments || []).filter((a) => a.customerId === customer.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  function fmtMonthLabel(m) {
+    if (!m) return "All Time";
+    const [y, mo] = m.split("-");
+    return new Date(Number(y), Number(mo) - 1, 1).toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  }
+  const monthOptions = Array.from(new Set(entries.map((e) => e.date.slice(0, 7)))).sort();
+  const filteredEntries = monthFilter ? entries.filter((e) => e.date.slice(0, 7) === monthFilter) : entries;
+  const openingForPeriod = monthFilter
+    ? (() => {
+        const before = entries.filter((e) => e.date.slice(0, 7) < monthFilter);
+        return before.length ? before[before.length - 1].balance : Number(customer.openingBalance) || 0;
+      })()
+    : Number(customer.openingBalance) || 0;
 
   function downloadPDF() {
     window.print();
@@ -1770,9 +1789,18 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
         <div className="text-sm">
           Outstanding: <span className={`font-black ${outstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(outstanding)}</span>
         </div>
-        <Btn variant="dark" onClick={downloadPDF}>Download PDF</Btn>
+        <select className={`${inputCls} max-w-[170px]`} value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)}>
+          <option value="">All Time</option>
+          {monthOptions.map((m) => <option key={m} value={m}>{fmtMonthLabel(m)}</option>)}
+        </select>
+        <Btn variant="dark" onClick={downloadPDF}>{monthFilter ? `Download PDF (${fmtMonthLabel(monthFilter)})` : "Download PDF"}</Btn>
         <Btn onClick={() => { setEditingAdj(null); setShowAdjForm(true); }}>+ Adjustment</Btn>
       </div>
+      {monthFilter && (
+        <div className="text-xs text-blue-700 font-bold mb-3">
+          Showing {fmtMonthLabel(monthFilter)} only — opening balance below is carried forward from before this month. <button className="underline ml-1" onClick={() => setMonthFilter("")}>Show All Time</button>
+        </div>
+      )}
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
@@ -1789,9 +1817,9 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
           <tbody>
             <tr className="border-t border-slate-100 bg-slate-50">
               <td className="px-4 py-2 text-slate-500" colSpan={6}>Opening Balance</td>
-              <td className="px-4 py-2 text-right font-bold">{fmtMoney(customer.openingBalance || 0)}</td>
+              <td className="px-4 py-2 text-right font-bold">{fmtMoney(openingForPeriod)}</td>
             </tr>
-            {entries.map((e) => (
+            {filteredEntries.map((e) => (
               <tr key={e.id} className="border-t border-slate-100">
                 <td className="px-4 py-2">{fmtDate(e.date)}</td>
                 <td className="px-4 py-2">
@@ -1805,7 +1833,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
                 <td className="px-4 py-2 text-right font-bold">{fmtMoney(e.balance)}</td>
               </tr>
             ))}
-            {entries.length === 0 && (
+            {filteredEntries.length === 0 && (
               <tr><td colSpan={7} className="px-4 py-6 text-center text-slate-400">Koi entry nahi.</td></tr>
             )}
           </tbody>
@@ -1919,8 +1947,11 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
         </Modal>
       )}
 
-      {/* Hidden printable ledger — only rendered visible during print/PDF export */}
-      <div id="print-ledger" style={{ display: "none" }}>
+      {/* Print/PDF-only ledger — hidden on screen (display:none), forced
+          visible by the @media print rule in <PrintStyles/> via the
+          "print-area" class, so window.print() outputs ONLY this clean
+          template instead of the sidebar/app chrome around it. */}
+      <div id="print-ledger" className="print-area" style={{ display: "none" }}>
         <div className="bg-white">
           <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
             <div className="flex items-center gap-3">
@@ -1948,6 +1979,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
               {customer.address && <div className="text-slate-500">{customer.address}</div>}
             </div>
             <div className="text-right text-xs text-slate-500">
+              <div>Period: <span className="font-bold text-slate-700">{fmtMonthLabel(monthFilter)}</span></div>
               <div>Date: <span className="font-bold text-slate-700">{fmtDate(todayISO())}</span></div>
             </div>
           </div>
@@ -1966,9 +1998,9 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
             <tbody>
               <tr className="border-b border-slate-100 bg-slate-50">
                 <td className="py-2 px-2 text-slate-500" colSpan={5}>Opening Balance</td>
-                <td className="py-2 px-2 text-right font-bold">{fmtMoney(customer.openingBalance || 0)}</td>
+                <td className="py-2 px-2 text-right font-bold">{fmtMoney(openingForPeriod)}</td>
               </tr>
-              {entries.map((e) => (
+              {filteredEntries.map((e) => (
                 <tr key={e.id} className="border-b border-slate-100">
                   <td className="py-2 px-2">{fmtDate(e.date)}</td>
                   <td className="py-2 px-2">{e.type}</td>
@@ -1978,7 +2010,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
                   <td className="py-2 px-2 text-right font-bold">{fmtMoney(e.balance)}</td>
                 </tr>
               ))}
-              {entries.length === 0 && (
+              {filteredEntries.length === 0 && (
                 <tr><td colSpan={6} className="py-4 px-2 text-center text-slate-400">Koi entry nahi.</td></tr>
               )}
             </tbody>
@@ -1986,8 +2018,14 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
 
           <div className="flex justify-end">
             <div className="w-72 text-sm space-y-1.5">
+              {monthFilter && (
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Closing Balance ({fmtMonthLabel(monthFilter)})</span>
+                  <span className="font-bold">{fmtMoney(filteredEntries.length ? filteredEntries[filteredEntries.length - 1].balance : openingForPeriod)}</span>
+                </div>
+              )}
               <div className="flex justify-between border-t-2 border-slate-900 pt-2 mt-1">
-                <span className="font-black uppercase text-blue-700">Total Outstanding</span>
+                <span className="font-black uppercase text-blue-700">Total Outstanding (All Time)</span>
                 <span className="font-black text-lg text-blue-700">{fmtMoney(outstanding)}</span>
               </div>
             </div>
@@ -2422,7 +2460,7 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
 
   return (
     <Modal title={`Invoice ${invoice.number}`} onClose={onClose} wide>
-      <div id="print-invoice" className="bg-white">
+      <div id="print-invoice" className="print-area bg-white">
         <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
           <div className="flex items-center gap-3">
             {settings.logoUrl ? (
@@ -4378,7 +4416,7 @@ function CommissionHistoryPage({ agents, transactions, invoices, currentUser, on
 function CommissionTransactionDetail({ transaction, onClose }) {
   return (
     <Modal title={`Commission — ${transaction.invoiceNumber}`} onClose={onClose}>
-      <div id="print-commission" className="text-sm space-y-1">
+      <div id="print-commission" className="print-area text-sm space-y-1">
         <div className="flex justify-between"><span className="text-slate-500">Agent</span><span className="font-bold">{transaction.agentName}</span></div>
         <div className="flex justify-between"><span className="text-slate-500">Invoice</span><span className="font-bold">{transaction.invoiceNumber}</span></div>
         <div className="flex justify-between"><span className="text-slate-500">Customer</span><span className="font-bold">{transaction.customerName}</span></div>
@@ -5883,6 +5921,29 @@ function Settings({ settings, saveSettings, users, saveUser, deleteUser, branche
   );
 }
 
+/* ==================== Print styles ====================
+   BUGFIX: window.print() / "Download PDF" was printing the ENTIRE app
+   (sidebar, top bar, on-screen buttons) instead of just the intended
+   printable content, because no @media print rule ever made the hidden
+   #print-ledger template visible, and nothing hid everything else.
+   This component defines the one global rule every printable view relies
+   on: hide everything on the page except whichever element carries the
+   "print-area" class (there is only ever one visible at a time — the
+   Ledger's #print-ledger, an Invoice's #print-invoice, or a Commission
+   transaction's #print-commission), and force THAT element visible even
+   if it's normally display:none on screen. */
+function PrintStyles() {
+  return (
+    <style>{`
+      @media print {
+        body * { visibility: hidden; }
+        .print-area, .print-area * { visibility: visible; }
+        .print-area { display: block !important; position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 16px; }
+      }
+    `}</style>
+  );
+}
+
 /* ==================== Root App Component ==================== */
 
 function App() {
@@ -6487,6 +6548,7 @@ function App() {
     return (
       <>
         <I18nDomBridge />
+        <PrintStyles />
         <CustomerPortal
           currentUser={currentUser} customers={customers} invoices={invoices} payments={payments}
           returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
@@ -6619,6 +6681,7 @@ function App() {
   return (
     <>
       <I18nDomBridge />
+      <PrintStyles />
       <div className="flex h-screen bg-slate-100 text-slate-900">
         <Sidebar page={page} setPage={setPage} role={currentUser.role} onLogout={handleLogout} companyName={settings.companyName} logoUrl={settings.logoUrl} />
         <div className="flex-1 overflow-y-auto">
