@@ -1,5 +1,643 @@
-import React, { useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { supabase } from "./supabaseClient.js";
+
+/* ============================================================
+   GLOBAL BILINGUAL LANGUAGE SYSTEM
+   Presentation-only: language state never changes stored ERP data,
+   IDs, calculations, database keys, or business logic.
+   ============================================================ */
+const LANGUAGE_STORAGE_KEY = "ct-language";
+const LANGUAGE_DEFAULT = "en";
+let languageState = typeof window !== "undefined"
+  ? (window.localStorage.getItem(LANGUAGE_STORAGE_KEY) || LANGUAGE_DEFAULT)
+  : LANGUAGE_DEFAULT;
+const languageListeners = new Set();
+
+const translations = {
+  en: {},
+  ur: {
+    "Dashboard": "ڈیش بورڈ",
+    "Customers": "گاہک",
+    "Invoices": "انوائسز",
+    "Invoice History": "انوائس ہسٹری",
+    "Sales Return": "فروخت واپسی",
+    "Exchange": "تبادلہ",
+    "Credit Notes": "کریڈٹ نوٹس",
+    "Ledger": "لیجر",
+    "Payments": "ادائیگیاں",
+    "Outstanding Transfer": "بقایا منتقلی",
+    "Adjustments": "ایڈجسٹمنٹس",
+    "Advance Booking": "پیشگی بکنگ",
+    "Daily Orders": "روزانہ آرڈرز",
+    "Promise To Pay": "ادائیگی کا وعدہ",
+    "Leads": "لیڈز",
+    "Products": "مصنوعات",
+    "Drivers": "ڈرائیورز",
+    "Offers": "آفرز",
+    "Reports": "رپورٹس",
+    "Sales Assistant": "سیلز اسسٹنٹ",
+    "Cement Estimator": "سیمنٹ کیلکولیٹر",
+    "Settings": "ترتیبات",
+    "Log out": "لاگ آؤٹ",
+    "Log In": "لاگ اِن",
+    "English": "انگریزی",
+    "Language": "زبان",
+    "Admin": "ایڈمن",
+    "Staff": "اسٹاف",
+    "User": "صارف",
+    "Users (Admin / Staff)": "صارفین (ایڈمن / اسٹاف)",
+    "Username": "صارف نام",
+    "Password": "پاس ورڈ",
+    "Name": "نام",
+    "Full name": "پورا نام",
+    "Phone": "فون",
+    "Address": "پتہ",
+    "Branch": "برانچ",
+    "Branches": "برانچز",
+    "Credit Limit": "کریڈٹ حد",
+    "Credit Limit (Rs)": "کریڈٹ حد (روپے)",
+    "Opening Balance": "ابتدائی بیلنس",
+    "Opening Balance (Rs)": "ابتدائی بیلنس (روپے)",
+    "Audience Type": "سامعین کی قسم",
+    "Audience Type (for Sales Assistant)": "سامعین کی قسم (سیلز اسسٹنٹ کے لیے)",
+    "Customer Portal Login (optional)": "کسٹمر پورٹل لاگ اِن (اختیاری)",
+    "Portal Username": "پورٹل صارف نام",
+    "Portal Password": "پورٹل پاس ورڈ",
+    "Save Customer": "گاہک محفوظ کریں",
+    "Save": "محفوظ کریں",
+    "Cancel": "منسوخ کریں",
+    "Edit": "ترمیم کریں",
+    "Delete": "حذف کریں",
+    "Add": "شامل کریں",
+    "Update": "اپ ڈیٹ کریں",
+    "Close": "بند کریں",
+    "Print": "پرنٹ کریں",
+    "Download": "ڈاؤن لوڈ کریں",
+    "Download PDF": "پی ڈی ایف ڈاؤن لوڈ کریں",
+    "Print / Save as PDF": "پرنٹ / پی ڈی ایف کے طور پر محفوظ کریں",
+    "Search": "تلاش کریں",
+    "View": "دیکھیں",
+    "Back": "واپس",
+    "Next": "اگلا",
+    "Submit": "جمع کریں",
+    "Confirm": "تصدیق کریں",
+    "Reverse": "واپس کریں",
+    "WhatsApp": "واٹس ایپ",
+    "Send on WhatsApp": "واٹس ایپ پر بھیجیں",
+    "Share on WhatsApp": "واٹس ایپ پر شیئر کریں",
+    "Today's Sales": "آج کی فروخت",
+    "This Month": "اس ماہ",
+    "Total Outstanding": "کل بقایا",
+    "Active Leads": "فعال لیڈز",
+    "Open Bookings": "کھلی بکنگز",
+    "Promise To Pay Overview": "ادائیگی کے وعدوں کا جائزہ",
+    "Today's Promises": "آج کے وعدے",
+    "Upcoming (7 Days)": "آئندہ (7 دن)",
+    "Overdue Promises": "میعاد سے زائد وعدے",
+    "Pending Promises": "زیرِ التوا وعدے",
+    "Completed Promises": "مکمل وعدے",
+    "Broken Promises": "ٹوٹے ہوئے وعدے",
+    "Total Promised Amount": "وعدہ شدہ کل رقم",
+    "Promise Customers": "وعدہ کرنے والے گاہک",
+    "Recent Invoices": "حالیہ انوائسز",
+    "Customer": "گاہک",
+    "Select Customer": "گاہک منتخب کریں",
+    "New Customer": "نیا گاہک",
+    "Edit Customer": "گاہک میں ترمیم",
+    "Search name or phone...": "نام یا فون تلاش کریں...",
+    "No customer found": "کوئی گاہک نہیں ملا۔",
+    "Outstanding": "بقایا",
+    "Over limit": "حد سے زیادہ",
+    "Customer Name": "گاہک کا نام",
+    "Customer Name (optional)": "گاہک کا نام (اختیاری)",
+    "Phone (with WhatsApp, e.g. 03001234567)": "فون (واٹس ایپ کے ساتھ، مثلاً 03001234567)",
+    "Phone Number (optional)": "فون نمبر (اختیاری)",
+    "Address (optional)": "پتہ (اختیاری)",
+    "Customer Type": "گاہک کی قسم",
+    "Cash Customer": "نقد گاہک",
+    "Cash Customer / Walk-In": "نقد گاہک / واک اِن",
+    "Regular Customer": "عام گاہک",
+    "Regular Customer Invoice": "عام گاہک کی انوائس",
+    "Cash Customer / Walk-In Invoice": "نقد گاہک / واک اِن انوائس",
+    "Cash Customer / Walk-In Details (Optional)": "نقد گاہک / واک اِن کی تفصیلات (اختیاری)",
+    "Customer account waisa hi rahega — sirf ye note hoga ke material kis ne collect kiya.": "گاہک کا اکاؤنٹ ویسا ہی رہے گا — صرف یہ نوٹ ہوگا کہ سامان کس نے وصول کیا۔",
+    "Customer account, portal, credit limit ya outstanding ledger nahi banega — sirf cash sale invoice.": "گاہک کا اکاؤنٹ، پورٹل، کریڈٹ حد یا بقایا لیجر نہیں بنے گا — صرف نقد فروخت کی انوائس بنے گی۔",
+    "Invoice": "انوائس",
+    "New Invoice": "نئی انوائس",
+    "Create New Invoice": "نئی انوائس بنائیں",
+    "Invoice #": "انوائس نمبر",
+    "Invoice Number": "انوائس نمبر",
+    "Invoice Date": "انوائس کی تاریخ",
+    "Date": "تاریخ",
+    "Date:": "تاریخ:",
+    "Date/Time": "تاریخ/وقت",
+    "Product": "مصنوعہ",
+    "Product Name": "مصنوعے کا نام",
+    "Item": "آئٹم",
+    "Item name": "آئٹم کا نام",
+    "Items": "آئٹمز",
+    "Quantity": "مقدار",
+    "Qty": "مقدار",
+    "Qty (Sold)": "فروخت شدہ مقدار",
+    "Unit": "یونٹ",
+    "Rate": "ریٹ",
+    "Rate / Unit": "ریٹ / یونٹ",
+    "Price": "قیمت",
+    "Price (Rs)": "قیمت (روپے)",
+    "Discount": "رعایت",
+    "Discount (Rs)": "رعایت (روپے)",
+    "Tax": "ٹیکس",
+    "Total": "کل",
+    "Grand Total": "کل رقم",
+    "Subtotal": "ذیلی کل",
+    "Paid": "ادا شدہ",
+    "Unpaid": "غیر ادا شدہ",
+    "Partial": "جزوی",
+    "Balance": "بیلنس",
+    "Payment": "ادائیگی",
+    "Payment Received": "موصول شدہ ادائیگی",
+    "Payment Received Now (Rs)": "اب موصول شدہ ادائیگی (روپے)",
+    "Payment Method": "ادائیگی کا طریقہ",
+    "Payment Received By": "ادائیگی وصول کرنے والا",
+    "Notes": "نوٹس",
+    "Note": "نوٹ",
+    "Note (optional)": "نوٹ (اختیاری)",
+    "Notes (optional)": "نوٹس (اختیاری)",
+    "Invoice Status": "انوائس کی حالت",
+    "Add Item": "+ آئٹم شامل کریں",
+    "Remove Item": "آئٹم ہٹائیں",
+    "Save Invoice": "انوائس محفوظ کریں",
+    "Update Invoice": "انوائس اپ ڈیٹ کریں",
+    "Cancel Invoice": "انوائس منسوخ کریں",
+    "Details": "تفصیلات",
+    "Status": "حالت",
+    "Reference": "حوالہ",
+    "Ref": "حوالہ",
+    "Type": "قسم",
+    "Debit": "ڈیبٹ",
+    "Credit": "کریڈٹ",
+    "Amount": "رقم",
+    "Amount (Rs)": "رقم (روپے)",
+    "Reason": "وجہ",
+    "Reason / Note": "وجہ / نوٹ",
+    "Remaining": "باقی",
+    "Current Balance": "موجودہ بیلنس",
+    "Previous Balance": "پچھلا بیلنس",
+    "Customer Ledger": "گاہک کا لیجر",
+    "Outstanding Balance": "بقایا بیلنس",
+    "Return #": "واپسی نمبر",
+    "Return Date": "واپسی کی تاریخ",
+    "Return Qty": "واپسی کی مقدار",
+    "Qty Returned": "واپس شدہ مقدار",
+    "Return Reason": "واپسی کی وجہ",
+    "Returned": "واپس کیا گیا",
+    "Returned Value": "واپس شدہ رقم",
+    "Exchange #": "تبادلہ نمبر",
+    "Exchange Items": "تبادلے کے آئٹمز",
+    "Exchange Reason": "تبادلے کی وجہ",
+    "New Items Value": "نئے آئٹمز کی قیمت",
+    "New Qty": "نئی مقدار",
+    "Difference": "فرق",
+    "Return/Exchange": "واپسی/تبادلہ",
+    "Credit Note #": "کریڈٹ نوٹ نمبر",
+    "Link to Invoice": "انوائس سے منسلک کریں",
+    "Record Payment": "ادائیگی درج کریں",
+    "Payment History": "ادائیگی کی تاریخ",
+    "Transfer #": "منتقلی نمبر",
+    "Transfer Amount (Rs)": "منتقلی کی رقم (روپے)",
+    "Transfer Outstanding": "بقایا منتقلی",
+    "From": "سے",
+    "To": "کو",
+    "From Customer": "منتقل کرنے والا گاہک",
+    "To Customer": "وصول کرنے والا گاہک",
+    "Adjustment": "ایڈجسٹمنٹ",
+    "Adjustment History": "ایڈجسٹمنٹ ہسٹری",
+    "Adjustment Type": "ایڈجسٹمنٹ کی قسم",
+    "New Adjustment": "+ نئی ایڈجسٹمنٹ",
+    "Edit Adjustment": "ایڈجسٹمنٹ میں ترمیم",
+    "Adjustments Added": "شامل کی گئی ایڈجسٹمنٹس",
+    "Adjustments Reduced": "کم کی گئی ایڈجسٹمنٹس",
+    "Reduce Balance (-)": "بیلنس کم کریں (-)",
+    "Add Balance (+)": "بیلنس بڑھائیں (+)",
+    "New Advance Booking": "+ نئی پیشگی بکنگ",
+    "Booking Date": "بکنگ کی تاریخ",
+    "Advance": "پیشگی",
+    "Advance Received": "موصول شدہ پیشگی",
+    "Advance Received Now (Rs)": "اب موصول شدہ پیشگی (روپے)",
+    "Remaining on Delivery": "ڈیلیوری پر باقی",
+    "New Order": "نیا آرڈر",
+    "Order Date (call received)": "آرڈر کی تاریخ (کال موصول ہونے کی تاریخ)",
+    "New Promise": "نیا وعدہ",
+    "Promise Amount (Rs)": "وعدہ شدہ رقم (روپے)",
+    "Promise Amt": "وعدہ شدہ رقم",
+    "Promise Date": "وعدے کی تاریخ",
+    "Expected Payment Date": "متوقع ادائیگی کی تاریخ",
+    "Promise History": "وعدوں کی ہسٹری",
+    "Pending": "زیرِ التوا",
+    "Partially Paid": "جزوی ادائیگی",
+    "Completed": "مکمل",
+    "Cancelled": "منسوخ",
+    "Processing": "پروسیسنگ",
+    "Broken Promise": "ٹوٹا ہوا وعدہ",
+    "Deleted": "حذف شدہ",
+    "Booked": "بک شدہ",
+    "Partially Delivered": "جزوی ڈیلیوری",
+    "Active": "فعال",
+    "Reversed": "واپس کیا گیا",
+    "Normal": "معمول",
+    "Partially Returned": "جزوی واپسی",
+    "Fully Returned": "مکمل واپسی",
+    "Partially Exchanged": "جزوی تبادلہ",
+    "Fully Exchanged": "مکمل تبادلہ",
+    "Returned + Exchanged": "واپسی + تبادلہ",
+    "Payment Against Promise": "وعدے کے مقابل ادائیگی",
+    "Promise Created": "وعدہ بنایا گیا",
+    "Outstanding Transfer In": "بقایا منتقلی اندر",
+    "Outstanding Transfer Out": "بقایا منتقلی باہر",
+    "New Lead": "نئی لیڈ",
+    "Source": "ذریعہ",
+    "Follow-up Date": "فالو اَپ تاریخ",
+    "Requested For": "درخواست برائے",
+    "Generated Message": "تیار کردہ پیغام",
+    "Offer Text (scrolling ticker mein dikhega)": "آفر کا متن (اسکرولنگ ٹکر میں دکھائی دے گا)",
+    "Offer banner": "آفر بینر",
+    "No Banner": "کوئی بینر نہیں",
+    "New Purchase": "نئی خریداری",
+    "Category": "زمرہ",
+    "New Driver": "نیا ڈرائیور",
+    "Driver ID": "ڈرائیور آئی ڈی",
+    "Driver Name": "ڈرائیور کا نام",
+    "Vehicle": "گاڑی",
+    "Vehicle Number": "گاڑی نمبر",
+    "Vehicle Type": "گاڑی کی قسم",
+    "Rickshaw + Delivery": "رکشہ + ڈیلیوری",
+    "Rickshaw &amp; Delivery": "رکشہ اور ڈیلیوری",
+    "Rickshaw &amp; Delivery Details": "رکشہ اور ڈیلیوری کی تفصیلات",
+    "Rickshaw Rent (Rs)": "رکشہ کرایہ (روپے)",
+    "Cement": "سیمنٹ",
+    "Cement Rate (Rs/bag)": "سیمنٹ ریٹ (روپے/بیگ)",
+    "Covered Area": "زیرِ تعمیر رقبہ",
+    "Floors": "منزلیں",
+    "Width (ft)": "چوڑائی (فٹ)",
+    "Length (ft)": "لمبائی (فٹ)",
+    "Family": "فیملی",
+    "Mistri": "مستری",
+    "Worker": "مزدور",
+    "Sales in Range": "مدت میں فروخت",
+    "Collected in Range": "مدت میں وصولی",
+    "Total Invoices": "کل انوائسز",
+    "Total Orders": "کل آرڈرز",
+    "Total Return Amount": "واپسی کی کل رقم",
+    "Total Value (Qty × Rate)": "کل قیمت (مقدار × ریٹ)",
+    "Customers with Outstanding Balance": "بقایا بیلنس والے گاہک",
+    "Audit Log": "آڈٹ لاگ",
+    "Edit History": "ترمیم کی ہسٹری",
+    "Edited By": "ترمیم کرنے والا",
+    "Created By": "بنانے والا",
+    "Created By:": "بنانے والا:",
+    "Action": "کارروائی",
+    "Complete": "مکمل کریں",
+    "Convert to Invoice": "انوائس میں تبدیل کریں",
+    "Select": "منتخب کریں",
+    "Select Invoice": "انوائس منتخب کریں",
+    "Custom Item": "حسبِ ضرورت آئٹم",
+    "Custom item": "حسبِ ضرورت آئٹم",
+    "Locked Rate": "مقررہ ریٹ",
+    "Locked Rate (Rs/unit)": "مقررہ ریٹ (روپے/یونٹ)",
+    "Valid Till": "درست تا",
+    "Logo": "لوگو",
+    "Company Info": "کمپنی کی معلومات",
+    "Company Logo": "کمپنی کا لوگو",
+    "Company Name": "کمپنی کا نام",
+    "Construction Materials Supplier": "تعمیراتی مواد فراہم کنندہ",
+    "Bill To": "بل برائے",
+    "Calendar": "کیلنڈر",
+    "Text": "متن",
+    "Backup": "بیک اَپ",
+    "Download Backup (JSON)": "بیک اَپ ڈاؤن لوڈ کریں (JSON)",
+    "Restore from File": "فائل سے بحال کریں",
+    "Roman Urdu": "رومن اردو",
+    "Banner": "بینر",
+    "Banner Image (optional)": "بینر کی تصویر (اختیاری)",
+    "Loading...": "لوڈ ہو رہا ہے...",
+    "Koi customer nahi mila.": "کوئی گاہک نہیں ملا۔",
+    "Customer Ko Kya Naya Mil Raha Hai": "گاہک کو کیا نیا مل رہا ہے",
+    "Customer Kya Wapis Kar Raha Hai (Remaining Qty se zyada nahi; decimal allowed)": "گاہک کیا واپس کر رہا ہے (باقی مقدار سے زیادہ نہیں؛ اعشاریہ کی اجازت ہے)",
+    "Items — Return Qty Daalein (Remaining Qty se zyada nahi; decimal allowed, e.g. 6.5)": "آئٹمز — واپسی کی مقدار درج کریں (باقی مقدار سے زیادہ نہیں؛ اعشاریہ کی اجازت ہے، مثلاً 6.5)",
+    "Delete Reason": "حذف کرنے کی وجہ",
+    "Confirm Delete": "حذف کرنے کی تصدیق",
+    "Confirm Reverse": "واپس کرنے کی تصدیق",
+    "Reason likhna zaroori hai.": "وجہ درج کرنا ضروری ہے۔",
+    "Reverse ki wajah likhein.": "واپس کرنے کی وجہ درج کریں۔",
+    "Delete ki wajah likhein.": "حذف کرنے کی وجہ درج کریں۔",
+    "Pehle Customers tab mein customer add karein.": "پہلے گاہکوں کے ٹیب میں گاہک شامل کریں۔",
+    "Pehle koi customer add karein.": "پہلے کوئی گاہک شامل کریں۔",
+    "Pehle invoice select karein.": "پہلے انوائس منتخب کریں۔",
+    "Koi adjustment nahi hua abhi tak.": "ابھی تک کوئی ایڈجسٹمنٹ نہیں ہوئی۔",
+    "Koi adjustment nahi.": "کوئی ایڈجسٹمنٹ نہیں۔",
+    "Koi advance booking nahi.": "کوئی پیشگی بکنگ نہیں۔",
+    "Koi branch nahi bani.": "ابھی کوئی برانچ نہیں بنی۔",
+    "Koi credit note nahi bani.": "کوئی کریڈٹ نوٹ نہیں بنی۔",
+    "Koi driver add nahi hua.": "کوئی ڈرائیور شامل نہیں کیا گیا۔",
+    "Koi entry nahi.": "کوئی اندراج نہیں۔",
+    "Koi exchange record nahi.": "کوئی تبادلے کا ریکارڈ نہیں۔",
+    "Koi invoice nahi bana abhi tak.": "ابھی تک کوئی انوائس نہیں بنی۔",
+    "Koi invoice nahi bana.": "کوئی انوائس نہیں بنی۔",
+    "Koi invoice nahi.": "کوئی انوائس نہیں۔",
+    "Koi offer nahi bana.": "کوئی آفر نہیں بنی۔",
+    "Koi order nahi.": "کوئی آرڈر نہیں۔",
+    "Koi outstanding nahi.": "کوئی بقایا نہیں۔",
+    "Koi outstanding transfer nahi hua abhi tak.": "ابھی تک کوئی بقایا منتقلی نہیں ہوئی۔",
+    "Koi payment record nahi.": "کوئی ادائیگی کا ریکارڈ نہیں۔",
+    "Koi product nahi.": "کوئی مصنوعات نہیں۔",
+    "Koi promise nahi mila.": "کوئی وعدہ نہیں ملا۔",
+    "Koi promise nahi.": "کوئی وعدہ نہیں۔",
+    "Koi record nahi.": "کوئی ریکارڈ نہیں۔",
+    "Koi return record nahi.": "کوئی واپسی کا ریکارڈ نہیں۔",
+    "Abhi tak koi audit entry nahi.": "ابھی تک کوئی آڈٹ اندراج نہیں۔",
+    "Abhi tak koi edit ya cancellation nahi hui.": "ابھی تک کوئی ترمیم یا منسوخی نہیں ہوئی۔",
+    "Account nahi mila, admin se rabta karein.": "اکاؤنٹ نہیں ملا، ایڈمن سے رابطہ کریں۔",
+    "Galat username ya password.": "غلط صارف نام یا پاس ورڈ۔",
+    "Default logins wapas set ho gaye: admin/admin123, staff/staff123. Ab dobara try karein.": "ڈیفالٹ لاگ اِن دوبارہ سیٹ ہو گئے ہیں: admin/admin123، staff/staff123۔ اب دوبارہ کوشش کریں۔",
+    "Today": "آج",
+    "Tomorrow": "کل",
+    "This Week": "اس ہفتے",
+    "All Status": "تمام حالتیں",
+    "All": "سب",
+    "Regular": "عام",
+    "Cash": "نقد",
+    "Bank": "بینک",
+    "Online": "آن لائن",
+    "Cheque": "چیک",
+    "Other": "دیگر",
+    "Builder": "بلڈر",
+    "Contractor": "ٹھیکیدار",
+    "Developer": "ڈویلپر",
+    "Housing Society": "ہاؤسنگ سوسائٹی",
+    "New": "نیا",
+    "Contacted": "رابطہ کیا گیا",
+    "Qualified": "اہل قرار دیا گیا",
+    "Won": "کامیاب",
+    "Lost": "ضائع شدہ",
+    "Trip": "ٹرپ",
+    "Bag": "بیگ",
+    "Ton": "ٹن",
+    "Sq.Ft": "مربع فٹ",
+    "Piece": "عدد",
+    "Feet": "فٹ",
+    "Meter": "میٹر",
+    "KG": "کلوگرام",
+    "Liter": "لیٹر",
+    "Rickshaw": "رکشہ",
+    "Truck": "ٹرک",
+    "Mazda": "مزدا",
+    "Loader Rickshaw": "لوڈر رکشہ",
+    "Due": "واجب الادا",
+    "Expired": "میعاد ختم",
+    "Search customer...": "گاہک تلاش کریں...",
+    "Search customer / adj # / category...": "گاہک / ایڈجسٹمنٹ نمبر / زمرہ تلاش کریں...",
+    "Search customer / promise # / amount / status...": "گاہک / وعدہ نمبر / رقم / حالت تلاش کریں...",
+    "Search INV-xxxx / RET-xxxx-xx / EX-xxxx-xx / PTP-xxxx / OT-xxxx / ADJ-xxxx...": "INV-xxxx / RET-xxxx-xx / EX-xxxx-xx / PTP-xxxx / OT-xxxx / ADJ-xxxx تلاش کریں...",
+    "e.g. Crush": "مثلاً کرش",
+    "e.g. Aslam": "مثلاً اسلم",
+    "e.g. DRV-0001": "مثلاً DRV-0001",
+    "e.g. Delivery charges adjustment": "مثلاً ڈیلیوری چارجز ایڈجسٹمنٹ",
+    "e.g. Extra order ho gaya tha": "مثلاً اضافی آرڈر ہو گیا تھا",
+    "e.g. Is hafte cement par Rs 50/bag discount!": "مثلاً اس ہفتے سیمنٹ پر 50 روپے فی بیگ رعایت!",
+    "e.g. Kal Subah, Aaj Shaam": "مثلاً کل صبح، آج شام",
+    "e.g. LEA-1234": "مثلاً LEA-1234",
+    "Mobile": "موبائل",
+    "Mobile Number (Optional)": "موبائل نمبر (اختیاری)",
+    "Expected Date": "متوقع تاریخ",
+    "Apply Against Promise (optional)": "وعدے کے مقابل لاگو کریں (اختیاری)",
+    "None — general payment": "کوئی نہیں — عمومی ادائیگی",
+    "No record found": "کوئی ریکارڈ نہیں ملا۔",
+    "Welcome,": "خوش آمدید،",
+    "· All Branches": "· تمام برانچز",
+    "· Created Date:": "· تخلیق کی تاریخ:",
+    "Sirf image file (PNG/JPG) upload karein.": "صرف تصویر کی فائل (PNG/JPG) اپ لوڈ کریں۔",
+    "Logo invoice header aur sidebar par nazar aayega. Chota, square-ish image behtar rahega.": "لوگو انوائس کے ہیڈر اور سائڈبار پر نظر آئے گا۔ چھوٹی، تقریباً مربع تصویر بہتر رہے گی۔",
+    "Rate lock hai — is item ka daam invoice mein change na karein, warna customer se galat charge hoga.": "ریٹ مقرر ہے — اس آئٹم کی قیمت انوائس میں تبدیل نہ کریں، ورنہ گاہک سے غلط رقم وصول ہوگی۔",
+    "Ye promise delete karne se ledger se bhi hat jayega. Ye action reverse nahi ho sakta.": "یہ وعدہ حذف کرنے سے لیجر سے بھی ختم ہو جائے گا۔ یہ کارروائی واپس نہیں کی جا سکتی۔",
+    "Ye return delete karne se ledger reverse ho jayega, invoice qty aur customer balance wapis restore ho jayega.": "یہ واپسی حذف کرنے سے لیجر واپس درست ہو جائے گا، انوائس کی مقدار اور گاہک کا بیلنس بحال ہو جائے گا۔",
+        "Amount 0 se zyada hona chahiye.": "رقم صفر سے زیادہ ہونی چاہیے۔",
+    "Backup restore ho gaya.": "بیک اَپ بحال ہو گیا ہے۔",
+    "Banner upload nahi ho saka, dobara try karein.": "بینر اپ لوڈ نہیں ہو سکا، دوبارہ کوشش کریں۔",
+    "Customer aur amount zaroori hai.": "گاہک اور رقم درج کرنا ضروری ہے۔",
+    "Customer select karein.": "گاہک منتخب کریں۔",
+    "Driver ka naam zaroori hai.": "ڈرائیور کا نام درج کرنا ضروری ہے۔",
+    "Exchange ki wajah likhein.": "تبادلے کی وجہ درج کریں۔",
+    "Expected Payment Date zaroori hai.": "متوقع ادائیگی کی تاریخ درج کرنا ضروری ہے۔",
+    "From aur To Customer same nahi ho sakte.": "منتقل کرنے والا اور وصول کرنے والا گاہک ایک جیسے نہیں ہو سکتے۔",
+    "From aur To Customer select karein.": "منتقل کرنے والا اور وصول کرنے والا گاہک منتخب کریں۔",
+    "Kam az kam ek item add karein.": "کم از کم ایک آئٹم شامل کریں۔",
+    "Kam az kam ek item ki return qty daalein.": "کم از کم ایک آئٹم کی واپسی کی مقدار درج کریں۔",
+    "Kam az kam ek naya item daalein jo customer ko diya ja raha hai.": "کم از کم ایک نیا آئٹم درج کریں جو گاہک کو دیا جا رہا ہے۔",
+    "Kam az kam ek returned item ki qty daalein.": "کم از کم ایک واپس شدہ آئٹم کی مقدار درج کریں۔",
+    "Koi invoice, return, exchange, promise, transfer ya adjustment is number se nahi mila.": "اس نمبر سے کوئی انوائس، واپسی، تبادلہ، وعدہ، منتقلی یا ایڈجسٹمنٹ نہیں ملی۔",
+    "Offer ka text zaroori hai.": "آفر کا متن درج کرنا ضروری ہے۔",
+    "Pehle customer select karein.": "پہلے گاہک منتخب کریں۔",
+    "Promise amount zaroori hai.": "وعدے کی رقم درج کرنا ضروری ہے۔",
+    "Qty aur Locked Rate zaroori hai.": "مقدار اور مقررہ ریٹ درج کرنا ضروری ہے۔",
+    "Qty zaroori hai.": "مقدار درج کرنا ضروری ہے۔",
+    "Return ki wajah likhein.": "واپسی کی وجہ درج کریں۔",
+    "Return qty remaining quantity se zyada nahi ho sakti.": "واپسی کی مقدار باقی مقدار سے زیادہ نہیں ہو سکتی۔",
+    "Returned qty remaining quantity se zyada nahi ho sakti.": "واپس شدہ مقدار باقی مقدار سے زیادہ نہیں ہو سکتی۔",
+    "Sirf Admin promise cancel kar sakta hai.": "صرف ایڈمن وعدہ منسوخ کر سکتا ہے۔",
+    "Transfer amount 0 se zyada hona chahiye.": "منتقلی کی رقم صفر سے زیادہ ہونی چاہیے۔",
+    "Transfer amount From Customer ke current outstanding se zyada nahi ho sakta.": "منتقلی کی رقم منتقل کرنے والے گاہک کے موجودہ بقایا سے زیادہ نہیں ہو سکتی۔",
+    "Ye file valid backup nahi hai.": "یہ فائل درست بیک اَپ نہیں ہے۔",
+    "Ye invoice fully returned ho chuki hai. Nayi invoice banayein.": "یہ انوائس مکمل طور پر واپس ہو چکی ہے۔ نئی انوائس بنائیں۔",
+    "Ye invoice fully returned/exchanged ho chuki hai. Nayi invoice banayein.": "یہ انوائس مکمل طور پر واپس/تبادلہ ہو چکی ہے۔ نئی انوائس بنائیں۔",
+    "This Sales Return has linked Exchange records. Delete the Exchange first.": "اس فروخت واپسی کے ساتھ تبادلے کے ریکارڈ منسلک ہیں۔ پہلے تبادلہ حذف کریں۔",
+    "Change": "تبدیل کریں",
+    "Upload": "اپ لوڈ کریں",
+    "Remove": "ہٹائیں",
+    "Add Branch": "+ برانچ شامل کریں",
+    "Add Item": "+ آئٹم شامل کریں",
+    "Add User": "+ صارف شامل کریں",
+    "Adjustment": "+ ایڈجسٹمنٹ",
+    "New Advance Booking": "+ نئی پیشگی بکنگ",
+    "New Customer": "+ نیا گاہک",
+    "New Driver": "+ نیا ڈرائیور",
+    "New Invoice": "+ نئی انوائس",
+    "New Lead": "+ نئی لیڈ",
+    "New Offer": "+ نئی آفر",
+    "New Order": "+ نیا آرڈر",
+    "New Outstanding Transfer": "+ نئی بقایا منتقلی",
+    "New Promise": "+ نیا وعدہ",
+    "Download Backup (JSON)": "بیک اَپ ڈاؤن لوڈ کریں (JSON)",
+    "Restore from File": "فائل سے بحال کریں",
+    "Active (customer portal mein dikhaya jaye)": "فعال (کسٹمر پورٹل میں دکھایا جائے)",
+    "Offer Text (scrolling ticker mein dikhega)": "آفر کا متن (اسکرولنگ ٹکر میں دکھایا جائے گا)",
+        "Portal": "پورٹل",
+    "Trading Ledger": "ٹریڈنگ لیجر",
+    "Copied!": "کاپی ہو گیا!",
+    "Copy Text": "متن کاپی کریں",
+    "Is customer ka phone number nahi hai — WhatsApp link kaam nahi karega jab tak add na karein.": "اس گاہک کا فون نمبر موجود نہیں ہے — واٹس ایپ لنک اس وقت تک کام نہیں کرے گا جب تک نمبر شامل نہ کیا جائے۔",
+    "Is customer ka phone number save nahi hai — WhatsApp share ke liye Customers tab mein add karein.": "اس گاہک کا فون نمبر محفوظ نہیں ہے — واٹس ایپ پر شیئر کرنے کے لیے گاہکوں کے ٹیب میں نمبر شامل کریں۔",
+    "Export Excel (CSV)": "ایکسِل برآمد کریں (CSV)",
+    "Export PDF": "پی ڈی ایف برآمد کریں",
+    "My Invoices": "میری انوائسز",
+    "My Ledger": "میرا لیجر",
+    "Payment History": "ادائیگی کی تاریخ",
+    "Invoice Details": "انوائس کی تفصیلات",
+    "Download Invoice": "انوائس ڈاؤن لوڈ کریں",
+    "Profile": "پروفائل",
+    "Unpaid": "غیر ادا شدہ",
+    "Remaining": "باقی",
+  },
+};
+
+const statusTranslations = {
+  "Pending": "زیرِ التوا",
+  "Completed": "مکمل",
+  "Cancelled": "منسوخ",
+  "Processing": "پروسیسنگ",
+  "Builder": "بلڈر",
+  "Contractor": "ٹھیکیدار",
+  "Developer": "ڈویلپر",
+  "Housing Society": "ہاؤسنگ سوسائٹی",
+  "New": "نیا",
+  "Contacted": "رابطہ کیا گیا",
+  "Qualified": "اہل قرار دیا گیا",
+  "Won": "کامیاب",
+  "Lost": "ضائع شدہ",
+  "Booked": "بک شدہ",
+  "Partially Delivered": "جزوی ڈیلیوری",
+  "Partially Paid": "جزوی ادائیگی",
+  "Broken Promise": "ٹوٹا ہوا وعدہ",
+  "Active": "فعال",
+  "Reversed": "واپس کیا گیا",
+  "Deleted": "حذف شدہ",
+  "Normal": "معمول",
+  "Partially Returned": "جزوی واپسی",
+  "Fully Returned": "مکمل واپسی",
+  "Partially Exchanged": "جزوی تبادلہ",
+  "Fully Exchanged": "مکمل تبادلہ",
+  "Returned + Exchanged": "واپسی + تبادلہ",
+};
+
+function t(key) {
+  const source = String(key ?? "");
+  if (languageState === "en") return source;
+  return translations.ur[source] || statusTranslations[source] || source;
+}
+
+function tStatus(status) {
+  return languageState === "ur" ? (statusTranslations[status] || t(status)) : status;
+}
+
+function subscribeLanguage(listener) {
+  languageListeners.add(listener);
+  return () => languageListeners.delete(listener);
+}
+
+function setLanguage(language) {
+  const next = language === "ur" ? "ur" : "en";
+  languageState = next;
+  try { window.localStorage.setItem(LANGUAGE_STORAGE_KEY, next); } catch {}
+  languageListeners.forEach((listener) => listener(next));
+}
+
+function useLanguage() {
+  const [language, setLocalLanguage] = useState(languageState);
+  useEffect(() => subscribeLanguage(setLocalLanguage), []);
+  return { language, setLanguage };
+}
+
+function LanguageSwitcher({ compact = false }) {
+  const { language } = useLanguage();
+  return (
+    <div className={`inline-flex items-center border border-slate-300 bg-white ${compact ? "text-[10px]" : "text-xs"} font-bold uppercase tracking-wide`} dir="ltr">
+      <button
+        type="button"
+        onClick={() => setLanguage("en")}
+        className={`px-2.5 py-1.5 transition-colors ${language === "en" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"}`}
+      >
+        English
+      </button>
+      <span className="text-slate-300">|</span>
+      <button
+        type="button"
+        onClick={() => setLanguage("ur")}
+        className={`px-2.5 py-1.5 transition-colors ${language === "ur" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"}`}
+      >
+        اردو
+      </button>
+    </div>
+  );
+}
+
+/*
+ * Existing ERP components contain many legacy literal JSX strings. This
+ * presentation bridge translates those exact UI strings without touching
+ * customer/product/company-entered data, stored values, calculations, or IDs.
+ * New/edited UI should use t(key) directly.
+ */
+function I18nDomBridge() {
+  const { language } = useLanguage();
+
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    document.documentElement.dir = language === "ur" ? "rtl" : "ltr";
+    document.documentElement.lang = language === "ur" ? "ur" : "en";
+    document.body.dir = language === "ur" ? "rtl" : "ltr";
+    document.body.style.fontFamily = language === "ur"
+      ? '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif'
+      : 'Inter, Arial, sans-serif';
+
+    const root = document.body;
+    const shouldSkip = (node) => {
+      const el = node.parentElement;
+      if (!el) return true;
+      const tag = el.tagName;
+      return ["SCRIPT", "STYLE", "TEXTAREA"].includes(tag) ||
+        (tag === "INPUT" && !["button", "submit"].includes((el.type || "").toLowerCase()));
+    };
+
+    const translate = () => {
+      if (language === "en") return;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      let node;
+      while ((node = walker.nextNode())) nodes.push(node);
+      nodes.forEach((textNode) => {
+        if (shouldSkip(textNode)) return;
+        const raw = textNode.nodeValue || "";
+        const trimmed = raw.trim();
+        if (!trimmed || trimmed.length > 180) return;
+        const translated = t(trimmed);
+        if (translated !== trimmed) {
+          textNode.nodeValue = raw.replace(trimmed, translated);
+        }
+      });
+      root.querySelectorAll("input[placeholder], textarea[placeholder], [title], [aria-label]").forEach((el) => {
+        ["placeholder", "title", "aria-label"].forEach((attr) => {
+          if (!el.hasAttribute(attr)) return;
+          const value = el.getAttribute(attr);
+          if (value && value.length < 180) {
+            const translated = t(value);
+            if (translated !== value) el.setAttribute(attr, translated);
+          }
+        });
+      });
+    };
+
+    // Run after React paints. React may add modal/table content later, so a
+    // lightweight observer translates newly rendered UI strings as well.
+    const raf = requestAnimationFrame(translate);
+    const observer = new MutationObserver(() => requestAnimationFrame(translate));
+    observer.observe(root, { childList: true, subtree: true });
+    return () => {
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+    };
+  }, [language]);
+
+  return null;
+}
+
 
 /* ============================================================
    CHAUDHARY TRADERS — Browser ERP (Phase 1 + Phase 2 + Phase 3)
@@ -17,263 +655,6 @@ const VEHICLE_TYPES = ["Rickshaw", "Truck", "Mazda", "Loader Rickshaw", "Other"]
 const PROMISE_STATUSES = ["Pending", "Partially Paid", "Completed", "Broken Promise", "Cancelled"];
 const PROMISE_PAYMENT_METHODS = ["Cash", "Bank", "Online", "Cheque", "Other"];
 
-
-/* ============================================================
-   BILINGUAL UI — English / Urdu
-   Presentation-only i18n layer. Stored business values remain
-   unchanged (Pending, Completed, Builder, etc.).
-   ============================================================ */
-const CT_LANGUAGE_KEY = "ct-language";
-
-const CT_TRANSLATIONS = {
-  "Dashboard": "ڈیش بورڈ",
-  "Customers": "گاہک",
-  "Invoices": "انوائسز",
-  "Invoice History": "انوائس ہسٹری",
-  "Sales Return": "سیلز ریٹرن",
-  "Exchange": "تبادلہ",
-  "Credit Notes": "کریڈٹ نوٹس",
-  "Ledger": "کھاتہ",
-  "Payments": "ادائیگیاں",
-  "Outstanding Transfer": "بقایا منتقلی",
-  "Adjustments": "ایڈجسٹمنٹس",
-  "Advance Booking": "ایڈوانس بکنگ",
-  "Daily Orders": "روزانہ آرڈرز",
-  "Promise To Pay": "ادائیگی کا وعدہ",
-  "Leads": "لیڈز",
-  "Products": "مصنوعات",
-  "Drivers": "ڈرائیورز",
-  "Offers": "آفرز",
-  "Reports": "رپورٹس",
-  "Sales Assistant": "سیلز اسسٹنٹ",
-  "Cement Estimator": "سیمنٹ تخمینہ",
-  "Settings": "ترتیبات",
-  "Welcome": "خوش آمدید",
-  "Welcome, ": "خوش آمدید، ",
-  "All Branches": "تمام برانچز",
-  "Search": "تلاش کریں",
-  "Search name or phone...": "نام یا فون تلاش کریں...",
-  "Search customer...": "گاہک تلاش کریں...",
-  "Username": "صارف نام",
-  "Password": "پاس ورڈ",
-  "Login": "لاگ اِن",
-  "Log In": "لاگ اِن",
-  "Sign In": "سائن اِن",
-  "Logout": "لاگ آؤٹ",
-  "Log out": "لاگ آؤٹ",
-  "Email": "ای میل",
-  "Phone": "فون",
-  "Address": "پتہ",
-  "City": "شہر",
-  "Customer": "گاہک",
-  "Customer Name": "گاہک کا نام",
-  "Customer Details": "گاہک کی تفصیلات",
-  "Customer Type": "گاہک کی قسم",
-  "Add Customer": "گاہک شامل کریں",
-  "+ New Customer": "+ نیا گاہک",
-  "Save Customer": "گاہک محفوظ کریں",
-  "Update Customer": "گاہک اپ ڈیٹ کریں",
-  "Edit Customer": "گاہک میں ترمیم کریں",
-  "Delete Customer": "گاہک حذف کریں",
-  "Edit": "ترمیم کریں",
-  "Delete": "حذف کریں",
-  "Save": "محفوظ کریں",
-  "Cancel": "منسوخ کریں",
-  "Submit": "جمع کریں",
-  "Print": "پرنٹ کریں",
-  "Download": "ڈاؤن لوڈ کریں",
-  "Create Invoice": "انوائس بنائیں",
-  "Invoice Number": "انوائس نمبر",
-  "Invoice Date": "انوائس کی تاریخ",
-  "Product": "مصنوعات",
-  "Quantity": "مقدار",
-  "Unit Price": "فی یونٹ قیمت",
-  "Discount": "رعایت",
-  "Tax": "ٹیکس",
-  "Subtotal": "ذیلی کل",
-  "Grand Total": "کل رقم",
-  "Paid": "ادا شدہ",
-  "Unpaid": "غیر ادا شدہ",
-  "Partial": "جزوی",
-  "Balance": "بقایا",
-  "Save Invoice": "انوائس محفوظ کریں",
-  "Print Invoice": "انوائس پرنٹ کریں",
-  "Download Invoice": "انوائس ڈاؤن لوڈ کریں",
-  "Date": "تاریخ",
-  "Description": "تفصیل",
-  "Debit": "ڈیبٹ",
-  "Credit": "کریڈٹ",
-  "Opening Balance": "ابتدائی بقایا",
-  "Closing Balance": "اختتامی بقایا",
-  "Payment": "ادائیگی",
-  "Sale": "فروخت",
-  "Return": "واپسی",
-  "Total": "کل",
-  "Add Payment": "ادائیگی شامل کریں",
-  "Payment Amount": "ادائیگی کی رقم",
-  "Payment Date": "ادائیگی کی تاریخ",
-  "Payment Method": "ادائیگی کا طریقہ",
-  "Cash": "نقد",
-  "Bank": "بینک",
-  "Online": "آن لائن",
-  "Reference": "حوالہ",
-  "Notes": "نوٹس",
-  "Save Payment": "ادائیگی محفوظ کریں",
-  "Daily Sales": "روزانہ فروخت",
-  "Monthly Sales": "ماہانہ فروخت",
-  "Total Sales": "کل فروخت",
-  "Total Payments": "کل ادائیگیاں",
-  "Outstanding": "بقایا",
-  "Outstanding Balance": "بقایا رقم",
-  "Customer Report": "گاہک رپورٹ",
-  "Invoice Report": "انوائس رپورٹ",
-  "Sales Report": "فروخت رپورٹ",
-  "Print Report": "رپورٹ پرنٹ کریں",
-  "Export Report": "رپورٹ ایکسپورٹ کریں",
-  "Pending": "زیرِ التوا",
-  "Processing": "زیرِ کارروائی",
-  "Completed": "مکمل",
-  "Cancelled": "منسوخ",
-  "New": "نیا",
-  "Contacted": "رابطہ کیا گیا",
-  "Qualified": "موزوں",
-  "Won": "کامیاب",
-  "Lost": "ناکام",
-  "Booked": "بک شدہ",
-  "Partially Delivered": "جزوی ڈیلیوری",
-  "Active": "فعال",
-  "Reversed": "واپس منسوخ",
-  "Partially Paid": "جزوی ادائیگی",
-  "Broken Promise": "وعدہ پورا نہیں ہوا",
-  "Save": "محفوظ کریں",
-  "Loading...": "لوڈ ہو رہا ہے...",
-  "No Customers Found": "کوئی گاہک نہیں ملا",
-  "Today's Sales": "آج کی فروخت",
-  "This Month": "اس ماہ",
-  "Total Outstanding": "کل بقایا",
-  "Active Leads": "فعال لیڈز",
-  "Open Bookings": "کھلی بکنگز",
-  "Promise To Pay Overview": "ادائیگی کے وعدوں کا جائزہ",
-  "Today's Promises": "آج کے وعدے",
-  "Upcoming (7 Days)": "آئندہ (7 دن)",
-  "Overdue Promises": "میعاد گزرے وعدے",
-  "Pending Promises": "زیرِ التوا وعدے",
-  "Completed Promises": "مکمل وعدے",
-  "Broken Promises": "ٹوٹے ہوئے وعدے",
-  "Total Promised Amount": "وعدہ شدہ کل رقم",
-  "Promise Customers": "وعدہ کرنے والے گاہک",
-  "Recent Invoices": "حالیہ انوائسز",
-  "Koi invoice nahi bana abhi tak.": "ابھی تک کوئی انوائس نہیں بنی۔",
-  "Payment Received": "ادائیگی موصول ہو گئی",
-  "Invoice Created Successfully": "انوائس کامیابی سے بنا دی گئی ہے",
-  "Invalid credentials": "صارف نام یا پاس ورڈ غلط ہے",
-  "Remember Me": "مجھے یاد رکھیں",
-  "Forgot Password": "پاس ورڈ بھول گئے؟",
-  "Role": "کردار",
-  "Branch": "برانچ",
-  "Notifications": "اطلاعات",
-  "Profile": "پروفائل",
-  "Account Information": "اکاؤنٹ کی معلومات",
-  "My Invoices": "میری انوائسز",
-  "My Ledger": "میرا کھاتہ",
-  "Invoice Details": "انوائس کی تفصیلات",
-  "English": "English",
-  "اردو": "اردو",
-};
-
-const CT_STATUS_TRANSLATIONS = {
-  Pending: "زیرِ التوا", Paid: "ادا شدہ", Unpaid: "غیر ادا شدہ",
-  Completed: "مکمل", Cancelled: "منسوخ", Processing: "زیرِ کارروائی",
-  New: "نیا", Contacted: "رابطہ کیا گیا", Qualified: "موزوں",
-  Won: "کامیاب", Lost: "ناکام", Booked: "بک شدہ",
-  "Partially Delivered": "جزوی ڈیلیوری", "Partially Paid": "جزوی ادائیگی",
-  "Broken Promise": "وعدہ پورا نہیں ہوا", Active: "فعال", Reversed: "واپس منسوخ",
-  Builder: "بلڈر", Contractor: "کنٹریکٹر", Developer: "ڈویلپر",
-  "Housing Society": "ہاؤسنگ سوسائٹی",
-};
-
-const CTLanguageContext = createContext(null);
-
-function CTLanguageProvider({ children }) {
-  const [language, setLanguageState] = useState(() => {
-    try { return localStorage.getItem(CT_LANGUAGE_KEY) || "en"; } catch { return "en"; }
-  });
-  const isUrdu = language === "ur";
-
-  const setLanguage = useCallback((next) => {
-    const value = next === "ur" ? "ur" : "en";
-    setLanguageState(value);
-    try { localStorage.setItem(CT_LANGUAGE_KEY, value); } catch {}
-  }, []);
-
-  const t = useCallback((key) => {
-    if (language === "en") return key;
-    return CT_TRANSLATIONS[key] || CT_STATUS_TRANSLATIONS[key] || key;
-  }, [language]);
-
-  useEffect(() => {
-    document.documentElement.lang = isUrdu ? "ur" : "en";
-    document.documentElement.dir = isUrdu ? "rtl" : "ltr";
-    document.body.dir = isUrdu ? "rtl" : "ltr";
-    document.body.classList.toggle("ct-urdu", isUrdu);
-
-    const translate = (root = document.body) => {
-      if (!root) return;
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      const nodes = [];
-      let node;
-      while ((node = walker.nextNode())) {
-        if (node.parentElement && !["SCRIPT","STYLE","TEXTAREA"].includes(node.parentElement.tagName)) nodes.push(node);
-      }
-      nodes.forEach((n) => {
-        const raw = n.nodeValue;
-        const trimmed = raw.trim();
-        if (!trimmed) return;
-        const lead = raw.slice(0, raw.indexOf(trimmed));
-        const trail = raw.slice(raw.indexOf(trimmed) + trimmed.length);
-        const translated = isUrdu
-          ? (CT_TRANSLATIONS[trimmed] || CT_STATUS_TRANSLATIONS[trimmed] || trimmed)
-          : Object.keys(CT_TRANSLATIONS).find(k => CT_TRANSLATIONS[k] === trimmed) || trimmed;
-        if (translated !== trimmed) n.nodeValue = lead + translated + trail;
-      });
-
-      root.querySelectorAll("input[placeholder], textarea[placeholder], [title], [aria-label]").forEach((el) => {
-        for (const attr of ["placeholder","title","aria-label"]) {
-          const value = el.getAttribute(attr);
-          if (!value) continue;
-          const translated = isUrdu
-            ? (CT_TRANSLATIONS[value] || CT_STATUS_TRANSLATIONS[value])
-            : Object.keys(CT_TRANSLATIONS).find(k => CT_TRANSLATIONS[k] === value);
-          if (translated) el.setAttribute(attr, translated);
-        }
-      });
-    };
-
-    translate(document.body);
-    const observer = new MutationObserver(() => translate(document.body));
-    observer.observe(document.body, { childList: true, subtree: true });
-    return () => observer.disconnect();
-  }, [isUrdu]);
-
-  return <CTLanguageContext.Provider value={{ language, setLanguage, isUrdu, t }}>{children}</CTLanguageContext.Provider>;
-}
-
-function useCTLanguage() {
-  return useContext(CTLanguageContext) || {
-    language: "en", setLanguage: () => {}, isUrdu: false, t: (x) => x
-  };
-}
-
-function LanguageSwitcher() {
-  const { language, setLanguage } = useCTLanguage();
-  return (
-    <div className="ct-language-switcher" role="group" aria-label="Language">
-      <button type="button" onClick={() => setLanguage("en")} className={language === "en" ? "active" : ""}>English</button>
-      <button type="button" onClick={() => setLanguage("ur")} className={language === "ur" ? "active" : ""}>اردو</button>
-    </div>
-  );
-}
-
 const MESSAGE_TEMPLATES = {
   en: {
     Builder: (n, o) => `Assalam-o-Alaikum ${n},\n\nThis is Chaudhary Traders. We supply cement, bricks, sand and crush at competitive rates with reliable on-site delivery for your ongoing projects.${o > 0 ? `\n\nQuick reminder — your current outstanding balance is Rs ${o.toLocaleString()}. Kindly clear it at your convenience.` : ""}\n\nLet us know your next material requirement and we'll send a quote right away.`,
@@ -282,10 +663,10 @@ const MESSAGE_TEMPLATES = {
     "Housing Society": (n, o) => `Assalam-o-Alaikum ${n},\n\nChaudhary Traders is offering society-wide supply rates for cement, bricks and sand for common infrastructure work.${o > 0 ? `\n\nOutstanding balance: Rs ${o.toLocaleString()}.` : ""}\n\nWe'd be glad to prepare a bulk quotation for the society.`,
   },
   ur: {
-    Builder: (n, o) => `السلام علیکم ${n}،\n\nیہ چوہدری ٹریڈرز ہے۔ ہم سیمنٹ، اینٹیں، ریت اور کرش مسابقتی نرخوں پر فراہم کرتے ہیں، اور آپ کے جاری منصوبوں کے لیے قابلِ اعتماد سائٹ ڈیلیوری بھی فراہم کرتے ہیں۔${o > 0 ? `\n\nیاد دہانی: آپ کے اکاؤنٹ میں ${o.toLocaleString()} روپے بقایا ہیں۔ براہِ کرم اپنی سہولت کے مطابق ادائیگی کر دیں۔` : ""}\n\nاپنی اگلی میٹریل ضرورت بتا دیں، ہم فوراً کوٹیشن بھیج دیں گے۔`,
-    Contractor: (n, o) => `السلام علیکم ${n}،\n\nچوہدری ٹریڈرز کی جانب سے سیمنٹ اور تعمیراتی میٹریل کے بلک ریٹس دستیاب ہیں، ساتھ ہی اسی دن رکشہ/ٹرک ڈیلیوری کی سہولت بھی موجود ہے۔${o > 0 ? `\n\nآپ کے اکاؤنٹ میں ${o.toLocaleString()} روپے بقایا ہیں، براہِ کرم ادائیگی کر دیں۔` : ""}\n\nاپنا اگلا آرڈر جواب میں بھیج دیں، ہم فوراً کارروائی کریں گے۔`,
-    Developer: (n, o) => `السلام علیکم ${n}،\n\nآپ کے ڈویلپمنٹ منصوبے کے لیے چوہدری ٹریڈرز تمام مراحل کے لیے حجم کے مطابق قیمتیں اور مخصوص ڈیلیوری شیڈول فراہم کر سکتا ہے۔${o > 0 ? `\n\nآپ کے اکاؤنٹ میں بقایا رقم: ${o.toLocaleString()} روپے۔` : ""}\n\nمسلسل سپلائی کے انتظام کے لیے مناسب وقت بتا دیں۔`,
-    "Housing Society": (n, o) => `السلام علیکم ${n}،\n\nچوہدری ٹریڈرز ہاؤسنگ سوسائٹی کے انفراسٹرکچر کام کے لیے سیمنٹ، اینٹوں اور ریت پر خصوصی بلک ریٹس فراہم کر رہا ہے۔${o > 0 ? `\n\nبقایا رقم: ${o.toLocaleString()} روپے۔` : ""}\n\nہم سوسائٹی کے لیے بلک کوٹیشن تیار کر سکتے ہیں، براہِ کرم بتا دیں۔`,
+    Builder: (n, o) => `السلام علیکم ${n}،\n\nیہ چوہدری ٹریڈرز ہے۔ ہم سیمنٹ، اینٹیں، ریت اور کرش مناسب نرخوں پر فراہم کرتے ہیں، اور آپ کے جاری منصوبوں کے لیے قابلِ اعتماد سائٹ ڈیلیوری بھی فراہم کرتے ہیں۔${o > 0 ? `\n\nیاد دہانی — آپ کے اکاؤنٹ میں موجودہ بقایا رقم Rs ${o.toLocaleString()} ہے۔ براہِ کرم اپنی سہولت کے مطابق ادا کر دیں۔` : ""}\n\nاپنی اگلی تعمیراتی ضرورت بتائیں، ہم فوراً ریٹ بھیج دیں گے۔`,
+    Contractor: (n, o) => `السلام علیکم ${n}،\n\nچوہدری ٹریڈرز کی طرف سے — سیمنٹ اور تعمیراتی سامان پر بلک ریٹس دستیاب ہیں، ساتھ ہی اسی دن رکشہ/ٹرک ڈیلیوری کی سہولت موجود ہے۔${o > 0 ? `\n\nآپ کے اکاؤنٹ میں Rs ${o.toLocaleString()} بقایا ہیں، براہِ کرم ادائیگی کر دیں۔` : ""}\n\nاپنا اگلا آرڈر جواب میں بھیج دیں، ہم فوراً کارروائی کریں گے۔`,
+    Developer: (n, o) => `السلام علیکم ${n}،\n\nآپ کے ڈویلپمنٹ منصوبے کے لیے چوہدری ٹریڈرز تمام مراحل کے لیے بلک قیمت اور مخصوص ڈیلیوری شیڈول فراہم کر سکتا ہے۔${o > 0 ? `\n\nآپ کے اکاؤنٹ میں بقایا رقم: Rs ${o.toLocaleString()}۔` : ""}\n\nمسلسل سپلائی کے انتظام پر بات کرنے کے لیے مناسب وقت بتا دیں۔`,
+    "Housing Society": (n, o) => `السلام علیکم ${n}،\n\nچوہدری ٹریڈرز ہاؤسنگ سوسائٹی کے لیے سیمنٹ، اینٹوں اور ریت پر خصوصی بلک ریٹس فراہم کر رہا ہے۔${o > 0 ? `\n\nبقایا رقم: Rs ${o.toLocaleString()}۔` : ""}\n\nسوسائٹی کے لیے بلک کوٹیشن تیار کر دیتے ہیں، براہِ کرم بتائیں۔`,
   },
 };
 
@@ -478,7 +859,7 @@ function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl }) {
             }`}
           >
             <span className="w-4 text-center">{it.icon}</span>
-            {it.label}
+            {t(it.label)}
           </button>
         ))}
       </nav>
@@ -508,7 +889,7 @@ function Modal({ title, onClose, children, wide }) {
     <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
       <div className={`bg-white w-full ${wide ? "max-w-3xl" : "max-w-lg"} mt-8 mb-8 border-t-4 border-slate-900`}>
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
-          <h3 className="font-black uppercase tracking-tight text-slate-900">{title}</h3>
+          <h3 className="font-black uppercase tracking-tight text-slate-900">{t(title)}</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-slate-900 text-xl leading-none">×</button>
         </div>
         <div className="p-5">{children}</div>
@@ -520,7 +901,7 @@ function Modal({ title, onClose, children, wide }) {
 function Field({ label, children }) {
   return (
     <label className="block mb-3">
-      <span className="block text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{label}</span>
+      <span className="block text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t(label)}</span>
       {children}
     </label>
   );
@@ -537,7 +918,7 @@ function Btn({ children, onClick, variant = "primary", type = "button", small, d
   };
   return (
     <button type={type} onClick={disabled ? undefined : onClick} disabled={disabled} className={`${base} ${styles[variant]}`}>
-      {children}
+      {typeof children === "string" ? t(children) : children}
     </button>
   );
 }
@@ -575,8 +956,10 @@ function Login({ users, customers, onLogin, companyName, logoUrl, onResetUsers }
   return (
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
       <div className="bg-white w-full max-w-sm border-t-4 border-slate-900">
-        <div className="flex justify-end px-4 pt-3"><LanguageSwitcher /></div>
-        <div className="px-6 pt-6 pb-2">
+        <div className="px-6 pt-4 flex justify-end">
+          <LanguageSwitcher />
+        </div>
+        <div className="px-6 pt-2 pb-2">
           {logoUrl && <img src={logoUrl} alt="Logo" className="w-12 h-12 object-contain mb-2" />}
           <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500 font-bold">Trading Ledger</div>
           <div className="text-2xl font-black uppercase tracking-tight text-slate-900">{companyName}</div>
@@ -1386,7 +1769,15 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
 
 function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
   const isEdit = !!editingInvoice;
+  // Cash Customer / Walk-In: customerType is "Regular" (existing workflow,
+  // unchanged) or "Cash" (no customer account required). The type is fixed
+  // once an invoice is created, so the toggle is only shown for new invoices.
+  const [customerType, setCustomerType] = useState(editingInvoice?.customerType || "Regular");
+  const canChangeCustomerType = !isEdit;
   const [customerId, setCustomerId] = useState(editingInvoice?.customerId || prefill?.customerId || customers[0]?.id || "");
+  const [cashName, setCashName] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerName || "") : "");
+  const [cashPhone, setCashPhone] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerPhone || "") : "");
+  const [cashAddress, setCashAddress] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerAddress || "") : "");
   const [date, setDate] = useState(editingInvoice?.date || todayISO());
   const [items, setItems] = useState(
     editingInvoice
@@ -1409,8 +1800,12 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
 
   const matchedDriver = drivers.find((d) => d.code.toLowerCase() === driverIdInput.trim().toLowerCase());
 
-  const selectedCustomer = customers.find((c) => c.id === customerId);
-  const previousOutstanding = isEdit
+  const selectedCustomer = customerType === "Regular" ? customers.find((c) => c.id === customerId) : null;
+  // Cash Customer / Walk-In never carries an outstanding balance — it has
+  // no customer account, no opening balance, and no ledger of its own.
+  const previousOutstanding = customerType === "Cash"
+    ? 0
+    : isEdit
     ? (editingInvoice.previousOutstanding || 0)
     : selectedCustomer
     ? computeLedgerForCustomer(selectedCustomer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding
@@ -1430,6 +1825,15 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const total = subtotal + (Number(rickshawRent) || 0) + (Number(deliveryCharges) || 0) - (Number(discount) || 0);
   const balanceDue = total - (Number(paymentReceived) || 0);
 
+  // Cash Customer / Walk-In: Invoice Total = Cash Received, always. Keep
+  // the payment field synced to the total so the invoice is always fully
+  // paid with zero outstanding, per the Cash Sale workflow.
+  useEffect(() => {
+    if (customerType === "Cash") {
+      setPaymentReceived(total);
+    }
+  }, [customerType, total]);
+
   function updateItem(id, patch) {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
   }
@@ -1445,20 +1849,39 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   }
 
   function submit() {
-    const customer = customers.find((c) => c.id === customerId);
-    if (!customer) { alert("Pehle customer select karein."); return; }
+    let customer = null;
+    if (customerType === "Regular") {
+      customer = customers.find((c) => c.id === customerId);
+      if (!customer) { alert("Pehle customer select karein."); return; }
+    }
     const cleanItems = items.filter((it) => it.name && Number(it.qty) > 0);
     if (cleanItems.length === 0) { alert("Kam az kam ek item add karein."); return; }
     const issuedTo = issuedToName.trim()
       ? { name: issuedToName.trim(), phone: issuedToPhone.trim(), relation: issuedToRelation, remarks: issuedToRemarks.trim() }
       : null;
 
+    // Cash Customer / Walk-In: no customer account required. Name/phone/
+    // address are optional free-text fields, defaulting to "Cash Customer"
+    // when no name is entered. Invoice Total = Cash Received, so the
+    // invoice is always fully paid with zero outstanding balance.
+    const finalCustomerId = customerType === "Cash" ? (isEdit ? editingInvoice.customerId : uid("cash")) : customerId;
+    const finalCustomerName = customerType === "Cash" ? (cashName.trim() || "Cash Customer") : customer.name;
+    const finalCustomerPhone = customerType === "Cash" ? cashPhone.trim() : (customer.phone || "");
+    const finalCustomerAddress = customerType === "Cash" ? cashAddress.trim() : (customer.address || "");
+    const finalPaymentReceived = customerType === "Cash" ? total : (Number(paymentReceived) || 0);
+    const finalBalanceDue = total - finalPaymentReceived;
+
     const base = {
-      customerId,
-      customerName: customer.name,
-      customerPhone: customer.phone || "",
-      customerAddress: customer.address || "",
-      previousOutstanding,
+      customerId: finalCustomerId,
+      customerName: finalCustomerName,
+      customerPhone: finalCustomerPhone,
+      customerAddress: finalCustomerAddress,
+      customerType,
+      // A Cash Customer / Walk-In invoice belongs to the branch that
+      // created it (there is no customer record to derive the branch
+      // from), so it stays visible in that branch's invoice list.
+      branchId: currentUser?.branchId || "",
+      previousOutstanding: customerType === "Cash" ? 0 : previousOutstanding,
       date,
       // BUGFIX: item qty (which may be a fractional Feet/Meter/KG/Liter/
       // Sq.Ft amount) and total are rounded so the per-unit rate derived
@@ -1474,9 +1897,9 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
       receivedBy,
       subtotal,
       total,
-      paymentReceived: Number(paymentReceived) || 0,
-      balanceDue,
-      status: balanceDue <= 0 ? "Paid" : paymentReceived > 0 ? "Partial" : "Unpaid",
+      paymentReceived: finalPaymentReceived,
+      balanceDue: finalBalanceDue,
+      status: customerType === "Cash" ? "Paid" : (finalBalanceDue <= 0 ? "Paid" : finalPaymentReceived > 0 ? "Partial" : "Unpaid"),
       issuedTo,
     };
 
@@ -1515,16 +1938,49 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
           )}
         </div>
       )}
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Customer">
-          <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
-            {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
+      {canChangeCustomerType ? (
+        <Field label="Customer Type">
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setCustomerType("Regular")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${customerType === "Regular" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>Regular Customer</button>
+            <button type="button" onClick={() => setCustomerType("Cash")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${customerType === "Cash" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>Cash Customer / Walk-In</button>
+          </div>
         </Field>
+      ) : (
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-2">
+          {customerType === "Cash" ? "Cash Customer / Walk-In Invoice" : "Regular Customer Invoice"}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        {customerType === "Regular" && (
+          <Field label="Customer">
+            <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+        )}
         <Field label="Date">
           <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
       </div>
+
+      {customerType === "Cash" && (
+        <div className="bg-blue-50 border border-blue-200 p-3 mb-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700 mb-2">Cash Customer / Walk-In Details (Optional)</div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Customer Name (optional)">
+              <input className={inputCls} placeholder="Cash Customer" value={cashName} onChange={(e) => setCashName(e.target.value)} />
+            </Field>
+            <Field label="Phone Number (optional)">
+              <input className={inputCls} value={cashPhone} onChange={(e) => setCashPhone(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Address (optional)">
+            <input className={inputCls} value={cashAddress} onChange={(e) => setCashAddress(e.target.value)} />
+          </Field>
+          <div className="text-[11px] text-blue-700">Customer account, portal, credit limit ya outstanding ledger nahi banega — sirf cash sale invoice.</div>
+        </div>
+      )}
 
       {selectedCustomer && (
         <div className="bg-slate-50 border border-slate-200 p-3 mb-3 text-sm">
@@ -1607,9 +2063,15 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
         <Field label="Discount (Rs)">
           <input type="number" className={inputCls} value={discount} onChange={(e) => setDiscount(e.target.value)} />
         </Field>
-        <Field label="Payment Received Now (Rs)">
-          <input type="number" className={inputCls} value={paymentReceived} onChange={(e) => setPaymentReceived(e.target.value)} />
-        </Field>
+        {customerType === "Regular" ? (
+          <Field label="Payment Received Now (Rs)">
+            <input type="number" className={inputCls} value={paymentReceived} onChange={(e) => setPaymentReceived(e.target.value)} />
+          </Field>
+        ) : (
+          <Field label="Cash Received (Auto = Total)">
+            <input type="number" className={`${inputCls} bg-slate-100`} value={total} disabled readOnly />
+          </Field>
+        )}
       </div>
 
       <div className="border-t border-slate-200 mt-3 pt-3">
@@ -1717,6 +2179,9 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, onClose, onEdit,
           <div className="text-right">
             <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{invoice.number}</div>
             <div className="text-xs text-slate-500 mt-1">Date: <span className="font-bold text-slate-700">{fmtDate(invoice.date)}</span></div>
+            {invoice.customerType === "Cash" && (
+              <div className="inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</div>
+            )}
             {rs && rs.status !== "Normal" && (
               <div className={`inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 ${RETURN_STATUS_TONE[rs.status]}`}>{rs.status}</div>
             )}
@@ -1923,25 +2388,32 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
     <div>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-black uppercase tracking-tight">Invoices</h2>
-        <Btn onClick={() => setShowForm(true)} disabled={customers.length === 0}>+ New Invoice</Btn>
+        <Btn onClick={() => setShowForm(true)}>+ New Invoice</Btn>
       </div>
-      {customers.length === 0 && <div className="text-slate-400 mb-3">Pehle Customers tab mein customer add karein.</div>}
+      {customers.length === 0 && <div className="text-slate-400 mb-3">Regular customer ke liye pehle Customers tab mein customer add karein — Cash Customer / Walk-In invoice abhi bhi bana sakte hain.</div>}
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-              <th className="px-4 py-2">Number</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Date</th>
+              <th className="px-4 py-2">Number</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Type</th><th className="px-4 py-2">Date</th>
               <th className="px-4 py-2 text-right">Total</th><th className="px-4 py-2 text-right">Due</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Return/Exchange</th>
             </tr>
           </thead>
           <tbody>
-            {sorted.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-slate-400">Koi invoice nahi bana.</td></tr>}
+            {sorted.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi invoice nahi bana.</td></tr>}
             {sorted.map((inv) => {
               const rs = computeInvoiceReturnStatus(inv, returns, exchanges);
               return (
                 <tr key={inv.id} className={`border-t border-slate-100 cursor-pointer hover:bg-slate-50 ${inv.docStatus === "Cancelled" ? "opacity-50" : ""}`} onClick={() => setViewing(inv)}>
                   <td className="px-4 py-2 font-bold text-blue-700">{inv.number}</td>
                   <td className="px-4 py-2">{inv.customerName}</td>
+                  <td className="px-4 py-2">
+                    {inv.customerType === "Cash" ? (
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</span>
+                    ) : (
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-100 text-slate-500">Regular</span>
+                    )}
+                  </td>
                   <td className="px-4 py-2 text-slate-500">{fmtDate(inv.date)}</td>
                   <td className="px-4 py-2 text-right font-bold">{fmtMoney(inv.total)}</td>
                   <td className="px-4 py-2 text-right text-red-600 font-bold">{inv.docStatus !== "Cancelled" && inv.balanceDue > 0 ? fmtMoney(inv.balanceDue) : "-"}</td>
@@ -4085,7 +4557,7 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
 
 function SalesAssistant({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments }) {
   const [customerId, setCustomerId] = useState(customers[0]?.id || "");
-  const [lang, setLang] = useState("ur");
+  const { language: lang } = useLanguage();
   const [audience, setAudience] = useState("Builder");
   const [copied, setCopied] = useState(false);
 
@@ -4195,12 +4667,16 @@ function CustomerPortal({ currentUser, customers, invoices, payments, returns, e
   const tickerText = activeOffers.map((o) => o.text).join("     ★     ");
 
   return (
-    <div className="min-h-screen bg-slate-100">
-      <div className="flex justify-end p-3 bg-white border-b border-slate-200">
-        <LanguageSwitcher />
-      </div>
-      <div className="flex justify-end p-3 bg-white"><LanguageSwitcher /></div>
+    <div className={`min-h-screen bg-slate-100 ${languageState === "ur" ? "rtl-ui" : "ltr-ui"}`}>
       <style>{`
+        .rtl-ui { direction: rtl; }
+        .rtl-ui input, .rtl-ui textarea, .rtl-ui select { direction: rtl; text-align: right; }
+        .rtl-ui table { direction: rtl; }
+        .rtl-ui .text-left { text-align: right; }
+        .rtl-ui .text-right { text-align: left; }
+        .rtl-ui .ml-2 { margin-left: 0; margin-right: 0.5rem; }
+        .rtl-ui .mr-3 { margin-right: 0; margin-left: 0.75rem; }
+        .rtl-ui .space-x-2 > :not([hidden]) ~ :not([hidden]) { margin-right: 0.5rem; margin-left: 0; }
         @media print {
           body * { visibility: hidden; }
           #print-invoice, #print-invoice * { visibility: visible; }
@@ -4216,12 +4692,15 @@ function CustomerPortal({ currentUser, customers, invoices, payments, returns, e
           animation: ticker-scroll 22s linear infinite;
         }
       `}</style>
-      <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between">
+      <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between gap-4">
         <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] text-white font-bold">{settings.companyName} Portal</div>
+          <div className="text-[10px] uppercase tracking-[0.2em] text-white font-bold">{settings.companyName} {t("Portal")}</div>
           <div className="text-lg font-black">{customer.name}</div>
         </div>
-        <button onClick={onLogout} className="text-xs uppercase tracking-wide font-bold text-slate-400 hover:text-white">Log out</button>
+        <div className="flex items-center gap-3">
+          <LanguageSwitcher compact />
+          <button onClick={onLogout} className="text-xs uppercase tracking-wide font-bold text-slate-400 hover:text-white">{t("Log out")}</button>
+        </div>
       </div>
 
       {activeOffers.length > 0 && (
@@ -4469,7 +4948,8 @@ function Settings({ settings, saveSettings, users, saveUser, deleteUser, current
 
 /* ---------------- App ---------------- */
 
-function AppContent() {
+export default function App() {
+  const { language } = useLanguage();
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
   const [page, setPage] = useState("dashboard");
@@ -4717,6 +5197,7 @@ function AppContent() {
       persist.payments([...payments, {
         id: uid("pay"), customerId: inv.customerId, customerName: inv.customerName,
         date: inv.date, amount: inv.paymentReceived, method: "Cash", note: `Against ${inv.number}`, invoiceId: inv.id,
+        branchId: inv.branchId || "",
       }]);
     }
   }
@@ -5021,24 +5502,32 @@ function AppContent() {
   function goToExchangeInvoice(ex) { setPage("invoices"); setFocusInvoiceId(ex.invoiceId); }
 
   if (loading) {
-    return <div className="min-h-screen bg-slate-900 flex items-center justify-center text-slate-400 text-sm font-bold uppercase tracking-wide">Loading...</div>;
+    return <>
+      <I18nDomBridge />
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center text-slate-400 text-sm font-bold uppercase tracking-wide">Loading...</div>
+    </>;
   }
   if (!currentUser) {
     return (
-      <Login
+      <>
+        <I18nDomBridge />
+        <Login
         users={users}
         customers={customers}
         onLogin={setCurrentUser}
         companyName={settings.companyName}
         logoUrl={settings.logoUrl}
         onResetUsers={() => persist.users(DEFAULT_USERS)}
-      />
+        />
+      </>
     );
   }
 
   if (currentUser.role === "customer") {
     return (
-      <CustomerPortal
+      <>
+        <I18nDomBridge />
+        <CustomerPortal
         currentUser={currentUser}
         customers={customers}
         invoices={invoices}
@@ -5051,7 +5540,8 @@ function AppContent() {
         settings={settings}
         offers={offers}
         onLogout={() => setCurrentUser(null)}
-      />
+        />
+      </>
     );
   }
 
@@ -5156,8 +5646,12 @@ function AppContent() {
   const myBranchName = branches.find((b) => b.id === myBranchId)?.name || "";
   const visibleCustomers = myBranchId ? customers.filter((c) => c.branchId === myBranchId) : customers;
   const visibleCustomerIds = new Set(visibleCustomers.map((c) => c.id));
-  const visibleInvoices = myBranchId ? invoices.filter((i) => visibleCustomerIds.has(i.customerId)) : invoices;
-  const visiblePayments = myBranchId ? payments.filter((p) => visibleCustomerIds.has(p.customerId)) : payments;
+  const visibleInvoices = myBranchId
+    ? invoices.filter((i) => visibleCustomerIds.has(i.customerId) || (i.customerType === "Cash" && i.branchId === myBranchId))
+    : invoices;
+  const visiblePayments = myBranchId
+    ? payments.filter((p) => visibleCustomerIds.has(p.customerId) || p.branchId === myBranchId)
+    : payments;
   const visibleBookings = myBranchId ? bookings.filter((b) => visibleCustomerIds.has(b.customerId)) : bookings;
   const visibleOrders = myBranchId ? orders.filter((o) => visibleCustomerIds.has(o.customerId)) : orders;
   const visibleLeads = myBranchId ? leads.filter((l) => l.branchId === myBranchId) : leads;
@@ -5256,17 +5750,18 @@ function AppContent() {
   };
 
   return (
-    <div className="h-screen flex bg-slate-100 text-slate-900">
+    <>
+      <I18nDomBridge />
+      <div className={`h-screen flex bg-slate-100 text-slate-900 ${language === "ur" ? "rtl-ui" : "ltr-ui"}`}>
       <style>{`
-        .ct-language-switcher{display:inline-flex;align-items:center;gap:2px;border:1px solid #cbd5e1;background:#fff;padding:2px;border-radius:6px;white-space:nowrap}
-        .ct-language-switcher button{border:0;background:transparent;padding:5px 9px;font-size:11px;font-weight:700;cursor:pointer;color:#475569;border-radius:4px}
-        .ct-language-switcher button.active{background:#0f172a;color:#fff}
-        body.ct-urdu,.ct-urdu{font-family:"Noto Naskh Arabic","Noto Nastaliq Urdu",Arial,sans-serif}
-        .ct-urdu input,.ct-urdu textarea,.ct-urdu select,.ct-urdu button{font-family:"Noto Naskh Arabic","Noto Nastaliq Urdu",Arial,sans-serif}
-        .ct-urdu table{text-align:right}
-        .ct-urdu th,.ct-urdu td{text-align:right}
-      `}</style>
-      <style>{`
+        .rtl-ui { direction: rtl; }
+        .rtl-ui input, .rtl-ui textarea, .rtl-ui select { direction: rtl; text-align: right; }
+        .rtl-ui table { direction: rtl; }
+        .rtl-ui .text-left { text-align: right; }
+        .rtl-ui .text-right { text-align: left; }
+        .rtl-ui .ml-2 { margin-left: 0; margin-right: 0.5rem; }
+        .rtl-ui .mr-3 { margin-right: 0; margin-left: 0.75rem; }
+        .rtl-ui .space-x-2 > :not([hidden]) ~ :not([hidden]) { margin-right: 0.5rem; margin-left: 0; }
         @media print {
           body * { visibility: hidden; }
           #print-invoice, #print-invoice * { visibility: visible; }
@@ -5278,7 +5773,6 @@ function AppContent() {
       <Sidebar page={page} setPage={setPage} role={currentUser.role} onLogout={() => setCurrentUser(null)} companyName={settings.companyName} logoUrl={settings.logoUrl} />
       <div className="flex-1 overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-3 bg-white border-b border-slate-200 gap-4">
-          <LanguageSwitcher />
           <div className="text-sm text-slate-500 whitespace-nowrap">
             Welcome, <span className="font-bold text-slate-900">{currentUser.name}</span>
             {myBranchName && <span className="ml-2 text-xs text-blue-700 font-bold uppercase">· {myBranchName}</span>}
@@ -5293,14 +5787,14 @@ function AppContent() {
               onKeyDown={(e) => { if (e.key === "Enter") { runGlobalSearch(globalSearch); setGlobalSearch(""); } }}
             />
           </div>
-          <div className="text-[10px] uppercase tracking-wide font-bold text-slate-400 whitespace-nowrap">{currentUser.role}</div>
+          <div className="flex items-center gap-3">
+            <LanguageSwitcher compact />
+            <div className="text-[10px] uppercase tracking-wide font-bold text-slate-400 whitespace-nowrap">{tStatus(currentUser.role)}</div>
+          </div>
         </div>
         <div className="p-6">{pages[page]}</div>
       </div>
-    </div>
+      </div>
+    </>
   );
-}
-
-export default function App() {
-  return <CTLanguageProvider><AppContent /></CTLanguageProvider>;
 }
