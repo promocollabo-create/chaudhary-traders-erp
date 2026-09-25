@@ -487,48 +487,55 @@ const translations = {
     "Unpaid": "غیر ادا شدہ",
     "Remaining": "باقی",
     "Commission": "کمیشن",
-    "Commission Agent": "کمیشن ایجنٹ",
-    "Commission Rule": "کمیشن کا اصول",
-    "Commission Rules": "کمیشن کے اصول",
+    "Commission Dashboard": "کمیشن ڈیش بورڈ",
     "Commission Agents": "کمیشن ایجنٹس",
-    "Commission Rate": "کمیشن کی شرح",
-    "Commission Amount": "کمیشن کی رقم",
-    "Paid Commission": "ادا شدہ کمیشن",
-    "Pending Commission": "زیرِ التوا کمیشن",
-    "Approved Commission": "منظور شدہ کمیشن",
-    "Outstanding Commission": "بقایا کمیشن",
-    "Pay Commission": "کمیشن ادا کریں",
-    "Commission Ledger": "کمیشن کھاتہ",
+    "Commission Agent": "کمیشن ایجنٹ",
+    "Commission Agent (Optional)": "کمیشن ایجنٹ (اختیاری)",
+    "Commission Rules": "کمیشن رولز",
+    "Commission Rule": "کمیشن رول",
     "Commission History": "کمیشن ہسٹری",
-    "Total Commission": "کل کمیشن",
-    "This Month Commission": "اس ماہ کا کمیشن",
-    "Add Agent": "ایجنٹ شامل کریں",
+    "Commission Ledger": "کمیشن لیجر",
+    "Commission Payment History": "کمیشن ادائیگی کی تاریخ",
+    "New Agent": "+ نیا ایجنٹ",
     "Edit Agent": "ایجنٹ میں ترمیم",
-    "Agent ID": "ایجنٹ آئی ڈی",
+    "Save Agent": "ایجنٹ محفوظ کریں",
+    "New Rule": "+ نیا رول",
+    "Edit Rule": "رول میں ترمیم",
+    "Save Rule": "رول محفوظ کریں",
     "Agent Name": "ایجنٹ کا نام",
+    "Default Commission": "ڈیفالٹ کمیشن",
     "Commission Type": "کمیشن کی قسم",
+    "Commission Rate": "کمیشن ریٹ",
+    "Commission Amount": "کمیشن رقم",
+    "Percentage": "فیصد",
     "Fixed Amount": "مقررہ رقم",
     "Per Bag": "فی بیگ",
     "Per Item": "فی آئٹم",
-    "Percentage": "فیصد",
-    "Minimum Sale Amount": "کم از کم فروخت رقم",
-    "Maximum Commission": "زیادہ سے زیادہ کمیشن",
-    "Start Date": "شروع ہونے کی تاریخ",
-    "End Date": "اختتام کی تاریخ",
-    "Approve": "منظور کریں",
-    "Cancel Commission": "کمیشن منسوخ کریں",
-    "Already Paid": "پہلے ادا شدہ",
-    "Remaining Commission": "باقی کمیشن",
+    "Pay Commission": "کمیشن ادا کریں",
     "Payment Amount": "ادائیگی کی رقم",
     "Payment Date": "ادائیگی کی تاریخ",
     "Payment Method": "ادائیگی کا طریقہ",
     "Reference Number": "حوالہ نمبر",
+    "Total Commission": "کل کمیشن",
+    "Already Paid": "پہلے سے ادا شدہ",
+    "Remaining Commission": "باقی کمیشن",
+    "Outstanding Commission": "بقایا کمیشن",
+    "Pending Commission": "زیرِ التوا کمیشن",
+    "Approved Commission": "منظور شدہ کمیشن",
+    "Paid Commission": "ادا شدہ کمیشن",
+    "This Month Commission": "اس ماہ کا کمیشن",
+    "Minimum Sale Amount": "کم از کم فروخت کی رقم",
+    "Maximum Commission": "زیادہ سے زیادہ کمیشن",
+    "All Products": "تمام مصنوعات",
+    "Inactive": "غیر فعال",
     "Online Transfer": "آن لائن ٹرانسفر",
-    "Select Agent": "ایجنٹ منتخب کریں",
-    "No Commission": "کوئی کمیشن نہیں",
-    "Commission Status": "کمیشن کی حالت",
-    "Deactivate": "غیر فعال کریں",
-    "Activate": "فعال کریں",
+    "Agent-wise": "بلحاظ ایجنٹ",
+    "Date-wise": "بلحاظ تاریخ",
+    "Product-wise": "بلحاظ مصنوعہ",
+    "Customer-wise": "بلحاظ گاہک",
+    "Commission Reports": "کمیشن رپورٹس",
+    "Recent Commission Transactions": "حالیہ کمیشن ٹرانزیکشنز",
+    "Custom Range": "حسبِ ضرورت مدت",
   },
 };
 
@@ -559,6 +566,8 @@ const statusTranslations = {
   "Partially Exchanged": "جزوی تبادلہ",
   "Fully Exchanged": "مکمل تبادلہ",
   "Returned + Exchanged": "واپسی + تبادلہ",
+  "Approved": "منظور شدہ",
+  "Inactive": "غیر فعال",
 };
 
 function t(key) {
@@ -843,7 +852,6 @@ const DEFAULT_SETTINGS = {
   promiseCounter: 1,
   transferCounter: 1,
   adjustmentCounter: 1,
-  commissionAgentCounter: 1,
   logoUrl: "",
 };
 const DEFAULT_BRANCHES = [{ id: "branch_main", name: "Main Branch" }];
@@ -883,9 +891,9 @@ function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl }) {
     { id: "creditNotes", label: "Credit Notes", icon: "📝" },
     { id: "ledger", label: "Ledger", icon: "≡" },
     { id: "payments", label: "Payments", icon: "◎" },
-     { id: "commission", label: "Commission", icon: "%" },
     { id: "outstandingTransfer", label: "Outstanding Transfer", icon: "⇄" },
     { id: "adjustments", label: "Adjustments", icon: "±" },
+    { id: "commission", label: "Commission", icon: "🎯" },
     { id: "bookings", label: "Advance Booking", icon: "▦" },
     { id: "orders", label: "Daily Orders", icon: "☎" },
     { id: "promises", label: "Promise To Pay", icon: "🤝" },
@@ -1314,6 +1322,170 @@ const ADJUSTMENT_STATUS_TONE = {
   Active: "bg-emerald-100 text-emerald-700",
   Reversed: "bg-slate-200 text-slate-600",
 };
+
+/* ---------------- Commission Management helpers ---------------- */
+// Integrates with the existing Invoice/Customer/Payment systems without
+// altering any of them: commission is tracked as its own set of entities
+// (commissionAgents / commissionRules / commissionTransactions /
+// commissionPayments) that only ever READ invoice data. Commission is
+// never added to invoice.total, never changes customer ledgers, and
+// never touches the payments table used for customer payments.
+
+const COMMISSION_TYPES = ["percentage", "fixed", "per_bag", "per_item"];
+const COMMISSION_TYPE_LABELS = {
+  percentage: "Percentage",
+  fixed: "Fixed Amount",
+  per_bag: "Per Bag",
+  per_item: "Per Item",
+};
+const COMMISSION_STATUSES = ["Pending", "Approved", "Paid", "Cancelled"];
+const COMMISSION_STATUS_TONE = {
+  Pending: "bg-blue-100 text-blue-700",
+  Approved: "bg-amber-100 text-amber-700",
+  Paid: "bg-emerald-100 text-emerald-700",
+  Cancelled: "bg-slate-200 text-slate-600",
+};
+const COMMISSION_PAYMENT_METHODS = ["Cash", "Bank", "Online Transfer", "Other"];
+const ALL_PRODUCTS_KEY = "All Products";
+
+// Formats a commission rate for display, e.g. "2%" or "Rs 20 / Bag".
+function fmtCommissionRate(type, rate) {
+  const r = Number(rate) || 0;
+  if (type === "percentage") return `${r}%`;
+  if (type === "per_bag") return `${fmtMoney(r)} / Bag`;
+  if (type === "per_item") return `${fmtMoney(r)} / Item`;
+  return `${fmtMoney(r)} / Invoice`;
+}
+
+// Picks the single best-matching Active rule for one invoice line item,
+// per the priority ladder:
+//   1. Agent + specific Product (rule.productMatch === item.name)
+//   2. Agent + All Products      (rule.productMatch === "All Products")
+//   3. Agent's own default commissionType/commissionRate (from the Agent
+//      record itself) — used only when no Rule at all matches this agent.
+// Rules are further filtered to Active status and to the invoice date
+// falling inside [startDate, endDate] when those are set.
+function findMatchingRule(rules, agentId, productName, invoiceDate) {
+  const active = (rules || []).filter((r) => {
+    if (r.agentId !== agentId) return false;
+    if (r.status !== "Active") return false;
+    if (r.startDate && invoiceDate < r.startDate) return false;
+    if (r.endDate && invoiceDate > r.endDate) return false;
+    return true;
+  });
+  const specific = active.find((r) => r.productMatch === productName);
+  if (specific) return specific;
+  const allProducts = active.find((r) => r.productMatch === ALL_PRODUCTS_KEY);
+  if (allProducts) return allProducts;
+  return null;
+}
+
+// Computes commission for one invoice, given the agent and the current
+// (possibly return/exchange-adjusted) item breakdown. Returns both the
+// total and a per-source breakdown so the Commission Ledger / invoice
+// preview can show exactly how the number was built.
+//
+// - percentage / fixed rules are applied ONCE per matching rule-group
+//   (not once per line item), matching "2% of the sale" / "Rs 1,000 per
+//   invoice" semantics rather than accidentally multiplying by line count.
+// - per_bag / per_item rules are applied per matched quantity (rate × qty),
+//   which is what makes "recalculates automatically" (Feature 16) work:
+//   call this again with the post-return breakdown and it naturally
+//   produces the lower quantity's commission.
+// - minSaleAmount / maxCommission are enforced per rule-group.
+// - Falls back to the agent's own default commissionType/commissionRate
+//   (spread across the WHOLE invoice, like an implicit "All Products"
+//   rule) when no Rule matches this agent at all.
+function computeCommissionForInvoice(agent, rules, items, invoiceDate, subtotal) {
+  if (!agent) return { total: 0, lines: [] };
+  const cleanItems = (items || []).filter((it) => Number(it.qty) > 0);
+  const groups = {}; // ruleId (or "__default__") -> { rule, items: [] }
+
+  cleanItems.forEach((it) => {
+    const rule = findMatchingRule(rules, agent.id, it.name, invoiceDate);
+    const key = rule ? rule.id : "__default__";
+    if (!groups[key]) groups[key] = { rule, items: [] };
+    groups[key].items.push(it);
+  });
+
+  // Nothing matched any explicit Rule at all -> whole invoice falls back
+  // to the agent's own default commission type/rate (tier 4).
+  const matchedAnyRule = Object.values(groups).some((g) => g.rule);
+  if (!matchedAnyRule && agent.defaultCommissionType && Number(agent.defaultCommissionRate) > 0) {
+    groups.__default__ = { rule: null, items: cleanItems };
+  }
+
+  const lines = [];
+  Object.entries(groups).forEach(([key, group]) => {
+    const rule = group.rule;
+    const type = rule ? rule.commissionType : agent.defaultCommissionType;
+    const rate = Number(rule ? rule.commissionRate : agent.defaultCommissionRate) || 0;
+    if (!type || rate <= 0) return;
+    const matchedQty = roundQty(group.items.reduce((s, it) => s + Number(it.qty), 0));
+    const matchedAmount = roundMoney(group.items.reduce((s, it) => s + Number(it.total ?? it.qty * it.price), 0));
+    const minSale = rule && Number(rule.minSaleAmount) > 0 ? Number(rule.minSaleAmount) : 0;
+    const basisAmount = rule && rule.productMatch === ALL_PRODUCTS_KEY ? subtotal : matchedAmount;
+    if (minSale > 0 && basisAmount < minSale) return;
+
+    let commission = 0;
+    if (type === "percentage") {
+      commission = roundMoney((basisAmount * rate) / 100);
+    } else if (type === "fixed") {
+      commission = roundMoney(rate);
+    } else {
+      // per_bag / per_item — rate × matched quantity
+      commission = roundMoney(rate * matchedQty);
+    }
+    const maxCap = rule && Number(rule.maxCommission) > 0 ? Number(rule.maxCommission) : 0;
+    if (maxCap > 0 && commission > maxCap) commission = maxCap;
+    if (commission <= 0) return;
+
+    lines.push({
+      ruleId: rule ? rule.id : "",
+      source: rule ? (rule.productMatch === ALL_PRODUCTS_KEY ? "All Products Rule" : `${rule.productMatch} Rule`) : "Agent Default",
+      commissionType: type,
+      commissionRate: rate,
+      matchedQty,
+      matchedAmount,
+      commission,
+    });
+  });
+
+  const total = roundMoney(lines.reduce((s, l) => s + l.commission, 0));
+  return { total, lines };
+}
+
+// Recomputes a commission transaction's amount from the invoice's CURRENT
+// item breakdown (i.e. after any Sales Return / Exchange has reduced
+// remaining quantities), using the SAME rule the transaction was
+// originally created against wherever possible, so partial returns
+// correctly shrink (never silently zero out) the commission. This is
+// called after createSalesReturn / deleteSalesReturn / createExchangeFn /
+// deleteExchangeFn and after invoice edits that change items.
+function recalculatedCommissionAmount(agent, rules, invoice, returns, exchanges) {
+  const breakdown = computeInvoiceItemBreakdown(invoice, returns, exchanges);
+  const remainingItems = breakdown
+    .filter((it) => it.remainingQty > 0)
+    .map((it) => ({ name: it.name, qty: it.remainingQty, price: it.perUnitRate, total: roundMoney(it.remainingQty * it.perUnitRate) }));
+  const remainingSubtotal = roundMoney(remainingItems.reduce((s, it) => s + it.total, 0));
+  return computeCommissionForInvoice(agent, rules, remainingItems, invoice.date, remainingSubtotal);
+}
+
+// Ledger-style aggregation for one Commission Agent: every commission
+// transaction plus every commission payment against them, running
+// balance style, mirroring the customer ledger's shape/spirit but kept
+// completely separate from computeLedgerForCustomer (different entities,
+// different table).
+function computeCommissionSummaryForAgent(agentId, transactions, payments) {
+  const myTxns = (transactions || []).filter((tx) => tx.agentId === agentId && tx.status !== "Cancelled");
+  const totalCommission = roundMoney(myTxns.reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const totalPaid = roundMoney(myTxns.reduce((s, tx) => s + Number(tx.paidAmount || 0), 0));
+  const remaining = roundMoney(totalCommission - totalPaid);
+  const pending = roundMoney((transactions || []).filter((tx) => tx.agentId === agentId && tx.status === "Pending").reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const approved = roundMoney((transactions || []).filter((tx) => tx.agentId === agentId && tx.status === "Approved").reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const paidStatus = roundMoney((transactions || []).filter((tx) => tx.agentId === agentId && tx.status === "Paid").reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  return { totalCommission, totalPaid, remaining, pending, approved, paidStatus, transactions: myTxns };
+}
 
 /* ---------------- Dashboard ---------------- */
 
@@ -1828,7 +2000,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
 
 /* ---------------- Invoices ---------------- */
 
-function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents = [], commissionRules = [], prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
+function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
   const isEdit = !!editingInvoice;
   // Cash Customer / Walk-In: customerType is "Regular" (existing workflow,
   // unchanged) or "Cash" (no customer account required). The type is fixed
@@ -1842,7 +2014,7 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const [date, setDate] = useState(editingInvoice?.date || todayISO());
   const [items, setItems] = useState(
     editingInvoice
-      ? editingInvoice.items.map((it) => ({ id: uid("it"), productId: it.productId || "", name: it.name, unit: it.unit || "Bag", qty: it.qty, price: it.price }))
+      ? editingInvoice.items.map((it) => ({ id: uid("it"), productId: "", name: it.name, unit: it.unit || "Bag", qty: it.qty, price: it.price }))
       : prefill
       ? [{ id: uid("it"), productId: prefill.productId || "", name: prefill.productName || "", unit: prefill.unit || "Bag", qty: prefill.qty || 1, price: prefill.rate || 0 }]
       : [{ id: uid("it"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]
@@ -1858,6 +2030,10 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const [issuedToPhone, setIssuedToPhone] = useState(editingInvoice?.issuedTo?.phone || "");
   const [issuedToRelation, setIssuedToRelation] = useState(editingInvoice?.issuedTo?.relation || "");
   const [issuedToRemarks, setIssuedToRemarks] = useState(editingInvoice?.issuedTo?.remarks || "");
+  // Commission integration (additive, read-only preview here): selecting an
+  // agent never changes subtotal/total/paymentReceived/balanceDue — the
+  // actual commission transaction is created/synced by the App layer after
+  // save, exactly the way a "payment" record is auto-created today.
   const [commissionAgentId, setCommissionAgentId] = useState(editingInvoice?.commissionAgentId || "");
 
   const matchedDriver = drivers.find((d) => d.code.toLowerCase() === driverIdInput.trim().toLowerCase());
@@ -1886,9 +2062,6 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const subtotal = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.price) || 0), 0);
   const total = subtotal + (Number(rickshawRent) || 0) + (Number(deliveryCharges) || 0) - (Number(discount) || 0);
   const balanceDue = total - (Number(paymentReceived) || 0);
-  const commissionPreviewInvoice = { id: editingInvoice?.id || "preview", number: editingInvoice?.number || nextNumber, customerId, customerName: selectedCustomer?.name || cashName || "Cash Customer", customerType, date, items: items.map(it => ({ ...it, productId: it.productId || "" })), total };
-  const commissionPreview = commissionAgentId ? calculateCommissionForInvoice(commissionPreviewInvoice, commissionRules, products) : { amount: 0, breakdown: [] };
-  const selectedCommissionAgent = commissionAgents.find(a => a.id === commissionAgentId);
 
   // Cash Customer / Walk-In: Invoice Total = Cash Received, always. Keep
   // the payment field synced to the total so the invoice is always fully
@@ -1898,6 +2071,14 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
       setPaymentReceived(total);
     }
   }, [customerType, total]);
+
+  const selectedAgent = commissionAgentId ? (commissionAgents || []).find((a) => a.id === commissionAgentId) : null;
+  const commissionPreviewItems = items
+    .filter((it) => it.name && Number(it.qty) > 0)
+    .map((it) => ({ name: it.name, qty: Number(it.qty) || 0, price: Number(it.price) || 0, total: (Number(it.qty) || 0) * (Number(it.price) || 0) }));
+  const commissionPreview = selectedAgent
+    ? computeCommissionForInvoice(selectedAgent, commissionRules, commissionPreviewItems, date, subtotal)
+    : { total: 0, lines: [] };
 
   function updateItem(id, patch) {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
@@ -1951,7 +2132,7 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
       // BUGFIX: item qty (which may be a fractional Feet/Meter/KG/Liter/
       // Sq.Ft amount) and total are rounded so the per-unit rate derived
       // later (total ÷ qty) is stable instead of drifting.
-      items: cleanItems.map((it) => ({ productId: it.productId || "", name: it.name, unit: it.unit || "", qty: roundQty(it.qty), price: roundMoney(it.price), total: roundMoney(roundQty(it.qty) * Number(it.price)) })),
+      items: cleanItems.map((it) => ({ name: it.name, unit: it.unit || "", qty: roundQty(it.qty), price: roundMoney(it.price), total: roundMoney(roundQty(it.qty) * Number(it.price)) })),
       rickshawRent: Number(rickshawRent) || 0,
       deliveryCharges: Number(deliveryCharges) || 0,
       discount: Number(discount) || 0,
@@ -1966,8 +2147,8 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
       balanceDue: finalBalanceDue,
       status: customerType === "Cash" ? "Paid" : (finalBalanceDue <= 0 ? "Paid" : finalPaymentReceived > 0 ? "Partial" : "Unpaid"),
       issuedTo,
+      // Commission is a reference only — never affects subtotal/total above.
       commissionAgentId: commissionAgentId || "",
-      commissionAgentName: selectedCommissionAgent?.name || "",
     };
 
     if (isEdit) {
@@ -2029,23 +2210,6 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
         <Field label="Date">
           <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
-      </div>
-
-      <div className="grid grid-cols-2 gap-3 mb-3">
-        <Field label="Commission Agent">
-          <select className={inputCls} value={commissionAgentId} onChange={e=>setCommissionAgentId(e.target.value)}>
-            <option value="">No Commission</option>
-            {commissionAgents.filter(a=>a.status==="Active").map(a=><option key={a.id} value={a.id}>{a.code} — {a.name}</option>)}
-          </select>
-          {commissionAgents.filter(a=>a.status==="Active").length === 0 && (
-            <div className="text-[11px] text-amber-700 mt-1">No active Commission Agent. Add an agent from Commission first.</div>
-          )}
-        </Field>
-        {commissionAgentId && <div className="bg-slate-50 border border-slate-200 p-2">
-          <div className="text-[11px] uppercase font-bold text-slate-500">{t("Commission Amount")}</div>
-          <div className="text-lg font-black">{fmtMoney(commissionPreview.amount)}</div>
-          <div className="text-[10px] text-slate-500 mt-1">Commission sale ke sath record hoti rahegi; payment minimum {Number(selectedCommissionAgent?.minimumBags) || 100} bags complete hone ke baad unlock hogi.</div>
-        </div>}
       </div>
 
       {customerType === "Cash" && (
@@ -2158,6 +2322,38 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
         )}
       </div>
 
+      {(commissionAgents || []).length > 0 && (
+        <div className="border-t border-slate-200 mt-3 pt-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Commission Agent (Optional)</div>
+          <div className="text-[11px] text-slate-400 mb-2">Commission is tracked separately as a business payable — it never changes the customer's invoice total above.</div>
+          <Field label="Commission Agent">
+            <select className={inputCls} value={commissionAgentId} onChange={(e) => setCommissionAgentId(e.target.value)}>
+              <option value="">No Agent</option>
+              {(commissionAgents || []).filter((a) => a.status === "Active").map((a) => (
+                <option key={a.id} value={a.id}>{a.name} ({a.id})</option>
+              ))}
+            </select>
+          </Field>
+          {selectedAgent && (
+            <div className="bg-amber-50 border border-amber-200 p-3 text-sm space-y-1">
+              {commissionPreview.lines.length === 0 && (
+                <div className="text-slate-500 text-xs">Is agent/invoice ke liye koi active commission rule match nahi hui.</div>
+              )}
+              {commissionPreview.lines.map((l, idx) => (
+                <div key={idx} className="flex justify-between text-xs text-slate-600">
+                  <span>{l.source} ({fmtCommissionRate(l.commissionType, l.commissionRate)})</span>
+                  <span className="font-bold">{fmtMoney(l.commission)}</span>
+                </div>
+              ))}
+              <div className="flex justify-between border-t border-amber-300 pt-1 mt-1">
+                <span className="font-black uppercase text-amber-700 text-xs">Estimated Commission</span>
+                <span className="font-black text-amber-700">{fmtMoney(commissionPreview.total)}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="border-t border-slate-200 mt-3 pt-3">
         <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Material Issued To (agar account owner khud collect nahi kar raha)</div>
         <div className="text-[11px] text-slate-400 mb-2">Customer account waisa hi rahega — sirf ye note hoga ke material kis ne collect kiya.</div>
@@ -2208,7 +2404,7 @@ function invoiceStatusBanner(invoice) {
   return { text: `Unpaid \u2014 Balance Due on Current Purchase${prevDue ? " \u00B7 Previous Outstanding Still Due" : ""}`, tone: "red" };
 }
 
-function InvoiceDetail({ invoice, settings, returns, exchanges, onClose, onEdit, onCancelInvoice, onGoToReturn, onGoToExchange, onCreateNewFromInvoice }) {
+function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, onClose, onEdit, onCancelInvoice, onGoToReturn, onGoToExchange, onCreateNewFromInvoice }) {
   const banner = invoiceStatusBanner(invoice);
   const bannerCls = {
     emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
@@ -2265,9 +2461,6 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, onClose, onEdit,
             <div className="text-xs text-slate-500 mt-1">Date: <span className="font-bold text-slate-700">{fmtDate(invoice.date)}</span></div>
             {invoice.customerType === "Cash" && (
               <div className="inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</div>
-            )}
-            {invoice.commissionAgentName && (
-              <div className="mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-purple-100 text-purple-700">Commission Agent: {invoice.commissionAgentName}</div>
             )}
             {rs && rs.status !== "Normal" && (
               <div className={`inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 ${RETURN_STATUS_TONE[rs.status]}`}>{rs.status}</div>
@@ -2339,6 +2532,17 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, onClose, onEdit,
           ⚠ {banner.text}
         </div>
       </div>
+
+      {commissionInfo && (
+        <div className="mt-4 text-xs bg-amber-50 border border-amber-200 px-3 py-2 print:hidden flex items-center justify-between">
+          <div>
+            <span className="font-black uppercase text-amber-700">Commission:</span>{" "}
+            <span className="font-bold text-slate-700">{commissionInfo.agentName}</span>{" "}
+            <span className="font-bold">{fmtMoney(commissionInfo.commissionAmount)}</span>
+          </div>
+          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${COMMISSION_STATUS_TONE[commissionInfo.status] || "bg-slate-100 text-slate-500"}`}>{tStatus(commissionInfo.status)}</span>
+        </div>
+      )}
 
       {(myReturns.length > 0 || myExchanges.length > 0) && (
         <div className="mt-4 print:hidden">
@@ -2433,7 +2637,7 @@ function buildInvoiceWaMessage(invoice, settings) {
   return lines.join("\n");
 }
 
-function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, adjustments, bookings, settings, currentUser, commissionAgents = [], commissionRules = [], saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
+function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, commissionTransactions, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
   const [showForm, setShowForm] = useState(false);
   const [editingInvoice, setEditingInvoice] = useState(null);
   const [viewing, setViewing] = useState(null);
@@ -2467,6 +2671,13 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
   function handleCancelInvoice(inv) {
     cancelInvoice(inv);
     setViewing({ ...inv, docStatus: "Cancelled" });
+  }
+
+  function commissionInfoFor(inv) {
+    const tx = (commissionTransactions || []).find((c) => c.invoiceId === inv.id && c.status !== "Cancelled");
+    if (!tx) return null;
+    const agent = (commissionAgents || []).find((a) => a.id === tx.agentId);
+    return { agentName: agent ? agent.name : tx.agentName, commissionAmount: tx.commissionAmount, status: tx.status };
   }
 
   const sorted = [...invoices].sort((a, b) => new Date(b.date) - new Date(a.date));
@@ -2536,11 +2747,11 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
             promises={promises}
             transfers={transfers}
             adjustments={adjustments}
+            commissionAgents={commissionAgents}
+            commissionRules={commissionRules}
             prefill={editingInvoice ? null : prefill}
             editingInvoice={editingInvoice}
             currentUser={currentUser}
-            commissionAgents={commissionAgents}
-            commissionRules={commissionRules}
             nextNumber={nextNumber}
             onCancel={closeForm}
             onSave={(inv) => {
@@ -2566,6 +2777,7 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
           settings={settings}
           returns={returns}
           exchanges={exchanges}
+          commissionInfo={commissionInfoFor(viewing)}
           onClose={() => setViewing(null)}
           onEdit={openEdit}
           onCancelInvoice={handleCancelInvoice}
@@ -2576,248 +2788,6 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
       )}
     </div>
   );
-}
-
-
-/* ---------------- Commission Management ---------------- */
-const COMMISSION_STATUSES = ["pending", "approved", "paid", "cancelled"];
-const COMMISSION_TYPES = ["percentage", "fixed", "per_bag", "per_item"];
-
-function commissionStatusLabel(status) {
-  const map = { pending: "Pending", approved: "Approved", paid: "Paid", cancelled: "Cancelled" };
-  return t(map[status] || status);
-}
-
-function commissionRuleMatches(rule, agentId, item, product, date) {
-  if (!rule || rule.status !== "Active" || rule.agentId !== agentId) return false;
-  const d = date || todayISO();
-  if (rule.startDate && d < rule.startDate) return false;
-  if (rule.endDate && d > rule.endDate) return false;
-  if (rule.productId && rule.productId !== item.productId) return false;
-  if (rule.category && rule.category !== "All Products" && rule.category !== (product?.category || "")) return false;
-  return true;
-}
-
-function commissionPriority(rule, item, product) {
-  if (rule.productId && rule.productId === item.productId) return 1;
-  if (rule.category && rule.category !== "All Products" && rule.category === (product?.category || "")) return 2;
-  if (!rule.productId && (!rule.category || rule.category === "All Products")) return 3;
-  return 4;
-}
-
-function calculateCommissionForInvoice(invoice, rules = [], products = []) {
-  const activeRules = rules.filter((r) => r.status === "Active");
-  const items = invoice.items || [];
-  const breakdown = [];
-  let total = 0;
-  let fixedApplied = false;
-
-  for (const item of items) {
-    const product = products.find((p) => p.id === item.productId);
-    const candidates = activeRules
-      .filter((r) => commissionRuleMatches(r, invoice.commissionAgentId, item, product, invoice.date))
-      .filter((r) => !r.minimumSaleAmount || Number(invoice.total) >= Number(r.minimumSaleAmount))
-      .sort((a, b) => commissionPriority(a, item, product) - commissionPriority(b, item, product));
-
-    const rule = candidates[0];
-    if (!rule) continue;
-
-    let amount = 0;
-    const rate = Number(rule.rate) || 0;
-    if (rule.type === "percentage") amount = Number(item.total || 0) * rate / 100;
-    else if (rule.type === "per_bag") amount = Number(item.qty || 0) * rate;
-    else if (rule.type === "per_item") amount = Number(item.qty || 0) * rate;
-    else if (rule.type === "fixed") {
-      if (fixedApplied) continue;
-      amount = rate;
-      fixedApplied = true;
-    }
-    amount = roundMoney(amount);
-    breakdown.push({ itemName: item.name, qty: item.qty, ruleId: rule.id, ruleType: rule.type, rate, amount });
-    total += amount;
-  }
-
-  const maxCaps = breakdown.map((b) => rules.find((r) => r.id === b.ruleId)?.maximumCommission).filter((v) => Number(v) > 0).map(Number);
-  if (maxCaps.length) total = Math.min(total, Math.min(...maxCaps));
-  return { amount: roundMoney(total), breakdown };
-}
-
-function CommissionPage({
-  agents, rules, transactions, payments, invoices, customers, products, currentUser,
-  saveAgent, saveRule, deactivateAgent, deleteRule, approveCommission, payCommission, cancelCommission, onSync
-}) {
-  const [tab, setTab] = useState("dashboard");
-  const [showAgent, setShowAgent] = useState(false);
-  const [showRule, setShowRule] = useState(false);
-  const [editingAgent, setEditingAgent] = useState(null);
-  const [editingRule, setEditingRule] = useState(null);
-  const [paying, setPaying] = useState(null);
-  const [filters, setFilters] = useState({ agent: "", status: "", invoice: "", customer: "", from: "", to: "" });
-
-  const visibleTx = transactions.filter((tx) => {
-    if (filters.agent && tx.agentId !== filters.agent) return false;
-    if (filters.status && tx.status !== filters.status) return false;
-    if (filters.invoice && !(tx.invoiceNumber || "").toLowerCase().includes(filters.invoice.toLowerCase())) return false;
-    if (filters.customer && !(tx.customerName || "").toLowerCase().includes(filters.customer.toLowerCase())) return false;
-    if (filters.from && tx.date < filters.from) return false;
-    if (filters.to && tx.date > filters.to) return false;
-    return true;
-  });
-
-  const total = transactions.reduce((s, x) => s + Number(x.commissionAmount || 0), 0);
-  const pending = transactions.filter(x => x.status === "pending").reduce((s,x)=>s+Number(x.remainingAmount||0),0);
-  const approved = transactions.filter(x => x.status === "approved").reduce((s,x)=>s+Number(x.remainingAmount||0),0);
-  const paid = transactions.reduce((s,x)=>s+Number(x.paidAmount||0),0);
-  const outstanding = transactions.filter(x => x.status !== "cancelled").reduce((s,x)=>s+Number(x.remainingAmount||0),0);
-  const month = todayISO().slice(0,7);
-  const monthTotal = transactions.filter(x => (x.date || "").slice(0,7) === month && x.status !== "cancelled")
-    .reduce((s,x)=>s+Number(x.commissionAmount||0),0);
-
-  const agentTotals = agents.map(a => {
-    const rows = transactions.filter(x => x.agentId === a.id && x.status !== "cancelled");
-    return { ...a, sales: rows.reduce((s,x)=>s+Number(x.saleAmount||0),0), commission: rows.reduce((s,x)=>s+Number(x.commissionAmount||0),0), paid: rows.reduce((s,x)=>s+Number(x.paidAmount||0),0), outstanding: rows.reduce((s,x)=>s+Number(x.remainingAmount||0),0) };
-  });
-
-  return (
-    <div>
-      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-        <h2 className="text-xl font-black uppercase tracking-tight">{t("Commission")}</h2>
-        <div className="flex gap-2">
-          {currentUser.role === "admin" && <Btn small onClick={() => { setEditingAgent(null); setShowAgent(true); }}>{t("Add Agent")}</Btn>}
-          {currentUser.role === "admin" && <Btn small variant="ghost" onClick={() => { setEditingRule(null); setShowRule(true); }}>{t("Commission Rule")}</Btn>}
-          {currentUser.role === "admin" && <Btn small variant="ghost" onClick={onSync}>Sync Existing Invoices</Btn>}
-        </div>
-      </div>
-      <div className="flex gap-1 mb-4 border-b border-slate-200">
-        {["dashboard","agents","rules","history","ledger","reports"].map(x =>
-          <button key={x} onClick={()=>setTab(x)} className={`px-3 py-2 text-xs font-bold uppercase ${tab===x?"bg-slate-900 text-white":"bg-white text-slate-500"}`}>
-            {t(x==="dashboard"?"Dashboard":x==="agents"?"Commission Agents":x==="rules"?"Commission Rules":x==="history"?"Commission History":x==="ledger"?"Commission Ledger":"Reports")}
-          </button>
-        )}
-      </div>
-
-      {tab === "dashboard" && (
-        <>
-          <div className="flex gap-3 flex-wrap mb-6">
-            <Stat label={t("Total Commission")} value={fmtMoney(total)} />
-            <Stat label={t("Pending Commission")} value={fmtMoney(pending)} />
-            <Stat label={t("Approved Commission")} value={fmtMoney(approved)} />
-            <Stat label={t("Paid Commission")} value={fmtMoney(paid)} />
-            <Stat label={t("Outstanding Commission")} value={fmtMoney(outstanding)} />
-            <Stat label={t("This Month Commission")} value={fmtMoney(monthTotal)} />
-          </div>
-          <CommissionTable rows={visibleTx} transactions={transactions} agents={agents} currentUser={currentUser} onApprove={approveCommission} onPay={setPaying} onCancel={cancelCommission} />
-        </>
-      )}
-
-      {tab === "agents" && (
-        <div className="bg-white border border-slate-200 overflow-x-auto">
-          <table className="w-full text-sm"><thead><tr className="text-left text-[11px] uppercase text-slate-500 border-b">
-            <th className="px-4 py-2">{t("Agent ID")}</th><th className="px-4 py-2">{t("Agent Name")}</th><th className="px-4 py-2">Phone</th><th className="px-4 py-2">{t("Commission Type")}</th><th className="px-4 py-2">{t("Commission Rate")}</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Actions</th>
-          </tr></thead><tbody>
-          {agents.map(a => <tr key={a.id} className="border-t border-slate-100">
-            <td className="px-4 py-2 font-bold">{a.code}</td><td className="px-4 py-2">{a.name}</td><td className="px-4 py-2">{a.phone || "-"}</td><td className="px-4 py-2">{a.commissionType || "-"}</td><td className="px-4 py-2">{a.commissionRate ?? "-"}</td><td className="px-4 py-2">{a.status}</td>
-            <td className="px-4 py-2 flex gap-1">{currentUser.role==="admin" && <><Btn small variant="ghost" onClick={()=>{setEditingAgent(a);setShowAgent(true)}}>{t("Edit")}</Btn><Btn small variant="ghost" onClick={()=>deactivateAgent(a)}>{a.status==="Active"?t("Deactivate"):t("Activate")}</Btn></>}</td>
-          </tr>)}
-          </tbody></table>
-        </div>
-      )}
-
-      {tab === "rules" && (
-        <div className="bg-white border border-slate-200 overflow-x-auto">
-          <table className="w-full text-sm"><thead><tr className="text-left text-[11px] uppercase text-slate-500 border-b">
-            <th className="px-4 py-2">Agent</th><th className="px-4 py-2">Product / Category</th><th className="px-4 py-2">{t("Commission Type")}</th><th className="px-4 py-2">{t("Commission Rate")}</th><th className="px-4 py-2">{t("Minimum Sale Amount")}</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Actions</th>
-          </tr></thead><tbody>
-          {rules.map(r => <tr key={r.id} className="border-t border-slate-100">
-            <td className="px-4 py-2">{agents.find(a=>a.id===r.agentId)?.name || "-"}</td><td className="px-4 py-2">{products.find(p=>p.id===r.productId)?.name || r.category || "All Products"}</td><td className="px-4 py-2">{r.type}</td><td className="px-4 py-2">{r.rate}</td><td className="px-4 py-2">{fmtMoney(r.minimumSaleAmount || 0)}</td><td className="px-4 py-2">{r.status}</td>
-            <td className="px-4 py-2">{currentUser.role==="admin" && <Btn small variant="ghost" onClick={()=>{setEditingRule(r);setShowRule(true)}}>{t("Edit")}</Btn>}</td>
-          </tr>)}
-          </tbody></table>
-        </div>
-      )}
-
-      {(tab === "history" || tab === "ledger") && (
-        <div>
-          <div className="bg-white border border-slate-200 p-3 mb-3 grid grid-cols-2 md:grid-cols-6 gap-2">
-            <select className={inputCls} value={filters.agent} onChange={e=>setFilters({...filters,agent:e.target.value})}><option value="">{t("All")}</option>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select>
-            <select className={inputCls} value={filters.status} onChange={e=>setFilters({...filters,status:e.target.value})}><option value="">{t("All Status")}</option>{COMMISSION_STATUSES.map(s=><option key={s} value={s}>{commissionStatusLabel(s)}</option>)}</select>
-            <input className={inputCls} placeholder="Invoice" value={filters.invoice} onChange={e=>setFilters({...filters,invoice:e.target.value})}/>
-            <input className={inputCls} placeholder="Customer" value={filters.customer} onChange={e=>setFilters({...filters,customer:e.target.value})}/>
-            <input className={inputCls} type="date" value={filters.from} onChange={e=>setFilters({...filters,from:e.target.value})}/>
-            <input className={inputCls} type="date" value={filters.to} onChange={e=>setFilters({...filters,to:e.target.value})}/>
-          </div>
-          <CommissionTable rows={visibleTx} transactions={transactions} agents={agents} currentUser={currentUser} onApprove={approveCommission} onPay={setPaying} onCancel={cancelCommission} />
-        </div>
-      )}
-
-      {tab === "reports" && (
-        <div className="bg-white border border-slate-200 overflow-x-auto">
-          <table className="w-full text-sm"><thead><tr className="text-left text-[11px] uppercase text-slate-500 border-b"><th className="px-4 py-2">Agent</th><th className="px-4 py-2">Total Sales</th><th className="px-4 py-2">Total Commission</th><th className="px-4 py-2">Paid</th><th className="px-4 py-2">Outstanding</th></tr></thead>
-          <tbody>{agentTotals.map(a=><tr key={a.id} className="border-t border-slate-100"><td className="px-4 py-2 font-bold">{a.name}</td><td className="px-4 py-2">{fmtMoney(a.sales)}</td><td className="px-4 py-2">{fmtMoney(a.commission)}</td><td className="px-4 py-2">{fmtMoney(a.paid)}</td><td className="px-4 py-2">{fmtMoney(a.outstanding)}</td></tr>)}</tbody></table>
-        </div>
-      )}
-
-      {showAgent && <AgentModal initial={editingAgent} onClose={()=>setShowAgent(false)} onSave={(x)=>{saveAgent(x);setShowAgent(false)}} />}
-      {showRule && <RuleModal initial={editingRule} agents={agents} products={products} onClose={()=>setShowRule(false)} onSave={(x)=>{saveRule(x);setShowRule(false)}} />}
-      {paying && <CommissionPaymentModal tx={paying} onClose={()=>setPaying(null)} onSave={(x)=>{payCommission(paying,x);setPaying(null)}} />}
-    </div>
-  );
-}
-
-function CommissionTable({ rows, transactions = [], agents, currentUser, onApprove, onPay, onCancel }) {
-  const sorted=[...rows].sort((a,b)=>new Date(b.date)-new Date(a.date));
-  return <div className="bg-white border border-slate-200 overflow-x-auto"><table className="w-full text-sm">
-    <thead><tr className="text-left text-[11px] uppercase text-slate-500 border-b">
-      <th className="px-4 py-2">Date</th><th className="px-4 py-2">Invoice</th><th className="px-4 py-2">Agent</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Sale</th><th className="px-4 py-2">Commission</th><th className="px-4 py-2">Paid</th><th className="px-4 py-2">Remaining</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Actions</th>
-    </tr></thead><tbody>
-    {sorted.length===0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-slate-400">No commission records.</td></tr>}
-    {sorted.map(tx=><tr key={tx.id} className="border-t border-slate-100">
-      <td className="px-4 py-2">{fmtDate(tx.date)}</td><td className="px-4 py-2 font-bold">{tx.invoiceNumber}</td><td className="px-4 py-2">{agents.find(a=>a.id===tx.agentId)?.name || tx.agentName}</td><td className="px-4 py-2">{tx.customerName}</td><td className="px-4 py-2">{fmtMoney(tx.saleAmount)}</td><td className="px-4 py-2 font-bold">{fmtMoney(tx.commissionAmount)}</td><td className="px-4 py-2">{fmtMoney(tx.paidAmount)}</td><td className="px-4 py-2">{fmtMoney(tx.remainingAmount)}</td><td className="px-4 py-2">{commissionStatusLabel(tx.status)}</td>
-      <td className="px-4 py-2 flex gap-1">{currentUser.role==="admin" && tx.status==="pending" && <Btn small onClick={()=>onApprove(tx)}>{t("Approve")}</Btn>}{currentUser.role==="admin" && tx.status!=="paid" && tx.status!=="cancelled" && ((tx.minimumBags || 100) <= (transactions.filter(x=>x.agentId===tx.agentId && x.status!=="cancelled").reduce((sum,x)=>sum+(Number(x.bagQty)||0),0))) ? <Btn small variant="ghost" onClick={()=>onPay(tx)}>{t("Pay Commission")}</Btn> : currentUser.role==="admin" && tx.status!=="paid" && tx.status!=="cancelled" ? <span className="text-[10px] text-amber-700 font-bold px-2 py-1">{fmtQty(tx.minimumBags || 100)} bags required</span> : null}{currentUser.role==="admin" && tx.status!=="paid" && <Btn small variant="danger" onClick={()=>onCancel(tx)}>{t("Cancel")}</Btn>}</td>
-    </tr>)}
-    </tbody></table></div>;
-}
-
-function AgentModal({ initial, onClose, onSave }) {
-  const [form,setForm]=useState(initial || { name:"",phone:"",whatsapp:"",address:"",commissionType:"percentage",commissionRate:0,status:"Active",notes:"" });
-  return <Modal title={initial ? "Edit Agent" : "Add Agent"} onClose={onClose}>
-    <Field label="Agent Name"><input className={inputCls} value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></Field>
-    <div className="grid grid-cols-2 gap-3"><Field label="Phone"><input className={inputCls} value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})}/></Field><Field label="WhatsApp"><input className={inputCls} value={form.whatsapp} onChange={e=>setForm({...form,whatsapp:e.target.value})}/></Field></div>
-    <Field label="Address"><input className={inputCls} value={form.address} onChange={e=>setForm({...form,address:e.target.value})}/></Field>
-    <div className="grid grid-cols-2 gap-3"><Field label="Commission Type"><select className={inputCls} value={form.commissionType} onChange={e=>setForm({...form,commissionType:e.target.value})}>{COMMISSION_TYPES.map(x=><option key={x} value={x}>{x}</option>)}</select></Field><Field label="Commission Rate"><input type="number" className={inputCls} value={form.commissionRate} onChange={e=>setForm({...form,commissionRate:e.target.value})}/></Field>
-    <Field label="Minimum Bags Before Payment"><input type="number" min="1" className={inputCls} value={form.minimumBags ?? 100} onChange={e=>setForm({...form,minimumBags:e.target.value})}/></Field></div>
-    <Field label="Notes"><textarea className={inputCls} value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></Field>
-    <div className="flex gap-2"><Btn onClick={()=>form.name.trim()&&onSave({...form})}>{t("Save")}</Btn><Btn variant="ghost" onClick={onClose}>{t("Cancel")}</Btn></div>
-  </Modal>;
-}
-
-function RuleModal({ initial, agents, products, onClose, onSave }) {
-  const [form,setForm]=useState(initial || {agentId:agents[0]?.id||"",productId:"",category:"All Products",type:"percentage",rate:0,minimumSaleAmount:0,maximumCommission:0,startDate:"",endDate:"",status:"Active"});
-  return <Modal title={initial ? "Commission Rule" : "Commission Rule"} onClose={onClose}>
-    <Field label="Commission Agent"><select className={inputCls} value={form.agentId} onChange={e=>setForm({...form,agentId:e.target.value})}>{agents.map(a=><option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
-    <div className="grid grid-cols-2 gap-3"><Field label="Product"><select className={inputCls} value={form.productId} onChange={e=>setForm({...form,productId:e.target.value})}><option value="">All Products</option>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></Field><Field label="Category"><input className={inputCls} value={form.category} onChange={e=>setForm({...form,category:e.target.value})}/></Field></div>
-    <div className="grid grid-cols-2 gap-3"><Field label="Commission Type"><select className={inputCls} value={form.type} onChange={e=>setForm({...form,type:e.target.value})}>{COMMISSION_TYPES.map(x=><option key={x} value={x}>{x}</option>)}</select></Field><Field label="Commission Rate"><input type="number" className={inputCls} value={form.rate} onChange={e=>setForm({...form,rate:e.target.value})}/></Field></div>
-    <div className="grid grid-cols-2 gap-3"><Field label="Minimum Sale Amount"><input type="number" className={inputCls} value={form.minimumSaleAmount} onChange={e=>setForm({...form,minimumSaleAmount:e.target.value})}/></Field><Field label="Maximum Commission"><input type="number" className={inputCls} value={form.maximumCommission} onChange={e=>setForm({...form,maximumCommission:e.target.value})}/></Field></div>
-    <div className="grid grid-cols-2 gap-3"><Field label="Start Date"><input type="date" className={inputCls} value={form.startDate} onChange={e=>setForm({...form,startDate:e.target.value})}/></Field><Field label="End Date"><input type="date" className={inputCls} value={form.endDate} onChange={e=>setForm({...form,endDate:e.target.value})}/></Field></div>
-    <div className="flex gap-2"><Btn onClick={()=>form.agentId&&onSave({...form})}>{t("Save")}</Btn><Btn variant="ghost" onClick={onClose}>{t("Cancel")}</Btn></div>
-  </Modal>;
-}
-
-function CommissionPaymentModal({ tx, onClose, onSave }) {
-  const [amount,setAmount]=useState(tx.remainingAmount);
-  const [date,setDate]=useState(todayISO());
-  const [method,setMethod]=useState("Cash");
-  const [reference,setReference]=useState("");
-  const [notes,setNotes]=useState("");
-  return <Modal title="Pay Commission" onClose={onClose}>
-    <div className="grid grid-cols-2 gap-3 mb-3"><div><div className="text-xs text-slate-500">{t("Total Commission")}</div><div className="font-black">{fmtMoney(tx.commissionAmount)}</div></div><div><div className="text-xs text-slate-500">{t("Remaining Commission")}</div><div className="font-black text-red-600">{fmtMoney(tx.remainingAmount)}</div></div></div>
-    <Field label="Payment Amount"><input type="number" min="0" max={tx.remainingAmount} className={inputCls} value={amount} onChange={e=>setAmount(Math.min(Number(e.target.value)||0,tx.remainingAmount))}/></Field>
-    <Field label="Payment Date"><input type="date" className={inputCls} value={date} onChange={e=>setDate(e.target.value)}/></Field>
-    <Field label="Payment Method"><select className={inputCls} value={method} onChange={e=>setMethod(e.target.value)}><option>Cash</option><option>Bank</option><option>Online Transfer</option><option>Other</option></select></Field>
-    <Field label="Reference Number"><input className={inputCls} value={reference} onChange={e=>setReference(e.target.value)}/></Field>
-    <Field label="Notes"><textarea className={inputCls} value={notes} onChange={e=>setNotes(e.target.value)}/></Field>
-    <div className="flex gap-2"><Btn disabled={Number(amount)<=0} onClick={()=>onSave({amount:Number(amount),date,method,reference,notes})}>{t("Pay Commission")}</Btn><Btn variant="ghost" onClick={onClose}>{t("Cancel")}</Btn></div>
-  </Modal>;
 }
 
 /* ---------------- Invoice History (Phase 1) ---------------- */
@@ -2875,7 +2845,7 @@ function InvoiceHistoryPage({ invoices, auditLog }) {
 
       <h2 className="text-xl font-black uppercase tracking-tight mb-2">Audit Log</h2>
       <div className="text-xs text-slate-400 mb-4 max-w-2xl">
-        Sales Return, Exchange, Delete Return, Delete Exchange, Promise To Pay, Outstanding Transfer, Adjustment, aur Invoice Status Change ki har action yahan record hoti hai — user, date, time aur reason ke saath.
+        Sales Return, Exchange, Delete Return, Delete Exchange, Promise To Pay, Outstanding Transfer, Adjustment, Commission, aur Invoice Status Change ki har action yahan record hoti hai — user, date, time aur reason ke saath.
       </div>
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
@@ -3867,6 +3837,714 @@ function AdjustmentsPage({ customers, invoices, payments, returns, exchanges, pr
   );
 }
 
+/* ==================== Commission Management System ====================
+   Integrates with the existing Invoice / Customer / Payment systems:
+   - Reads invoices (never rewrites invoice.total or invoice calculations).
+   - Reuses the existing Field/Btn/Modal/Stat/table UI patterns.
+   - Persists through the same storeGet/storeSet + Supabase/localStorage
+     layer as every other module (see commissionAgents/commissionRules/
+     commissionTransactions/commissionPayments in the App component).
+   - Uses the existing t()/tStatus() bilingual system for all labels.
+   ========================================================================= */
+
+function CommissionAgentForm({ initial, onSave, onCancel }) {
+  const [form, setForm] = useState(
+    initial || {
+      name: "", phone: "", whatsapp: "", address: "",
+      defaultCommissionType: "percentage", defaultCommissionRate: "",
+      status: "Active", notes: "",
+    }
+  );
+  const [error, setError] = useState("");
+
+  function submit() {
+    if (!form.name.trim()) { setError("Agent ka naam zaroori hai."); return; }
+    setError("");
+    onSave({ ...form, defaultCommissionRate: Number(form.defaultCommissionRate) || 0 });
+  }
+
+  return (
+    <div>
+      <Field label="Agent Name">
+        <input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Phone">
+          <input className={inputCls} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+        </Field>
+        <Field label="WhatsApp">
+          <input className={inputCls} value={form.whatsapp} onChange={(e) => setForm({ ...form, whatsapp: e.target.value })} />
+        </Field>
+      </div>
+      <Field label="Address">
+        <input className={inputCls} value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+      </Field>
+      <div className="text-[11px] text-slate-400 mb-2">Default Commission is used only when no specific Commission Rule matches an invoice for this agent (see Commission Rules for per-product overrides).</div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Commission Type">
+          <select className={inputCls} value={form.defaultCommissionType} onChange={(e) => setForm({ ...form, defaultCommissionType: e.target.value })}>
+            {COMMISSION_TYPES.map((ct) => <option key={ct} value={ct}>{t(COMMISSION_TYPE_LABELS[ct])}</option>)}
+          </select>
+        </Field>
+        <Field label="Commission Rate">
+          <input type="number" step="any" className={inputCls} value={form.defaultCommissionRate} onChange={(e) => setForm({ ...form, defaultCommissionRate: e.target.value })} />
+        </Field>
+      </div>
+      <Field label="Status">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setForm({ ...form, status: "Active" })} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${form.status === "Active" ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300"}`}>{t("Active")}</button>
+          <button type="button" onClick={() => setForm({ ...form, status: "Inactive" })} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${form.status === "Inactive" ? "bg-slate-600 text-white border-slate-600" : "bg-white text-slate-600 border-slate-300"}`}>{t("Inactive")}</button>
+        </div>
+      </Field>
+      <Field label="Notes">
+        <input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+      </Field>
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2 mt-2">
+        <Btn onClick={submit}>Save Agent</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function CommissionAgentLedgerView({ agent, transactions, payments, onClose, onPay, onApprove, canManage }) {
+  const summary = computeCommissionSummaryForAgent(agent.id, transactions, payments);
+  const myPayments = (payments || []).filter((p) => p.agentId === agent.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const rows = [...summary.transactions].sort((a, b) => new Date(a.invoiceDate) - new Date(b.invoiceDate));
+
+  return (
+    <Modal title={`Commission Ledger — ${agent.name}`} onClose={onClose} wide>
+      <div className="flex flex-wrap gap-3 mb-4">
+        <Stat label="Total Commission" value={fmtMoney(summary.totalCommission)} />
+        <Stat label="Paid Commission" value={fmtMoney(summary.totalPaid)} accent="text-emerald-600" />
+        <Stat label="Outstanding Commission" value={fmtMoney(summary.remaining)} accent="text-red-600" />
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto mb-4">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-3 py-2">Date</th><th className="px-3 py-2">Invoice Number</th><th className="px-3 py-2">Customer</th>
+              <th className="px-3 py-2 text-right">Sale Amount</th><th className="px-3 py-2">Commission Rate</th>
+              <th className="px-3 py-2 text-right">Commission Amount</th><th className="px-3 py-2 text-right">Paid Commission</th>
+              <th className="px-3 py-2 text-right">Remaining</th><th className="px-3 py-2">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={9} className="px-3 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+            {rows.map((tx) => (
+              <tr key={tx.id} className="border-t border-slate-100">
+                <td className="px-3 py-2 text-slate-500">{fmtDate(tx.invoiceDate)}</td>
+                <td className="px-3 py-2 font-bold text-blue-700">{tx.invoiceNumber}</td>
+                <td className="px-3 py-2">{tx.customerName}</td>
+                <td className="px-3 py-2 text-right">{fmtMoney(tx.saleAmount)}</td>
+                <td className="px-3 py-2 text-slate-500">{fmtCommissionRate(tx.commissionType, tx.commissionRate)}</td>
+                <td className="px-3 py-2 text-right font-bold">{fmtMoney(tx.commissionAmount)}</td>
+                <td className="px-3 py-2 text-right text-emerald-600 font-bold">{fmtMoney(tx.paidAmount)}</td>
+                <td className="px-3 py-2 text-right text-red-600 font-bold">{fmtMoney(tx.remainingAmount)}</td>
+                <td className="px-3 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${COMMISSION_STATUS_TONE[tx.status] || "bg-slate-100 text-slate-500"}`}>{tStatus(tx.status)}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto mb-4">
+        <div className="px-3 py-2 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Commission Payment History</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-3 py-2">Date</th><th className="px-3 py-2">Method</th><th className="px-3 py-2">Reference</th>
+              <th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {myPayments.length === 0 && <tr><td colSpan={5} className="px-3 py-6 text-center text-slate-400">Koi payment nahi.</td></tr>}
+            {myPayments.map((p) => (
+              <tr key={p.id} className="border-t border-slate-100">
+                <td className="px-3 py-2 text-slate-500">{fmtDate(p.date)}</td>
+                <td className="px-3 py-2">{p.method}</td>
+                <td className="px-3 py-2 text-slate-500">{p.referenceNumber || "-"}</td>
+                <td className="px-3 py-2 text-right font-bold text-emerald-600">{fmtMoney(p.amount)}</td>
+                <td className="px-3 py-2 text-slate-500 text-xs">{p.notes || "-"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {canManage && (
+        <div className="flex gap-2">
+          <Btn onClick={onPay} disabled={summary.remaining <= 0}>Pay Commission</Btn>
+          <Btn variant="ghost" onClick={onClose}>Close</Btn>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function CommissionAgentsPage({ agents, transactions, payments, currentUser, onCreateAgent, onUpdateAgent, onToggleAgentStatus, onOpenPay }) {
+  const [modal, setModal] = useState(null); // null | 'new' | agent
+  const [ledgerAgent, setLedgerAgent] = useState(null);
+  const [q, setQ] = useState("");
+  const canManage = currentUser?.role === "admin";
+
+  const rows = agents
+    .filter((a) => !q.trim() || a.name.toLowerCase().includes(q.toLowerCase()) || a.id.toLowerCase().includes(q.toLowerCase()))
+    .map((a) => ({ ...a, summary: computeCommissionSummaryForAgent(a.id, transactions, payments) }));
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-black uppercase tracking-tight">Commission Agents</h2>
+        {canManage && <Btn onClick={() => setModal("new")}>+ New Agent</Btn>}
+      </div>
+      <input className={`${inputCls} mb-3 max-w-xs`} placeholder="Search agent name / ID..." value={q} onChange={(e) => setQ(e.target.value)} />
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Agent ID</th><th className="px-4 py-2">Agent Name</th><th className="px-4 py-2">Phone</th>
+              <th className="px-4 py-2">Default Commission</th>
+              <th className="px-4 py-2 text-right">Total</th><th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Outstanding</th>
+              <th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={9} className="px-4 py-6 text-center text-slate-400">Koi commission agent nahi.</td></tr>}
+            {rows.map((a) => (
+              <tr key={a.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-black text-blue-700">{a.id}</td>
+                <td className="px-4 py-2 font-bold cursor-pointer hover:text-blue-700" onClick={() => setLedgerAgent(a)}>{a.name}</td>
+                <td className="px-4 py-2 text-slate-500">{a.phone || "-"}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtCommissionRate(a.defaultCommissionType, a.defaultCommissionRate)}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(a.summary.totalCommission)}</td>
+                <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(a.summary.totalPaid)}</td>
+                <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(a.summary.remaining)}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${a.status === "Active" ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>{tStatus(a.status)}</span>
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setLedgerAgent(a)}>Ledger</button>
+                  {canManage && (
+                    <>
+                      <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setModal(a)}>Edit</button>
+                      <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => onToggleAgentStatus(a)}>{a.status === "Active" ? "Deactivate" : "Activate"}</button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {modal && (
+        <Modal title={modal === "new" ? "New Agent" : `Edit Agent ${modal.id}`} onClose={() => setModal(null)}>
+          <CommissionAgentForm
+            initial={modal === "new" ? null : modal}
+            onCancel={() => setModal(null)}
+            onSave={(data) => { modal === "new" ? onCreateAgent(data) : onUpdateAgent(modal, data); setModal(null); }}
+          />
+        </Modal>
+      )}
+      {ledgerAgent && (
+        <CommissionAgentLedgerView
+          agent={ledgerAgent}
+          transactions={transactions}
+          payments={payments}
+          canManage={canManage}
+          onClose={() => setLedgerAgent(null)}
+          onPay={() => { onOpenPay(ledgerAgent, null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function CommissionRuleForm({ agents, products, initial, onSave, onCancel }) {
+  const [form, setForm] = useState(
+    initial || {
+      agentId: agents[0]?.id || "", productMatch: ALL_PRODUCTS_KEY,
+      commissionType: "percentage", commissionRate: "",
+      minSaleAmount: "", maxCommission: "", startDate: "", endDate: "", status: "Active",
+    }
+  );
+  const [error, setError] = useState("");
+
+  function submit() {
+    if (!form.agentId) { setError("Agent select karein."); return; }
+    if (!Number(form.commissionRate) || Number(form.commissionRate) <= 0) { setError("Commission Rate 0 se zyada hona chahiye."); return; }
+    setError("");
+    onSave({
+      ...form,
+      commissionRate: Number(form.commissionRate) || 0,
+      minSaleAmount: Number(form.minSaleAmount) || 0,
+      maxCommission: Number(form.maxCommission) || 0,
+    });
+  }
+
+  return (
+    <div>
+      <Field label="Agent">
+        <select className={inputCls} value={form.agentId} onChange={(e) => setForm({ ...form, agentId: e.target.value })}>
+          {agents.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
+        </select>
+      </Field>
+      <Field label="Product">
+        <select className={inputCls} value={form.productMatch} onChange={(e) => setForm({ ...form, productMatch: e.target.value })}>
+          <option value={ALL_PRODUCTS_KEY}>{t(ALL_PRODUCTS_KEY)}</option>
+          {products.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
+        </select>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Commission Type">
+          <select className={inputCls} value={form.commissionType} onChange={(e) => setForm({ ...form, commissionType: e.target.value })}>
+            {COMMISSION_TYPES.map((ct) => <option key={ct} value={ct}>{t(COMMISSION_TYPE_LABELS[ct])}</option>)}
+          </select>
+        </Field>
+        <Field label="Commission Rate">
+          <input type="number" step="any" className={inputCls} value={form.commissionRate} onChange={(e) => setForm({ ...form, commissionRate: e.target.value })} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Minimum Sale Amount">
+          <input type="number" className={inputCls} value={form.minSaleAmount} onChange={(e) => setForm({ ...form, minSaleAmount: e.target.value })} />
+        </Field>
+        <Field label="Maximum Commission">
+          <input type="number" className={inputCls} value={form.maxCommission} onChange={(e) => setForm({ ...form, maxCommission: e.target.value })} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Start Date">
+          <input type="date" className={inputCls} value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} />
+        </Field>
+        <Field label="End Date">
+          <input type="date" className={inputCls} value={form.endDate} onChange={(e) => setForm({ ...form, endDate: e.target.value })} />
+        </Field>
+      </div>
+      <Field label="Status">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setForm({ ...form, status: "Active" })} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${form.status === "Active" ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300"}`}>{t("Active")}</button>
+          <button type="button" onClick={() => setForm({ ...form, status: "Inactive" })} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${form.status === "Inactive" ? "bg-slate-600 text-white border-slate-600" : "bg-white text-slate-600 border-slate-300"}`}>{t("Inactive")}</button>
+        </div>
+      </Field>
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2 mt-2">
+        <Btn onClick={submit}>Save Rule</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function CommissionRulesPage({ agents, products, rules, currentUser, onCreateRule, onUpdateRule }) {
+  const [modal, setModal] = useState(null);
+  const canManage = currentUser?.role === "admin";
+  const sorted = [...rules].sort((a, b) => (a.agentId || "").localeCompare(b.agentId || ""));
+
+  function toggleStatus(rule) {
+    onUpdateRule(rule, { ...rule, status: rule.status === "Active" ? "Inactive" : "Active" });
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Commission Rules</h2>
+        {canManage && <Btn onClick={() => setModal("new")} disabled={agents.length === 0}>+ New Rule</Btn>}
+      </div>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Har agent ke liye product-specific ya all-products commission rule banayein. Jab invoice par wo agent select hoga, sabse specific active rule (product-match) automatically use hogi, warna agent ka default commission apply hoga.
+      </div>
+      {agents.length === 0 && <div className="text-slate-400 mb-3">Pehle Commission Agents tab mein agent add karein.</div>}
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Agent</th><th className="px-4 py-2">Product</th><th className="px-4 py-2">Type</th><th className="px-4 py-2">Rate</th>
+              <th className="px-4 py-2 text-right">Min Sale</th><th className="px-4 py-2 text-right">Max Commission</th>
+              <th className="px-4 py-2">Start</th><th className="px-4 py-2">End</th><th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-slate-400">Koi commission rule nahi.</td></tr>}
+            {sorted.map((r) => {
+              const agent = agents.find((a) => a.id === r.agentId);
+              return (
+                <tr key={r.id} className="border-t border-slate-100">
+                  <td className="px-4 py-2 font-bold">{agent ? agent.name : r.agentId}</td>
+                  <td className="px-4 py-2 text-slate-500">{r.productMatch === ALL_PRODUCTS_KEY ? t(ALL_PRODUCTS_KEY) : r.productMatch}</td>
+                  <td className="px-4 py-2 text-slate-500">{t(COMMISSION_TYPE_LABELS[r.commissionType])}</td>
+                  <td className="px-4 py-2 font-bold">{fmtCommissionRate(r.commissionType, r.commissionRate)}</td>
+                  <td className="px-4 py-2 text-right text-slate-500">{r.minSaleAmount > 0 ? fmtMoney(r.minSaleAmount) : "-"}</td>
+                  <td className="px-4 py-2 text-right text-slate-500">{r.maxCommission > 0 ? fmtMoney(r.maxCommission) : "-"}</td>
+                  <td className="px-4 py-2 text-slate-500">{r.startDate ? fmtDate(r.startDate) : "-"}</td>
+                  <td className="px-4 py-2 text-slate-500">{r.endDate ? fmtDate(r.endDate) : "-"}</td>
+                  <td className="px-4 py-2">
+                    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${r.status === "Active" ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>{tStatus(r.status)}</span>
+                  </td>
+                  <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                    {canManage && (
+                      <>
+                        <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setModal(r)}>Edit</button>
+                        <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => toggleStatus(r)}>{r.status === "Active" ? "Deactivate" : "Activate"}</button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {modal && (
+        <Modal title={modal === "new" ? "New Commission Rule" : "Edit Commission Rule"} onClose={() => setModal(null)}>
+          <CommissionRuleForm
+            agents={agents}
+            products={products}
+            initial={modal === "new" ? null : modal}
+            onCancel={() => setModal(null)}
+            onSave={(data) => { modal === "new" ? onCreateRule(data) : onUpdateRule(modal, data); setModal(null); }}
+          />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// Pay Commission — used both from an agent's Ledger (general payment,
+// FIFO-allocated across that agent's Approved transactions with a
+// remaining balance) and from Commission History (scoped to ONE specific
+// transaction, capped at that transaction's own remaining amount).
+function CommissionPaymentForm({ agent, transaction, remainingTotal, onSave, onCancel }) {
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [method, setMethod] = useState("Cash");
+  const [referenceNumber, setReferenceNumber] = useState("");
+  const [notes, setNotes] = useState("");
+  const [error, setError] = useState("");
+
+  const cap = transaction ? transaction.remainingAmount : remainingTotal;
+  const already = transaction ? transaction.paidAmount : (remainingTotal != null ? undefined : 0);
+
+  function submit() {
+    const amt = Number(amount) || 0;
+    if (amt <= 0) { setError("Payment amount 0 se zyada hona chahiye."); return; }
+    if (amt > cap + 0.005) { setError(`Payment amount remaining commission (${fmtMoney(cap)}) se zyada nahi ho sakta.`); return; }
+    setError("");
+    onSave({ amount: amt, date, method, referenceNumber: referenceNumber.trim(), notes: notes.trim() });
+  }
+
+  return (
+    <div>
+      <div className="bg-slate-50 border border-slate-200 p-3 mb-3 text-sm space-y-1">
+        <div className="flex justify-between"><span className="text-slate-500">Agent</span><span className="font-bold">{agent.name}</span></div>
+        {transaction && (
+          <div className="flex justify-between"><span className="text-slate-500">Invoice</span><span className="font-bold">{transaction.invoiceNumber}</span></div>
+        )}
+        <div className="flex justify-between"><span className="text-slate-500">Total Commission</span><span className="font-bold">{fmtMoney(transaction ? transaction.commissionAmount : (remainingTotal + (transaction ? transaction.paidAmount : 0)))}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Already Paid</span><span className="font-bold text-emerald-600">{fmtMoney(transaction ? transaction.paidAmount : 0)}</span></div>
+        <div className="flex justify-between border-t border-slate-300 pt-1"><span className="font-bold">Remaining Commission</span><span className="font-black text-red-600">{fmtMoney(cap)}</span></div>
+      </div>
+      <Field label="Payment Amount">
+        <input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Payment Date">
+          <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <Field label="Payment Method">
+          <select className={inputCls} value={method} onChange={(e) => setMethod(e.target.value)}>
+            {COMMISSION_PAYMENT_METHODS.map((m) => <option key={m} value={m}>{t(m)}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="Reference Number">
+        <input className={inputCls} value={referenceNumber} onChange={(e) => setReferenceNumber(e.target.value)} />
+      </Field>
+      <Field label="Notes">
+        <input className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </Field>
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2">
+        <Btn onClick={submit}>Pay Commission</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function CommissionHistoryPage({ agents, transactions, invoices, currentUser, onView, onApprove, onOpenPay, onCancel }) {
+  const [q, setQ] = useState("");
+  const [agentFilter, setAgentFilter] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [cancelling, setCancelling] = useState(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const canManage = currentUser?.role === "admin";
+
+  const filtered = transactions.filter((tx) => {
+    const matchesQ = !q.trim() ||
+      tx.invoiceNumber.toLowerCase().includes(q.toLowerCase()) ||
+      tx.customerName.toLowerCase().includes(q.toLowerCase()) ||
+      tx.agentName.toLowerCase().includes(q.toLowerCase());
+    const matchesAgent = agentFilter === "All" || tx.agentId === agentFilter;
+    const matchesStatus = statusFilter === "All" || tx.status === statusFilter;
+    const matchesFrom = !from || tx.invoiceDate >= from;
+    const matchesTo = !to || tx.invoiceDate <= to;
+    return matchesQ && matchesAgent && matchesStatus && matchesFrom && matchesTo;
+  }).sort((a, b) => new Date(b.invoiceDate) - new Date(a.invoiceDate));
+
+  function confirmCancel() {
+    if (!cancelReason.trim()) { alert("Cancel ki wajah likhein."); return; }
+    onCancel(cancelling, cancelReason.trim());
+    setCancelling(null); setCancelReason("");
+  }
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-2">Commission History</h2>
+      <div className="flex flex-wrap gap-2 mb-3">
+        <input className={`${inputCls} max-w-xs`} placeholder="Search invoice / customer / agent..." value={q} onChange={(e) => setQ(e.target.value)} />
+        <select className={`${inputCls} max-w-[180px]`} value={agentFilter} onChange={(e) => setAgentFilter(e.target.value)}>
+          <option value="All">All Agents</option>
+          {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+        </select>
+        <select className={`${inputCls} max-w-[160px]`} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="All">All Status</option>
+          {COMMISSION_STATUSES.map((s) => <option key={s} value={s}>{tStatus(s)}</option>)}
+        </select>
+        <input type="date" className={`${inputCls} max-w-[160px]`} value={from} onChange={(e) => setFrom(e.target.value)} />
+        <input type="date" className={`${inputCls} max-w-[160px]`} value={to} onChange={(e) => setTo(e.target.value)} />
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Date</th><th className="px-4 py-2">Invoice</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Agent</th>
+              <th className="px-4 py-2 text-right">Sale Amount</th><th className="px-4 py-2 text-right">Commission</th>
+              <th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Remaining</th>
+              <th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-slate-400">Koi commission transaction nahi.</td></tr>}
+            {filtered.map((tx) => (
+              <tr key={tx.id} className={`border-t border-slate-100 ${tx.status === "Cancelled" ? "opacity-50" : ""}`}>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(tx.invoiceDate)}</td>
+                <td className="px-4 py-2 font-bold text-blue-700 cursor-pointer hover:underline" onClick={() => onView(tx)}>{tx.invoiceNumber}</td>
+                <td className="px-4 py-2">{tx.customerName}</td>
+                <td className="px-4 py-2">{tx.agentName}</td>
+                <td className="px-4 py-2 text-right">{fmtMoney(tx.saleAmount)}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(tx.commissionAmount)}</td>
+                <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(tx.paidAmount)}</td>
+                <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(tx.remainingAmount)}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${COMMISSION_STATUS_TONE[tx.status] || "bg-slate-100 text-slate-500"}`}>{tStatus(tx.status)}</span>
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => onView(tx)}>View</button>
+                  {canManage && tx.status === "Pending" && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-emerald-600" onClick={() => onApprove(tx)}>Approve</button>
+                  )}
+                  {canManage && tx.status === "Approved" && tx.remainingAmount > 0 && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-emerald-600" onClick={() => onOpenPay(null, tx)}>Pay</button>
+                  )}
+                  {canManage && (tx.status === "Pending" || tx.status === "Approved") && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setCancelling(tx)}>Cancel</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {cancelling && (
+        <Modal title={`Cancel Commission — ${cancelling.invoiceNumber}`} onClose={() => setCancelling(null)}>
+          <div className="text-sm text-slate-600 mb-3">Ye commission cancel karne se ye payable nahi rahegi. Record audit trail mein maujood rahega.</div>
+          <Field label="Cancel Reason">
+            <input className={inputCls} value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmCancel}>Confirm Cancel</Btn>
+            <Btn variant="ghost" onClick={() => setCancelling(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function CommissionTransactionDetail({ transaction, onClose }) {
+  return (
+    <Modal title={`Commission — ${transaction.invoiceNumber}`} onClose={onClose}>
+      <div id="print-commission" className="text-sm space-y-1">
+        <div className="flex justify-between"><span className="text-slate-500">Agent</span><span className="font-bold">{transaction.agentName}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Invoice</span><span className="font-bold">{transaction.invoiceNumber}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Customer</span><span className="font-bold">{transaction.customerName}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Date</span><span className="font-bold">{fmtDate(transaction.invoiceDate)}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Sale Amount</span><span className="font-bold">{fmtMoney(transaction.saleAmount)}</span></div>
+        {(transaction.breakdown || []).length > 0 && (
+          <div className="border-t border-slate-200 pt-2 mt-2">
+            <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Breakdown</div>
+            {transaction.breakdown.map((l, idx) => (
+              <div key={idx} className="flex justify-between text-xs text-slate-600">
+                <span>{l.source} ({fmtCommissionRate(l.commissionType, l.commissionRate)})</span>
+                <span className="font-bold">{fmtMoney(l.commission)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex justify-between border-t border-slate-300 pt-2 mt-2">
+          <span className="font-bold">Commission Amount</span><span className="font-black">{fmtMoney(transaction.commissionAmount)}</span>
+        </div>
+        <div className="flex justify-between"><span className="text-slate-500">Paid</span><span className="font-bold text-emerald-600">{fmtMoney(transaction.paidAmount)}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Remaining</span><span className="font-bold text-red-600">{fmtMoney(transaction.remainingAmount)}</span></div>
+        <div className="flex justify-between items-center pt-1">
+          <span className="text-slate-500">Status</span>
+          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${COMMISSION_STATUS_TONE[transaction.status] || "bg-slate-100 text-slate-500"}`}>{tStatus(transaction.status)}</span>
+        </div>
+        {transaction.cancelReason && (
+          <div className="text-xs text-slate-400 pt-1">Cancel Reason: {transaction.cancelReason}</div>
+        )}
+      </div>
+      <div className="flex gap-2 mt-4 print:hidden">
+        <Btn onClick={() => window.print()}>Print</Btn>
+        <Btn variant="ghost" onClick={onClose}>Close</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function CommissionDashboardCards({ transactions }) {
+  const active = transactions.filter((tx) => tx.status !== "Cancelled");
+  const totalCommission = roundMoney(active.reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const pending = roundMoney(transactions.filter((tx) => tx.status === "Pending").reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const approved = roundMoney(transactions.filter((tx) => tx.status === "Approved").reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const paid = roundMoney(active.reduce((s, tx) => s + Number(tx.paidAmount || 0), 0));
+  const outstanding = roundMoney(active.reduce((s, tx) => s + Number(tx.remainingAmount || 0), 0));
+  const m = todayISO().slice(0, 7);
+  const thisMonth = roundMoney(active.filter((tx) => (tx.invoiceDate || "").startsWith(m)).reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+
+  return (
+    <div className="flex flex-wrap gap-3 mb-6">
+      <Stat label="Total Commission" value={fmtMoney(totalCommission)} />
+      <Stat label="Pending Commission" value={fmtMoney(pending)} accent="text-blue-700" />
+      <Stat label="Approved Commission" value={fmtMoney(approved)} accent="text-amber-600" />
+      <Stat label="Paid Commission" value={fmtMoney(paid)} accent="text-emerald-600" />
+      <Stat label="Outstanding Commission" value={fmtMoney(outstanding)} accent="text-red-600" />
+      <Stat label="This Month Commission" value={fmtMoney(thisMonth)} />
+    </div>
+  );
+}
+
+function CommissionPage({
+  agents, rules, transactions, payments, products, invoices, currentUser,
+  onCreateAgent, onUpdateAgent, onToggleAgentStatus,
+  onCreateRule, onUpdateRule,
+  onApproveTransaction, onCancelTransaction,
+  onPayAgent, onPayTransaction,
+}) {
+  const [tab, setTab] = useState("dashboard");
+  const [viewingTx, setViewingTx] = useState(null);
+  const [payModal, setPayModal] = useState(null); // { agent, transaction | null }
+
+  function handleOpenPay(agent, transaction) {
+    const resolvedAgent = agent || agents.find((a) => a.id === transaction.agentId);
+    if (!resolvedAgent) return;
+    setPayModal({ agent: resolvedAgent, transaction: transaction || null });
+  }
+
+  function handlePaySubmit(data) {
+    if (payModal.transaction) {
+      onPayTransaction(payModal.transaction, data);
+    } else {
+      onPayAgent(payModal.agent, data);
+    }
+    setPayModal(null);
+  }
+
+  const canManage = currentUser?.role === "admin";
+  const tabs = [
+    ["dashboard", "Commission Dashboard"],
+    ["agents", "Commission Agents"],
+    ["rules", "Commission Rules"],
+    ["history", "Commission History"],
+  ];
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Commission</h2>
+        <div className="flex gap-2 flex-wrap">
+          {tabs.map(([id, label]) => (
+            <Btn key={id} variant={tab === id ? "primary" : "ghost"} small onClick={() => setTab(id)}>{label}</Btn>
+          ))}
+        </div>
+      </div>
+
+      {tab === "dashboard" && (
+        <div>
+          <CommissionDashboardCards transactions={transactions} />
+          <div className="bg-white border border-slate-200 overflow-x-auto">
+            <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Recent Commission Transactions</div>
+            <table className="w-full text-sm">
+              <tbody>
+                {[...transactions].sort((a, b) => new Date(b.invoiceDate) - new Date(a.invoiceDate)).slice(0, 8).map((tx) => (
+                  <tr key={tx.id} className="border-t border-slate-100">
+                    <td className="px-4 py-2 font-bold text-blue-700">{tx.invoiceNumber}</td>
+                    <td className="px-4 py-2">{tx.agentName}</td>
+                    <td className="px-4 py-2 text-slate-500">{fmtDate(tx.invoiceDate)}</td>
+                    <td className="px-4 py-2 text-right font-bold">{fmtMoney(tx.commissionAmount)}</td>
+                    <td className="px-4 py-2"><span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${COMMISSION_STATUS_TONE[tx.status] || "bg-slate-100 text-slate-500"}`}>{tStatus(tx.status)}</span></td>
+                  </tr>
+                ))}
+                {transactions.length === 0 && <tr><td className="px-4 py-6 text-center text-slate-400">Koi commission transaction nahi.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "agents" && (
+        <CommissionAgentsPage
+          agents={agents} transactions={transactions} payments={payments} currentUser={currentUser}
+          onCreateAgent={onCreateAgent} onUpdateAgent={onUpdateAgent} onToggleAgentStatus={onToggleAgentStatus}
+          onOpenPay={handleOpenPay}
+        />
+      )}
+
+      {tab === "rules" && (
+        <CommissionRulesPage agents={agents} products={products} rules={rules} currentUser={currentUser} onCreateRule={onCreateRule} onUpdateRule={onUpdateRule} />
+      )}
+
+      {tab === "history" && (
+        <CommissionHistoryPage
+          agents={agents} transactions={transactions} invoices={invoices} currentUser={currentUser}
+          onView={(tx) => setViewingTx(tx)}
+          onApprove={onApproveTransaction}
+          onOpenPay={handleOpenPay}
+          onCancel={onCancelTransaction}
+        />
+      )}
+
+      {viewingTx && <CommissionTransactionDetail transaction={viewingTx} onClose={() => setViewingTx(null)} />}
+
+      {payModal && (
+        <Modal title="Pay Commission" onClose={() => setPayModal(null)}>
+          <CommissionPaymentForm
+            agent={payModal.agent}
+            transaction={payModal.transaction}
+            remainingTotal={payModal.transaction ? null : computeCommissionSummaryForAgent(payModal.agent.id, transactions, payments).remaining}
+            onCancel={() => setPayModal(null)}
+            onSave={handlePaySubmit}
+          />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- Bookings ---------------- */
 
 function Bookings({ customers, products, bookings, saveBooking, onCreateAdvanceBooking, onConvertToInvoice }) {
@@ -4138,204 +4816,137 @@ function Orders({ customers, products, orders, onCreateOrder, saveOrder, onConve
 
 /* ---------------- Promise To Pay (Phase 3) ---------------- */
 
-function PromiseForm({ customers, initial, currentUser, onSave, onCancel }) {
-  const [form, setForm] = useState(
-    initial || {
-      customerId: customers[0]?.id || "",
-      amount: "",
-      promiseDate: todayISO(),
-      expectedDate: todayISO(),
-      paymentMethod: "Cash",
-      notes: "",
-    }
-  );
+function PromiseForm({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, initial, onSave, onCancel }) {
+  const [customerId, setCustomerId] = useState(initial?.customerId || customers[0]?.id || "");
+  const [custSearch, setCustSearch] = useState("");
+  const [amount, setAmount] = useState(initial?.amount ?? "");
+  const [promiseDate, setPromiseDate] = useState(initial?.promiseDate || todayISO());
+  const [expectedDate, setExpectedDate] = useState(initial?.expectedDate || todayISO());
+  const [notes, setNotes] = useState(initial?.notes || "");
   const [error, setError] = useState("");
 
+  const customer = customers.find((c) => c.id === customerId);
+  const outstanding = customer ? computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding : 0;
+  const filteredCustomers = customers.filter((c) => c.name.toLowerCase().includes(custSearch.toLowerCase()));
+  const isEdit = !!initial;
+
   function submit() {
-    if (!form.customerId) { setError("Customer select karein."); return; }
-    if (!Number(form.amount) || Number(form.amount) <= 0) { setError("Promise amount zaroori hai."); return; }
-    if (!form.expectedDate) { setError("Expected Payment Date zaroori hai."); return; }
-    const customer = customers.find((c) => c.id === form.customerId);
-    onSave({ ...form, amount: Number(form.amount), customerName: customer?.name || "" });
+    if (!customerId) { setError("Customer select karein."); return; }
+    if (!Number(amount) || Number(amount) <= 0) { setError("Promise amount zaroori hai."); return; }
+    if (!expectedDate) { setError("Expected Payment Date zaroori hai."); return; }
+    setError("");
+    const cust = customers.find((c) => c.id === customerId);
+    onSave({ customerId, customerName: cust.name, amount: Number(amount), promiseDate, expectedDate, notes: notes.trim() });
   }
 
   return (
     <div>
-      <Field label="Customer">
-        <select className={inputCls} value={form.customerId} onChange={(e) => setForm({ ...form, customerId: e.target.value })}>
-          {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
-      </Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Promise Amount (Rs)">
-          <input type="number" className={inputCls} value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
-        </Field>
-        <Field label="Payment Method">
-          <select className={inputCls} value={form.paymentMethod} onChange={(e) => setForm({ ...form, paymentMethod: e.target.value })}>
-            {PROMISE_PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
+      {!isEdit ? (
+        <Field label="Customer">
+          <input className={`${inputCls} mb-1`} placeholder="Search customer..." value={custSearch} onChange={(e) => setCustSearch(e.target.value)} />
+          <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+            {filteredCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </Field>
-      </div>
+      ) : (
+        <div className="text-sm font-bold text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2 mb-3">{customer?.name}</div>
+      )}
+      {customer && (
+        <div className="text-xs text-slate-500 mb-3">
+          Current Outstanding: <span className={`font-black ${outstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(outstanding)}</span>
+        </div>
+      )}
+      <Field label="Promise Amount (Rs)">
+        <input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} />
+      </Field>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Promise Date">
-          <input type="date" className={inputCls} value={form.promiseDate} onChange={(e) => setForm({ ...form, promiseDate: e.target.value })} />
+          <input type="date" className={inputCls} value={promiseDate} onChange={(e) => setPromiseDate(e.target.value)} />
         </Field>
         <Field label="Expected Payment Date">
-          <input type="date" className={inputCls} value={form.expectedDate} onChange={(e) => setForm({ ...form, expectedDate: e.target.value })} />
+          <input type="date" className={inputCls} value={expectedDate} onChange={(e) => setExpectedDate(e.target.value)} />
         </Field>
       </div>
-      <Field label="Notes">
-        <input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+      <Field label="Notes (optional)">
+        <input className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} />
       </Field>
-      <div className="text-[11px] text-slate-400 mb-3">Created By: <span className="font-bold text-slate-600">{currentUser?.name || currentUser?.username}</span> · Created Date: <span className="font-bold text-slate-600">{fmtDate(todayISO())}</span></div>
       {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
-      <div className="flex gap-2">
-        <Btn onClick={submit}>Save Promise</Btn>
+      <div className="flex gap-2 mt-2">
+        <Btn onClick={submit}>{isEdit ? "Save Changes" : "Save Promise"}</Btn>
         <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
       </div>
     </div>
   );
 }
 
-// Feature 10 — simple month-grid calendar. Clicking a date shows promises
-// scheduled (by Expected Payment Date) for that day.
 function PromiseCalendar({ promises }) {
-  const [cursor, setCursor] = useState(new Date());
-  const [selectedDate, setSelectedDate] = useState(null);
-
-  const year = cursor.getFullYear();
-  const month = cursor.getMonth();
-  const firstDay = new Date(year, month, 1);
-  const startWeekday = firstDay.getDay();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-
+  const active = promises.filter((p) => p.status !== "Deleted").map(promiseWithComputed);
   const byDate = {};
-  promises.forEach((p) => {
-    if (!p.expectedDate) return;
-    byDate[p.expectedDate] = byDate[p.expectedDate] || [];
+  active.forEach((p) => {
+    if (p.status === "Completed" || p.status === "Cancelled") return;
+    if (!byDate[p.expectedDate]) byDate[p.expectedDate] = [];
     byDate[p.expectedDate].push(p);
   });
-
-  const cells = [];
-  for (let i = 0; i < startWeekday; i++) cells.push(null);
-  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
-
-  function dateISO(d) {
-    return `${year}-${String(month + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
-  }
-
-  const selectedPromises = selectedDate ? (byDate[selectedDate] || []) : [];
+  const dates = Object.keys(byDate).sort();
 
   return (
-    <div className="bg-white border border-slate-200 p-4">
-      <div className="flex items-center justify-between mb-3">
-        <button className="text-slate-500 hover:text-slate-900 font-bold px-2" onClick={() => setCursor(new Date(year, month - 1, 1))}>‹</button>
-        <div className="font-black uppercase tracking-tight">{cursor.toLocaleDateString("en-GB", { month: "long", year: "numeric" })}</div>
-        <button className="text-slate-500 hover:text-slate-900 font-bold px-2" onClick={() => setCursor(new Date(year, month + 1, 1))}>›</button>
-      </div>
-      <div className="grid grid-cols-7 gap-1 text-[10px] font-bold uppercase text-slate-400 mb-1 text-center">
-        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((d) => <div key={d}>{d}</div>)}
-      </div>
-      <div className="grid grid-cols-7 gap-1">
-        {cells.map((d, idx) => {
-          if (!d) return <div key={idx} />;
-          const iso = dateISO(d);
-          const dayPromises = byDate[iso] || [];
-          const isToday = iso === todayISO();
-          const hasBroken = dayPromises.some((p) => p.status === "Broken Promise");
-          return (
-            <button
-              key={idx}
-              onClick={() => setSelectedDate(iso === selectedDate ? null : iso)}
-              className={`aspect-square border text-xs flex flex-col items-center justify-center relative ${
-                selectedDate === iso ? "border-slate-900 bg-slate-900 text-white" : isToday ? "border-blue-400 bg-blue-50" : "border-slate-200 hover:bg-slate-50"
-              }`}
-            >
-              <span className="font-bold">{d}</span>
-              {dayPromises.length > 0 && (
-                <span className={`w-1.5 h-1.5 rounded-full mt-0.5 ${hasBroken ? "bg-red-500" : "bg-emerald-500"}`} />
-              )}
-            </button>
-          );
-        })}
-      </div>
-      {selectedDate && (
-        <div className="mt-4 border-t border-slate-200 pt-3">
-          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2">Promises on {fmtDate(selectedDate)}</div>
-          {selectedPromises.length === 0 && <div className="text-slate-400 text-sm">Koi promise nahi.</div>}
-          <div className="space-y-2">
-            {selectedPromises.map((p) => (
-              <div key={p.id} className="flex justify-between items-center text-sm border border-slate-200 px-3 py-2">
-                <div>
-                  <div className="font-bold">{p.customerName}</div>
-                  <div className="text-xs text-slate-400">{p.code}</div>
-                </div>
-                <div className="text-right">
-                  <div className="font-black">{fmtMoney(p.remainingAmount)}</div>
-                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${PROMISE_STATUS_TONE[p.status]}`}>{p.status}</span>
-                </div>
+    <div className="bg-white border border-slate-200 overflow-x-auto">
+      <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Calendar — Upcoming Promised Payments</div>
+      {dates.length === 0 ? (
+        <div className="px-4 py-6 text-center text-slate-400">Koi promise nahi mila.</div>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {dates.map((d) => (
+            <div key={d} className="px-4 py-2.5">
+              <div className="text-xs font-black uppercase text-slate-500 mb-1">
+                {fmtDate(d)} {d === todayISO() ? <span className="text-blue-700">(Today)</span> : ""}
               </div>
-            ))}
-          </div>
+              <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                {byDate[d].map((p) => (
+                  <div key={p.id}>
+                    <span className="font-bold">{p.customerName}</span> — <span className="font-black text-blue-700">{fmtMoney(p.remainingAmount)}</span>{" "}
+                    <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 ${PROMISE_STATUS_TONE[p.status]}`}>{p.status}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-function PromiseToPayPage({ customers, promises, currentUser, onCreatePromise, onUpdatePromise, onCancelPromise, onDeletePromise }) {
+function PromiseToPayPage({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, currentUser, onCreatePromise, onUpdatePromise, onCancelPromise, focusPromiseId, setFocusPromiseId }) {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [cancelling, setCancelling] = useState(null);
+  const [cancelReason, setCancelReason] = useState("");
   const [q, setQ] = useState("");
   const [statusFilter, setStatusFilter] = useState("All");
-  const [dateFilter, setDateFilter] = useState("All");
   const [view, setView] = useState("list"); // list | calendar
-  const [deleting, setDeleting] = useState(null);
-  const [deleteReason, setDeleteReason] = useState("");
 
-  const canDelete = currentUser?.role === "admin";
   const canCancel = currentUser?.role === "admin";
 
   const active = promises.filter((p) => p.status !== "Deleted").map(promiseWithComputed);
+  const filtered = active
+    .filter((p) => statusFilter === "All" || p.status === statusFilter)
+    .filter((p) => !q.trim() || p.customerName.toLowerCase().includes(q.toLowerCase()) || p.code.toLowerCase().includes(q.toLowerCase()) || String(p.amount).includes(q))
+    .sort((a, b) => new Date(a.expectedDate) - new Date(b.expectedDate));
 
-  const t = todayISO();
-  const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowISO = tomorrow.toISOString().slice(0, 10);
-  const weekStart = new Date(); const day = weekStart.getDay();
-  const weekBegin = new Date(weekStart); weekBegin.setDate(weekStart.getDate() - day);
-  const weekEnd = new Date(weekBegin); weekEnd.setDate(weekBegin.getDate() + 6);
-  const weekBeginISO = weekBegin.toISOString().slice(0, 10);
-  const weekEndISO = weekEnd.toISOString().slice(0, 10);
-  const monthPrefix = t.slice(0, 7);
+  useEffect(() => {
+    if (focusPromiseId) {
+      const p = promises.find((p) => p.id === focusPromiseId);
+      if (p) { setQ(p.code); }
+      setFocusPromiseId(null);
+    }
+  }, [focusPromiseId]);
 
-  let filtered = active.filter((p) => {
-    const matchesQ = !q.trim() || p.customerName.toLowerCase().includes(q.toLowerCase()) || p.code.toLowerCase().includes(q.toLowerCase()) || String(p.amount).includes(q) || p.promiseDate.includes(q) || p.status.toLowerCase().includes(q.toLowerCase());
-    const matchesStatus = statusFilter === "All" || p.status === statusFilter;
-    let matchesDate = true;
-    if (dateFilter === "Today") matchesDate = p.expectedDate === t;
-    else if (dateFilter === "Tomorrow") matchesDate = p.expectedDate === tomorrowISO;
-    else if (dateFilter === "This Week") matchesDate = p.expectedDate >= weekBeginISO && p.expectedDate <= weekEndISO;
-    else if (dateFilter === "This Month") matchesDate = p.expectedDate.startsWith(monthPrefix);
-    return matchesQ && matchesStatus && matchesDate;
-  });
-  filtered.sort((a, b) => new Date(b.promiseDate) - new Date(a.promiseDate));
-
-  function openEdit(p) { setEditing(p); setShowForm(true); }
-
-  function markCompleted(p) {
-    if (!confirm(`Promise ${p.code} ko Completed mark karein?`)) return;
-    onUpdatePromise({ ...p, status: "Completed", paidAmount: p.amount }, "Marked completed manually");
-  }
-  function cancelPromise(p) {
-    if (!canCancel) { alert("Sirf Admin promise cancel kar sakta hai."); return; }
-    const reason = prompt("Cancel karne ki wajah likhein:");
-    if (reason === null) return;
-    onCancelPromise(p, reason.trim());
-  }
-  function confirmDelete() {
-    if (!deleteReason.trim()) { alert("Delete ki wajah likhein."); return; }
-    onDeletePromise(deleting, deleteReason.trim());
-    setDeleting(null); setDeleteReason("");
+  function confirmCancel() {
+    if (currentUser?.role !== "admin") { alert("Sirf Admin promise cancel kar sakta hai."); return; }
+    if (!cancelReason.trim()) { alert("Reason likhna zaroori hai."); return; }
+    onCancelPromise(cancelling, cancelReason.trim());
+    setCancelling(null); setCancelReason("");
   }
 
   return (
@@ -4349,68 +4960,49 @@ function PromiseToPayPage({ customers, promises, currentUser, onCreatePromise, o
         </div>
       </div>
       <div className="text-xs text-slate-400 mb-4 max-w-2xl">
-        Customer ka "wada" (promise) record karein — kab kitna payment karega. Due date guzarne par khud-ba-khud "Broken Promise" mark ho jata hai.
+        Jab customer kahe "main is tareekh tak itna pay kar dunga", yahan record karein — status apne aap update hota rahega aur overdue promises "Broken Promise" ban jayenge.
       </div>
 
       {view === "calendar" ? (
-        <PromiseCalendar promises={active} />
+        <PromiseCalendar promises={promises} />
       ) : (
         <>
           <div className="flex flex-wrap gap-2 mb-3">
             <input className={`${inputCls} max-w-xs`} placeholder="Search customer / promise # / amount / status..." value={q} onChange={(e) => setQ(e.target.value)} />
-            <select className={`${inputCls} max-w-[160px]`} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+            <select className={`${inputCls} max-w-[180px]`} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
               <option value="All">All Status</option>
-              {PROMISE_STATUSES.map((s) => <option key={s}>{s}</option>)}
-            </select>
-            <select className={`${inputCls} max-w-[160px]`} value={dateFilter} onChange={(e) => setDateFilter(e.target.value)}>
-              {["All", "Today", "Tomorrow", "This Week", "This Month"].map((d) => <option key={d}>{d}</option>)}
+              {PROMISE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
           </div>
-
           <div className="bg-white border border-slate-200 overflow-x-auto">
             <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-                  <th className="px-4 py-2">Promise No</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Mobile</th>
-                  <th className="px-4 py-2 text-right">Promise Amt</th><th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Remaining</th>
-                  <th className="px-4 py-2">Promise Date</th><th className="px-4 py-2">Expected Date</th><th className="px-4 py-2">Status</th>
-                  <th className="px-4 py-2">Created By</th><th></th>
-                </tr>
-              </thead>
+              <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+                <th className="px-4 py-2">Promise #</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2 text-right">Amount</th>
+                <th className="px-4 py-2">Promise Date</th><th className="px-4 py-2">Expected Date</th><th className="px-4 py-2 text-right">Paid</th>
+                <th className="px-4 py-2 text-right">Remaining</th><th className="px-4 py-2">Status</th><th></th>
+              </tr></thead>
               <tbody>
-                {filtered.length === 0 && <tr><td colSpan={11} className="px-4 py-6 text-center text-slate-400">Koi promise nahi mila.</td></tr>}
-                {filtered.map((p) => {
-                  const cust = customers.find((c) => c.id === p.customerId);
-                  return (
-                    <tr key={p.id} className="border-t border-slate-100">
-                      <td className="px-4 py-2 font-black text-blue-700">{p.code}</td>
-                      <td className="px-4 py-2 font-bold">{p.customerName}</td>
-                      <td className="px-4 py-2 text-slate-500">{cust?.phone || "-"}</td>
-                      <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.amount)}</td>
-                      <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(p.paidAmount)}</td>
-                      <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(p.remainingAmount)}</td>
-                      <td className="px-4 py-2 text-slate-500">{fmtDate(p.promiseDate)}</td>
-                      <td className="px-4 py-2 text-slate-500">{fmtDate(p.expectedDate)}</td>
-                      <td className="px-4 py-2"><span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${PROMISE_STATUS_TONE[p.status]}`}>{p.status}</span></td>
-                      <td className="px-4 py-2 text-slate-500">{p.createdBy}</td>
-                      <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
-                        {(p.status === "Pending" || p.status === "Partially Paid" || p.status === "Broken Promise") && (
-                          <>
-                            <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => openEdit(p)}>Edit</button>
-                            <button className="text-xs font-bold text-slate-500 hover:text-emerald-600" onClick={() => markCompleted(p)}>Complete</button>
-                            <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => cancelPromise(p)}>Cancel</button>
-                          </>
-                        )}
-                        {canDelete && (
-                          <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setDeleting(p)}>Delete</button>
-                        )}
-                        {waLink && cust?.phone && (
-                          <a href={waLink(cust.phone, `Assalam-o-Alaikum ${p.customerName},\n\nYaad dahani: aap ne Rs ${p.remainingAmount.toLocaleString()} payment ka wada kiya tha (${p.code}), expected date ${fmtDate(p.expectedDate)}. Jaldi clear kar dein.`)} target="_blank" rel="noreferrer" className="text-xs font-bold text-emerald-600 hover:underline">WA</a>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {filtered.length === 0 && <tr><td colSpan={9} className="px-4 py-6 text-center text-slate-400">Koi promise nahi mila.</td></tr>}
+                {filtered.map((p) => (
+                  <tr key={p.id} className="border-t border-slate-100">
+                    <td className="px-4 py-2 font-black text-blue-700">{p.code}</td>
+                    <td className="px-4 py-2 font-bold">{p.customerName}</td>
+                    <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.amount)}</td>
+                    <td className="px-4 py-2 text-slate-500">{fmtDate(p.promiseDate)}</td>
+                    <td className="px-4 py-2 text-slate-500">{fmtDate(p.expectedDate)}</td>
+                    <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(p.paidAmount)}</td>
+                    <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(p.remainingAmount)}</td>
+                    <td className="px-4 py-2"><span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${PROMISE_STATUS_TONE[p.status]}`}>{p.status}</span></td>
+                    <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                      {p.status !== "Completed" && p.status !== "Cancelled" && (
+                        <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => { setEditing(p); setShowForm(true); }}>Edit</button>
+                      )}
+                      {canCancel && p.status !== "Cancelled" && p.status !== "Completed" && (
+                        <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setCancelling(p)}>Cancel</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
               </tbody>
             </table>
           </div>
@@ -4418,30 +5010,25 @@ function PromiseToPayPage({ customers, promises, currentUser, onCreatePromise, o
       )}
 
       {showForm && (
-        <Modal title={editing ? `Edit Promise ${editing.code}` : "New Promise To Pay"} onClose={() => { setShowForm(false); setEditing(null); }}>
+        <Modal title={editing ? `Edit Promise ${editing.code}` : "New Promise"} onClose={() => { setShowForm(false); setEditing(null); }}>
           <PromiseForm
-            customers={customers}
-            initial={editing}
-            currentUser={currentUser}
+            customers={customers} invoices={invoices} payments={payments} returns={returns} exchanges={exchanges}
+            promises={promises} transfers={transfers} adjustments={adjustments} initial={editing}
             onCancel={() => { setShowForm(false); setEditing(null); }}
-            onSave={(data) => {
-              if (editing) onUpdatePromise({ ...editing, ...data }, "Edited");
-              else onCreatePromise(data);
-              setShowForm(false); setEditing(null);
-            }}
+            onSave={(data) => { editing ? onUpdatePromise(editing, data) : onCreatePromise(data); setShowForm(false); setEditing(null); }}
           />
         </Modal>
       )}
 
-      {deleting && (
-        <Modal title={`Delete Promise ${deleting.code}`} onClose={() => setDeleting(null)}>
-          <div className="text-sm text-slate-600 mb-3">Ye promise delete karne se ledger se bhi hat jayega. Ye action reverse nahi ho sakta.</div>
-          <Field label="Delete Reason">
-            <input className={inputCls} value={deleteReason} onChange={(e) => setDeleteReason(e.target.value)} autoFocus />
+      {cancelling && (
+        <Modal title={`Cancel Promise ${cancelling.code}`} onClose={() => setCancelling(null)}>
+          <div className="text-sm text-slate-600 mb-3">Ye promise cancel karne se history mein "Cancelled" reh jayega — ledger se hatega nahi.</div>
+          <Field label="Reason">
+            <input className={inputCls} value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} autoFocus />
           </Field>
           <div className="flex gap-2">
-            <Btn variant="danger" onClick={confirmDelete}>Confirm Delete</Btn>
-            <Btn variant="ghost" onClick={() => setDeleting(null)}>Cancel</Btn>
+            <Btn variant="danger" onClick={confirmCancel}>Confirm Cancel</Btn>
+            <Btn variant="ghost" onClick={() => setCancelling(null)}>Cancel</Btn>
           </div>
         </Modal>
       )}
@@ -4453,52 +5040,70 @@ function PromiseToPayPage({ customers, promises, currentUser, onCreatePromise, o
 
 function Leads({ leads, saveLead, deleteLead }) {
   const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ name: "", phone: "", source: "", status: "New", notes: "", followUpDate: "" });
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({ name: "", phone: "", source: "", audienceType: "Builder", status: "New", followUpDate: "", notes: "" });
+
+  function openNew() { setEditing(null); setForm({ name: "", phone: "", source: "", audienceType: "Builder", status: "New", followUpDate: "", notes: "" }); setShowForm(true); }
+  function openEdit(l) { setEditing(l); setForm(l); setShowForm(true); }
 
   function submit() {
-    if (!form.name.trim()) return;
-    saveLead({ id: uid("ld"), ...form });
-    setForm({ name: "", phone: "", source: "", status: "New", notes: "", followUpDate: "" });
+    if (!form.name.trim()) { alert("Lead ka naam zaroori hai."); return; }
+    if (editing) saveLead({ ...editing, ...form });
+    else saveLead({ id: uid("lead"), code: "LEA-" + Math.floor(1000 + Math.random() * 9000), ...form, createdAt: todayISO() });
     setShowForm(false);
   }
-  function updateStatus(id, status) {
-    const l = leads.find((l) => l.id === id);
-    saveLead({ ...l, status });
-  }
+
+  function updateStatus(l, status) { saveLead({ ...l, status }); }
+
+  const sorted = [...leads].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-black uppercase tracking-tight">Leads</h2>
-        <Btn onClick={() => setShowForm(true)}>+ New Lead</Btn>
+        <Btn onClick={openNew}>+ New Lead</Btn>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
-        {LEAD_STATUSES.map((status) => (
-          <div key={status} className="bg-white border border-slate-200 min-h-[120px]">
-            <div className="px-3 py-2 border-b border-slate-200 text-[11px] font-black uppercase tracking-wide text-slate-500">{status}</div>
-            <div className="p-2 space-y-2">
-              {leads.filter((l) => l.status === status).map((l) => (
-                <div key={l.id} className="border border-slate-200 p-2 text-sm">
-                  <div className="font-bold">{l.name}</div>
-                  <div className="text-xs text-slate-500">{l.phone}</div>
-                  {l.followUpDate && <div className="text-[10px] text-blue-700 font-bold">Follow-up: {fmtDate(l.followUpDate)}</div>}
-                  <div className="flex gap-1 mt-1">
-                    <select className="text-[10px] border border-slate-300 px-1 py-0.5 flex-1" value={l.status} onChange={(e) => updateStatus(l.id, e.target.value)}>
-                      {LEAD_STATUSES.map((s) => <option key={s}>{s}</option>)}
-                    </select>
-                    <button onClick={() => deleteLead(l.id)} className="text-slate-400 hover:text-red-600 text-xs">×</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        ))}
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Ref</th><th className="px-4 py-2">Name</th><th className="px-4 py-2">Phone</th>
+            <th className="px-4 py-2">Source</th><th className="px-4 py-2">Audience</th><th className="px-4 py-2">Follow-up</th>
+            <th className="px-4 py-2">Status</th><th></th>
+          </tr></thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi lead nahi.</td></tr>}
+            {sorted.map((l) => (
+              <tr key={l.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-black text-blue-700">{l.code}</td>
+                <td className="px-4 py-2 font-bold cursor-pointer hover:text-blue-700" onClick={() => openEdit(l)}>{l.name}</td>
+                <td className="px-4 py-2 text-slate-500">{l.phone || "-"}</td>
+                <td className="px-4 py-2 text-slate-500">{l.source || "-"}</td>
+                <td className="px-4 py-2 text-slate-500">{l.audienceType}</td>
+                <td className="px-4 py-2 text-slate-500">{l.followUpDate ? fmtDate(l.followUpDate) : "-"}</td>
+                <td className="px-4 py-2">
+                  <select className="text-xs border border-slate-300 px-1.5 py-1" value={l.status} onChange={(e) => updateStatus(l, e.target.value)}>
+                    {LEAD_STATUSES.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => openEdit(l)}>Edit</button>
+                  <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete lead ${l.name}?`)) deleteLead(l.id); }}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
       {showForm && (
-        <Modal title="New Lead" onClose={() => setShowForm(false)}>
+        <Modal title={editing ? "Edit Lead" : "New Lead"} onClose={() => setShowForm(false)}>
           <Field label="Name"><input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
           <Field label="Phone"><input className={inputCls} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
-          <Field label="Source"><input className={inputCls} placeholder="Builder / Contractor / Referral..." value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} /></Field>
+          <Field label="Source"><input className={inputCls} placeholder="e.g. Referral, Site visit" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} /></Field>
+          <Field label="Audience Type">
+            <select className={inputCls} value={form.audienceType} onChange={(e) => setForm({ ...form, audienceType: e.target.value })}>
+              {AUDIENCE_TYPES.map((a) => <option key={a}>{a}</option>)}
+            </select>
+          </Field>
           <Field label="Follow-up Date"><input type="date" className={inputCls} value={form.followUpDate} onChange={(e) => setForm({ ...form, followUpDate: e.target.value })} /></Field>
           <Field label="Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
           <div className="flex gap-2"><Btn onClick={submit}>Save Lead</Btn><Btn variant="ghost" onClick={() => setShowForm(false)}>Cancel</Btn></div>
@@ -4511,40 +5116,57 @@ function Leads({ leads, saveLead, deleteLead }) {
 /* ---------------- Products ---------------- */
 
 function Products({ products, saveProduct, deleteProduct }) {
-  const [form, setForm] = useState({ name: "", unit: "Bag", price: "" });
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({ name: "", unit: "Bag", price: 0 });
+
+  function openNew() { setEditing(null); setForm({ name: "", unit: "Bag", price: 0 }); setShowForm(true); }
+  function openEdit(p) { setEditing(p); setForm(p); setShowForm(true); }
 
   function submit() {
-    if (!form.name.trim()) return;
-    saveProduct({ id: uid("p"), ...form, price: Number(form.price) || 0 });
-    setForm({ name: "", unit: "Bag", price: "" });
+    if (!form.name.trim()) { alert("Product ka naam zaroori hai."); return; }
+    if (editing) saveProduct({ ...editing, ...form, price: Number(form.price) });
+    else saveProduct({ id: uid("prod"), ...form, price: Number(form.price) });
+    setShowForm(false);
   }
 
   return (
     <div>
-      <h2 className="text-xl font-black uppercase tracking-tight mb-4">Products</h2>
-      <div className="bg-white border border-slate-200 p-4 mb-6 max-w-xl flex gap-2 items-end flex-wrap">
-        <div className="flex-1 min-w-[150px]"><Field label="Product Name"><input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field></div>
-        <div className="w-28"><Field label="Unit"><input list="unit-suggestions" className={inputCls} placeholder="e.g. Crush" value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} /></Field></div>
-        <div className="w-28"><Field label="Price (Rs)"><input type="number" className={inputCls} value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></Field></div>
-        <Btn onClick={submit}>Add</Btn>
-        <datalist id="unit-suggestions">{UNIT_OPTS.map((u) => <option key={u} value={u} />)}</datalist>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-black uppercase tracking-tight">Products</h2>
+        <Btn onClick={openNew}>+ New Purchase</Btn>
       </div>
-      <div className="bg-white border border-slate-200 overflow-x-auto max-w-xl">
+      <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
-          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200"><th className="px-4 py-2">Name</th><th className="px-4 py-2">Unit</th><th className="px-4 py-2 text-right">Price</th><th></th></tr></thead>
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Product Name</th><th className="px-4 py-2">Unit</th><th className="px-4 py-2 text-right">Rate</th><th></th>
+          </tr></thead>
           <tbody>
             {products.length === 0 && <tr><td colSpan={4} className="px-4 py-6 text-center text-slate-400">Koi product nahi.</td></tr>}
             {products.map((p) => (
               <tr key={p.id} className="border-t border-slate-100">
                 <td className="px-4 py-2 font-bold">{p.name}</td>
                 <td className="px-4 py-2 text-slate-500">{p.unit}</td>
-                <td className="px-4 py-2 text-right">{fmtMoney(p.price)}</td>
-                <td className="px-4 py-2 text-right"><button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => deleteProduct(p.id)}>Delete</button></td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.price)}</td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => openEdit(p)}>Edit</button>
+                  <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete ${p.name}?`)) deleteProduct(p.id); }}>Delete</button>
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      {showForm && (
+        <Modal title={editing ? "Edit Product" : "New Product"} onClose={() => setShowForm(false)}>
+          <Field label="Product Name"><input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+          <Field label="Unit">
+            <input list="unit-suggestions" className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
+          </Field>
+          <Field label="Rate / Unit"><input type="number" className={inputCls} value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></Field>
+          <div className="flex gap-2"><Btn onClick={submit}>Save Product</Btn><Btn variant="ghost" onClick={() => setShowForm(false)}>Cancel</Btn></div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -4552,109 +5174,74 @@ function Products({ products, saveProduct, deleteProduct }) {
 /* ---------------- Offers ---------------- */
 
 function OfferForm({ initial, onSave, onCancel }) {
-  const [form, setForm] = useState(initial || { text: "", bannerUrl: "", active: true });
-  const [error, setError] = useState("");
-  const [uploadError, setUploadError] = useState("");
-
+  const [form, setForm] = useState(initial || { text: "", active: true, bannerUrl: "" });
   async function handleBanner(e) {
     const file = e.target.files[0];
     if (!file) return;
-    if (!file.type.startsWith("image/")) { setUploadError("Sirf image file (PNG/JPG) upload karein."); return; }
+    if (!file.type.startsWith("image/")) { alert("Sirf image file (PNG/JPG) upload karein."); return; }
     try {
       const dataUrl = await resizeImageToDataUrl(file, 800);
-      setForm((f) => ({ ...f, bannerUrl: dataUrl }));
-      setUploadError("");
-    } catch {
-      setUploadError("Banner upload nahi ho saka, dobara try karein.");
-    }
+      setForm({ ...form, bannerUrl: dataUrl });
+    } catch { alert("Banner upload nahi ho saka, dobara try karein."); }
   }
-
   function submit() {
-    if (!form.text.trim()) { setError("Offer ka text zaroori hai."); return; }
+    if (!form.text.trim()) { alert("Offer ka text zaroori hai."); return; }
     onSave(form);
   }
-
   return (
     <div>
       <Field label="Offer Text (scrolling ticker mein dikhega)">
-        <input className={inputCls} placeholder="e.g. Is hafte cement par Rs 50/bag discount!" value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} autoFocus />
+        <input className={inputCls} value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} placeholder="e.g. Is hafte cement par Rs 50/bag discount!" />
       </Field>
       <Field label="Banner Image (optional)">
-        <div className="flex items-center gap-3">
-          {form.bannerUrl ? (
-            <img src={form.bannerUrl} alt="Banner" className="w-24 h-14 object-cover border border-slate-200" />
-          ) : (
-            <div className="w-24 h-14 bg-slate-100 border border-slate-200 flex items-center justify-center text-[10px] text-slate-400">No Banner</div>
-          )}
-          <label className="px-3 py-1.5 text-xs font-bold uppercase tracking-wide border border-slate-300 text-slate-600 hover:bg-slate-100 cursor-pointer">
-            {form.bannerUrl ? "Change" : "Upload"}
-            <input type="file" accept="image/*" className="hidden" onChange={handleBanner} />
-          </label>
-          {form.bannerUrl && (
-            <button type="button" className="text-xs font-bold text-red-600 hover:underline" onClick={() => setForm((f) => ({ ...f, bannerUrl: "" }))}>Remove</button>
-          )}
-        </div>
-        {uploadError && <div className="text-xs text-red-600 font-semibold mt-1">{uploadError}</div>}
+        {form.bannerUrl ? (
+          <div className="flex items-center gap-2">
+            <img src={form.bannerUrl} alt="Banner" className="h-16 object-contain border border-slate-200" />
+            <button type="button" className="text-xs font-bold text-red-600" onClick={() => setForm({ ...form, bannerUrl: "" })}>Remove</button>
+          </div>
+        ) : (
+          <input type="file" accept="image/*" onChange={handleBanner} className="text-xs" />
+        )}
       </Field>
-      <label className="flex items-center gap-2 mb-3 text-sm">
+      <Field label="Active (customer portal mein dikhaya jaye)">
         <input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} />
-        Active (customer portal mein dikhaya jaye)
-      </label>
-      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
-      <div className="flex gap-2">
-        <Btn onClick={submit}>Save Offer</Btn>
-        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
-      </div>
+      </Field>
+      <div className="flex gap-2 mt-2"><Btn onClick={submit}>Save Offer</Btn><Btn variant="ghost" onClick={onCancel}>Cancel</Btn></div>
     </div>
   );
 }
 
 function Offers({ offers, saveOffer, deleteOffer }) {
-  const [modal, setModal] = useState(null); // null | 'new' | offer object
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-2">
+      <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-black uppercase tracking-tight">Offers</h2>
-        <Btn onClick={() => setModal("new")}>+ New Offer</Btn>
+        <Btn onClick={() => { setEditing(null); setShowForm(true); }}>+ New Offer</Btn>
       </div>
-      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
-        Active offers customer ke self-service portal mein banner aur scrolling text ke tor par dikhte hain.
+      <div className="bg-white border border-slate-200 divide-y divide-slate-100">
+        {offers.length === 0 && <div className="px-4 py-6 text-center text-slate-400">Koi offer nahi bana.</div>}
+        {offers.map((o) => (
+          <div key={o.id} className="px-4 py-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              {o.bannerUrl && <img src={o.bannerUrl} alt="" className="h-10 w-16 object-cover border border-slate-200" />}
+              <div>
+                <div className="font-bold text-sm">{o.text}</div>
+                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${o.active ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>{o.active ? "Active" : "Inactive"}</span>
+              </div>
+            </div>
+            <div className="whitespace-nowrap">
+              <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => { setEditing(o); setShowForm(true); }}>Edit</button>
+              <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm("Delete this offer?")) deleteOffer(o.id); }}>Delete</button>
+            </div>
+          </div>
+        ))}
       </div>
-      <div className="bg-white border border-slate-200 overflow-x-auto max-w-3xl">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-              <th className="px-4 py-2">Banner</th><th className="px-4 py-2">Text</th><th className="px-4 py-2">Status</th><th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {offers.length === 0 && <tr><td colSpan={4} className="px-4 py-6 text-center text-slate-400">Koi offer nahi bana.</td></tr>}
-            {offers.map((o) => (
-              <tr key={o.id} className="border-t border-slate-100">
-                <td className="px-4 py-2">
-                  {o.bannerUrl ? <img src={o.bannerUrl} alt="" className="w-16 h-10 object-cover border border-slate-200" /> : <span className="text-slate-300 text-xs">-</span>}
-                </td>
-                <td className="px-4 py-2 font-bold cursor-pointer hover:text-blue-700" onClick={() => setModal(o)}>{o.text}</td>
-                <td className="px-4 py-2">
-                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${o.active ? "bg-emerald-100 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>{o.active ? "Active" : "Inactive"}</span>
-                </td>
-                <td className="px-4 py-2 text-right whitespace-nowrap">
-                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => setModal(o)}>Edit</button>
-                  <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => deleteOffer(o.id)}>Delete</button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {modal && (
-        <Modal title={modal === "new" ? "New Offer" : "Edit Offer"} onClose={() => setModal(null)}>
-          <OfferForm
-            initial={modal === "new" ? null : modal}
-            onCancel={() => setModal(null)}
-            onSave={(data) => { saveOffer(modal === "new" ? data : { ...modal, ...data }); setModal(null); }}
-          />
+      {showForm && (
+        <Modal title={editing ? "Edit Offer" : "New Offer"} onClose={() => setShowForm(false)}>
+          <OfferForm initial={editing} onCancel={() => setShowForm(false)} onSave={(data) => { editing ? saveOffer({ ...editing, ...data }) : saveOffer({ id: uid("off"), ...data }); setShowForm(false); }} />
         </Modal>
       )}
     </div>
@@ -4663,68 +5250,55 @@ function Offers({ offers, saveOffer, deleteOffer }) {
 
 /* ---------------- Drivers ---------------- */
 
-function DriverForm({ initial, onSave, onCancel }) {
+function DriverForm({ initial, onSave, onCancel, nextCode }) {
   const [form, setForm] = useState(initial || { name: "", phone: "", vehicleType: "Rickshaw", vehicleNumber: "" });
-  const [error, setError] = useState("");
-
   function submit() {
-    if (!form.name.trim()) { setError("Driver ka naam zaroori hai."); return; }
+    if (!form.name.trim()) { alert("Driver ka naam zaroori hai."); return; }
     onSave(form);
   }
-
   return (
     <div>
-      <Field label="Driver Name">
-        <input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus />
-      </Field>
-      <Field label="Phone">
-        <input className={inputCls} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
-      </Field>
+      {!initial && <div className="text-xs text-slate-500 mb-3">ID: <span className="font-bold">{nextCode}</span></div>}
+      <Field label="Driver Name"><input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+      <Field label="Phone"><input className={inputCls} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
       <Field label="Vehicle Type">
         <select className={inputCls} value={form.vehicleType} onChange={(e) => setForm({ ...form, vehicleType: e.target.value })}>
           {VEHICLE_TYPES.map((v) => <option key={v}>{v}</option>)}
         </select>
       </Field>
-      <Field label="Vehicle Number">
-        <input className={inputCls} placeholder="e.g. LEA-1234" value={form.vehicleNumber} onChange={(e) => setForm({ ...form, vehicleNumber: e.target.value })} />
-      </Field>
-      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
-      <div className="flex gap-2 mt-2">
-        <Btn onClick={submit}>Save Driver</Btn>
-        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
-      </div>
+      <Field label="Vehicle Number"><input className={inputCls} value={form.vehicleNumber} onChange={(e) => setForm({ ...form, vehicleNumber: e.target.value })} /></Field>
+      <div className="flex gap-2 mt-2"><Btn onClick={submit}>Save Driver</Btn><Btn variant="ghost" onClick={onCancel}>Cancel</Btn></div>
     </div>
   );
 }
 
-function Drivers({ drivers, saveDriver, deleteDriver }) {
-  const [modal, setModal] = useState(null); // null | 'new' | driver object
+function Drivers({ drivers, saveDriver, deleteDriver, nextCode }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
 
   return (
     <div>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-black uppercase tracking-tight">Drivers</h2>
-        <Btn onClick={() => setModal("new")}>+ New Driver</Btn>
+        <Btn onClick={() => { setEditing(null); setShowForm(true); }}>+ New Driver</Btn>
       </div>
-      <div className="bg-white border border-slate-200 overflow-x-auto max-w-2xl">
+      <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-              <th className="px-4 py-2">Driver ID</th><th className="px-4 py-2">Name</th><th className="px-4 py-2">Phone</th>
-              <th className="px-4 py-2">Vehicle</th><th className="px-4 py-2">Number</th><th></th>
-            </tr>
-          </thead>
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Driver ID</th><th className="px-4 py-2">Name</th><th className="px-4 py-2">Phone</th>
+            <th className="px-4 py-2">Vehicle</th><th className="px-4 py-2">Number</th><th></th>
+          </tr></thead>
           <tbody>
             {drivers.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-slate-400">Koi driver add nahi hua.</td></tr>}
             {drivers.map((d) => (
               <tr key={d.id} className="border-t border-slate-100">
                 <td className="px-4 py-2 font-black text-blue-700">{d.code}</td>
-                <td className="px-4 py-2 font-bold cursor-pointer hover:text-blue-700" onClick={() => setModal(d)}>{d.name}</td>
+                <td className="px-4 py-2 font-bold">{d.name}</td>
                 <td className="px-4 py-2 text-slate-500">{d.phone || "-"}</td>
-                <td className="px-4 py-2">{d.vehicleType}</td>
+                <td className="px-4 py-2 text-slate-500">{d.vehicleType}</td>
                 <td className="px-4 py-2 text-slate-500">{d.vehicleNumber || "-"}</td>
                 <td className="px-4 py-2 text-right whitespace-nowrap">
-                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => setModal(d)}>Edit</button>
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => { setEditing(d); setShowForm(true); }}>Edit</button>
                   <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete ${d.name}?`)) deleteDriver(d.id); }}>Delete</button>
                 </td>
               </tr>
@@ -4732,16 +5306,9 @@ function Drivers({ drivers, saveDriver, deleteDriver }) {
           </tbody>
         </table>
       </div>
-      <div className="text-xs text-slate-400 mt-3 max-w-2xl">
-        Har driver ko save karte hi khud-ba-khud ek Driver ID (jaise DRV-0001) mil jata hai. Ye ID Invoice banate waqt "Driver ID" field mein daalein — naam aur vehicle apne aap fill ho jayenge.
-      </div>
-      {modal && (
-        <Modal title={modal === "new" ? "New Driver" : "Edit Driver"} onClose={() => setModal(null)}>
-          <DriverForm
-            initial={modal === "new" ? null : modal}
-            onCancel={() => setModal(null)}
-            onSave={(data) => { saveDriver(modal === "new" ? data : { ...modal, ...data }); setModal(null); }}
-          />
+      {showForm && (
+        <Modal title={editing ? `Edit Driver ${editing.code}` : "New Driver"} onClose={() => setShowForm(false)}>
+          <DriverForm initial={editing} nextCode={nextCode} onCancel={() => setShowForm(false)} onSave={(data) => { editing ? saveDriver({ ...editing, ...data }) : saveDriver({ id: uid("drv"), code: nextCode, ...data }); setShowForm(false); }} />
         </Modal>
       )}
     </div>
@@ -4750,158 +5317,250 @@ function Drivers({ drivers, saveDriver, deleteDriver }) {
 
 /* ---------------- Reports ---------------- */
 
-function Reports({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, masters, masterPayments, masterAdjustments }) {
+function Reports({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, orders, commissionAgents, commissionRules, commissionTransactions, products }) {
   const [from, setFrom] = useState(todayISO().slice(0, 8) + "01");
   const [to, setTo] = useState(todayISO());
-  const [promiseTab, setPromiseTab] = useState("today");
+  const [commissionView, setCommissionView] = useState("agent"); // agent | date | product | customer
+  const [commissionRangePreset, setCommissionRangePreset] = useState("This Month");
+  const [commissionFrom, setCommissionFrom] = useState(todayISO().slice(0, 8) + "01");
+  const [commissionTo, setCommissionTo] = useState(todayISO());
 
-  const inRange = invoices.filter((i) => i.date >= from && i.date <= to && !isInvoiceCancelled(i));
-  const salesTotal = inRange.reduce((s, i) => s + i.total, 0);
-  const collected = payments
-    .filter((p) => p.date >= from && p.date <= to && !isPaymentLinkedToCancelledInvoice(p, invoices))
-    .reduce((s, p) => s + p.amount, 0);
+  const inRange = (d) => d >= from && d <= to;
 
-  const byCustomer = {};
-  customers.forEach((c) => {
-    const { outstanding } = computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers, adjustments);
-    if (outstanding !== 0) byCustomer[c.name] = outstanding;
-  });
+  const salesInRange = invoices.filter((i) => inRange(i.date) && i.docStatus !== "Cancelled").reduce((s, i) => s + i.total, 0);
+  const collectedInRange = payments.filter((p) => inRange(p.date)).reduce((s, p) => s + p.amount, 0);
+  const totalInvoices = invoices.filter((i) => inRange(i.date)).length;
+  const totalOrders = orders.filter((o) => inRange(o.date)).length;
+  const totalReturnAmount = returns.filter((r) => inRange(r.date) && r.status !== "Deleted").reduce((s, r) => s + r.amount, 0);
 
-  // Adjustments in range (kept separate from sales/payment totals so
-  // reports never conflate real business adjustments with actual sales
-  // revenue or cash collected).
-  const adjustmentsInRange = (adjustments || []).filter((a) => a.status === "Active" && a.date >= from && a.date <= to);
-  const adjustmentsAddTotal = adjustmentsInRange.filter((a) => a.type === "Add").reduce((s, a) => s + a.amount, 0);
-  const adjustmentsReduceTotal = adjustmentsInRange.filter((a) => a.type === "Reduce").reduce((s, a) => s + a.amount, 0);
+  const outstandingCustomers = customers
+    .map((c) => ({ ...c, outstanding: computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding }))
+    .filter((c) => c.outstanding > 0)
+    .sort((a, b) => b.outstanding - a.outstanding);
 
   function exportCSV() {
-    const rows = [["Invoice", "Customer", "Date", "Total", "Received", "Balance", "Status"]];
-    inRange.forEach((i) => rows.push([i.number, i.customerName, i.date, i.total, i.paymentReceived, i.balanceDue, i.status]));
-    const csv = rows.map((r) => r.join(",")).join("\n");
+    const rows = [["Customer", "Outstanding"], ...outstandingCustomers.map((c) => [c.name, c.outstanding])];
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `sales-report-${from}-to-${to}.csv`;
-    a.click();
+    a.href = url; a.download = `outstanding_${from}_to_${to}.csv`; a.click();
+    URL.revokeObjectURL(url);
   }
 
-  // Feature 15 — Promise Reports
-  const activePromises = (promises || []).filter((p) => p.status !== "Deleted").map(promiseWithComputed);
-  const t = todayISO();
-  const promiseReportRows = {
-    today: activePromises.filter((p) => p.expectedDate === t),
-    upcoming: activePromises.filter((p) => p.expectedDate > t && (p.status === "Pending" || p.status === "Partially Paid")),
-    broken: activePromises.filter((p) => p.status === "Broken Promise"),
-    completed: activePromises.filter((p) => p.status === "Completed"),
-    history: activePromises,
-  }[promiseTab];
+  // Commission Reports date range presets.
+  useEffect(() => {
+    const t = todayISO();
+    if (commissionRangePreset === "Today") { setCommissionFrom(t); setCommissionTo(t); }
+    else if (commissionRangePreset === "This Week") {
+      const d = new Date(); const day = d.getDay(); const monday = new Date(d); monday.setDate(d.getDate() - ((day + 6) % 7));
+      setCommissionFrom(monday.toISOString().slice(0, 10)); setCommissionTo(t);
+    } else if (commissionRangePreset === "This Month") {
+      setCommissionFrom(t.slice(0, 8) + "01"); setCommissionTo(t);
+    }
+    // "Custom Range" leaves commissionFrom/commissionTo as manually set.
+  }, [commissionRangePreset]);
 
-  function exportPromiseCSV() {
-    const rows = [["Promise No", "Customer", "Amount", "Paid", "Remaining", "Promise Date", "Expected Date", "Status", "Created By"]];
-    promiseReportRows.forEach((p) => rows.push([p.code, p.customerName, p.amount, p.paidAmount, p.remainingAmount, p.promiseDate, p.expectedDate, p.status, p.createdBy]));
-    const csv = rows.map((r) => r.join(",")).join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `promise-report-${promiseTab}-${todayISO()}.csv`;
-    a.click();
-  }
+  const commissionInRange = (commissionTransactions || []).filter((tx) => tx.status !== "Cancelled" && tx.invoiceDate >= commissionFrom && tx.invoiceDate <= commissionTo);
 
-  function exportPromisePDF() {
-    window.print();
-  }
+  const agentWise = useMemo(() => {
+    const map = {};
+    commissionInRange.forEach((tx) => {
+      if (!map[tx.agentId]) map[tx.agentId] = { agentName: tx.agentName, count: 0, commission: 0, paid: 0, remaining: 0 };
+      map[tx.agentId].count += 1;
+      map[tx.agentId].commission += Number(tx.commissionAmount) || 0;
+      map[tx.agentId].paid += Number(tx.paidAmount) || 0;
+      map[tx.agentId].remaining += Number(tx.remainingAmount) || 0;
+    });
+    return Object.entries(map).map(([agentId, v]) => ({ agentId, ...v })).sort((a, b) => b.commission - a.commission);
+  }, [commissionInRange]);
+
+  const dateWise = useMemo(() => {
+    const map = {};
+    commissionInRange.forEach((tx) => {
+      if (!map[tx.invoiceDate]) map[tx.invoiceDate] = { count: 0, commission: 0 };
+      map[tx.invoiceDate].count += 1;
+      map[tx.invoiceDate].commission += Number(tx.commissionAmount) || 0;
+    });
+    return Object.entries(map).map(([date, v]) => ({ date, ...v })).sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [commissionInRange]);
+
+  const productWise = useMemo(() => {
+    const map = {};
+    commissionInRange.forEach((tx) => {
+      (tx.breakdown || []).forEach((l) => {
+        const key = l.source || "Other";
+        if (!map[key]) map[key] = { source: key, commission: 0 };
+        map[key].commission += Number(l.commission) || 0;
+      });
+    });
+    return Object.values(map).sort((a, b) => b.commission - a.commission);
+  }, [commissionInRange]);
+
+  const customerWise = useMemo(() => {
+    const map = {};
+    commissionInRange.forEach((tx) => {
+      if (!map[tx.customerId]) map[tx.customerId] = { customerName: tx.customerName, count: 0, commission: 0 };
+      map[tx.customerId].count += 1;
+      map[tx.customerId].commission += Number(tx.commissionAmount) || 0;
+    });
+    return Object.entries(map).map(([customerId, v]) => ({ customerId, ...v })).sort((a, b) => b.commission - a.commission);
+  }, [commissionInRange]);
 
   return (
     <div>
       <h2 className="text-xl font-black uppercase tracking-tight mb-4">Reports</h2>
-      <div className="flex gap-3 items-end mb-4 flex-wrap">
+
+      <div className="flex flex-wrap items-end gap-3 mb-4">
         <Field label="From"><input type="date" className={inputCls} value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
         <Field label="To"><input type="date" className={inputCls} value={to} onChange={(e) => setTo(e.target.value)} /></Field>
-        <Btn variant="dark" onClick={exportCSV}>Export CSV</Btn>
+        <Btn variant="dark" onClick={exportCSV}>Export Excel (CSV)</Btn>
+        <Btn variant="ghost" onClick={() => window.print()}>Export PDF</Btn>
       </div>
+
       <div className="flex flex-wrap gap-3 mb-6">
-        <Stat label="Sales in Range" value={fmtMoney(salesTotal)} />
-        <Stat label="Collected in Range" value={fmtMoney(collected)} accent="text-emerald-600" />
-        <Stat label="Invoices" value={inRange.length} />
-        <Stat label="Adjustments Added" value={fmtMoney(adjustmentsAddTotal)} accent="text-red-600" />
-        <Stat label="Adjustments Reduced" value={fmtMoney(adjustmentsReduceTotal)} accent="text-emerald-600" />
+        <Stat label="Sales in Range" value={fmtMoney(salesInRange)} />
+        <Stat label="Collected in Range" value={fmtMoney(collectedInRange)} accent="text-emerald-600" />
+        <Stat label="Total Invoices" value={totalInvoices} />
+        <Stat label="Total Orders" value={totalOrders} />
+        <Stat label="Total Return Amount" value={fmtMoney(totalReturnAmount)} accent="text-red-600" />
       </div>
-      <div className="bg-white border border-slate-200 mb-8">
+
+      <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
         <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Customers with Outstanding Balance</div>
         <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Customer</th><th className="px-4 py-2 text-right">Outstanding</th>
+          </tr></thead>
           <tbody>
-            {Object.keys(byCustomer).length === 0 && <tr><td className="px-4 py-6 text-center text-slate-400">Koi outstanding nahi.</td></tr>}
-            {Object.entries(byCustomer).sort((a, b) => b[1] - a[1]).map(([name, bal]) => (
-              <tr key={name} className="border-t border-slate-100">
-                <td className="px-4 py-2 font-bold">{name}</td>
-                <td className="px-4 py-2 text-right font-bold text-red-600">{fmtMoney(bal)}</td>
+            {outstandingCustomers.length === 0 && <tr><td colSpan={2} className="px-4 py-6 text-center text-slate-400">Koi outstanding nahi.</td></tr>}
+            {outstandingCustomers.map((c) => (
+              <tr key={c.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-bold">{c.name}</td>
+                <td className="px-4 py-2 text-right font-black text-red-600">{fmtMoney(c.outstanding)}</td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
 
+      {/* Commission Reports */}
       <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-        <div className="flex gap-2 flex-wrap">
-          {[["today", "Today's Promises"], ["upcoming", "Upcoming Promises"], ["broken", "Broken Promises"], ["completed", "Completed Promises"], ["history", "Customer Promise History"]].map(([k, label]) => (
-            <Btn key={k} variant={promiseTab === k ? "primary" : "ghost"} small onClick={() => setPromiseTab(k)}>{label}</Btn>
+        <h3 className="text-lg font-black uppercase tracking-tight">Commission Reports</h3>
+        <div className="flex gap-2 flex-wrap items-end">
+          {["Today", "This Week", "This Month", "Custom Range"].map((preset) => (
+            <Btn key={preset} variant={commissionRangePreset === preset ? "primary" : "ghost"} small onClick={() => setCommissionRangePreset(preset)}>{preset}</Btn>
           ))}
-        </div>
-        <div className="flex gap-2">
-          <Btn variant="dark" small onClick={exportPromiseCSV}>Export Excel (CSV)</Btn>
-          <Btn variant="ghost" small onClick={exportPromisePDF}>Export PDF</Btn>
+          {commissionRangePreset === "Custom Range" && (
+            <>
+              <input type="date" className={`${inputCls} max-w-[150px]`} value={commissionFrom} onChange={(e) => setCommissionFrom(e.target.value)} />
+              <input type="date" className={`${inputCls} max-w-[150px]`} value={commissionTo} onChange={(e) => setCommissionTo(e.target.value)} />
+            </>
+          )}
         </div>
       </div>
-      <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-              <th className="px-4 py-2">Promise No</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2 text-right">Amount</th>
-              <th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Remaining</th>
-              <th className="px-4 py-2">Promise Date</th><th className="px-4 py-2">Expected Date</th><th className="px-4 py-2">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {promiseReportRows.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
-            {promiseReportRows.map((p) => (
-              <tr key={p.id} className="border-t border-slate-100">
-                <td className="px-4 py-2 font-black text-blue-700">{p.code}</td>
-                <td className="px-4 py-2 font-bold">{p.customerName}</td>
-                <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.amount)}</td>
-                <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(p.paidAmount)}</td>
-                <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(p.remainingAmount)}</td>
-                <td className="px-4 py-2 text-slate-500">{fmtDate(p.promiseDate)}</td>
-                <td className="px-4 py-2 text-slate-500">{fmtDate(p.expectedDate)}</td>
-                <td className="px-4 py-2"><span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${PROMISE_STATUS_TONE[p.status]}`}>{p.status}</span></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="flex gap-2 mb-3">
+        {[["agent", "Agent-wise"], ["date", "Date-wise"], ["product", "Product-wise"], ["customer", "Customer-wise"]].map(([id, label]) => (
+          <Btn key={id} variant={commissionView === id ? "primary" : "ghost"} small onClick={() => setCommissionView(id)}>{label}</Btn>
+        ))}
       </div>
 
-      {masters && <MistriReportsBlock customers={customers} invoices={invoices} returns={returns} exchanges={exchanges} masters={masters} masterPayments={masterPayments} masterAdjustments={masterAdjustments} />}
+      {commissionView === "agent" && (
+        <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Agent</th><th className="px-4 py-2 text-right">Transactions</th>
+              <th className="px-4 py-2 text-right">Commission</th><th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Remaining</th>
+            </tr></thead>
+            <tbody>
+              {agentWise.length === 0 && <tr><td colSpan={5} className="px-4 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+              {agentWise.map((a) => (
+                <tr key={a.agentId} className="border-t border-slate-100">
+                  <td className="px-4 py-2 font-bold">{a.agentName}</td>
+                  <td className="px-4 py-2 text-right">{a.count}</td>
+                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(a.commission)}</td>
+                  <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(a.paid)}</td>
+                  <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(a.remaining)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {commissionView === "date" && (
+        <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Date</th><th className="px-4 py-2 text-right">Transactions</th><th className="px-4 py-2 text-right">Commission</th>
+            </tr></thead>
+            <tbody>
+              {dateWise.length === 0 && <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+              {dateWise.map((d) => (
+                <tr key={d.date} className="border-t border-slate-100">
+                  <td className="px-4 py-2 font-bold">{fmtDate(d.date)}</td>
+                  <td className="px-4 py-2 text-right">{d.count}</td>
+                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(d.commission)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {commissionView === "product" && (
+        <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Product / Rule Source</th><th className="px-4 py-2 text-right">Commission</th>
+            </tr></thead>
+            <tbody>
+              {productWise.length === 0 && <tr><td colSpan={2} className="px-4 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+              {productWise.map((p) => (
+                <tr key={p.source} className="border-t border-slate-100">
+                  <td className="px-4 py-2 font-bold">{p.source}</td>
+                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.commission)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {commissionView === "customer" && (
+        <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Customer</th><th className="px-4 py-2 text-right">Transactions</th><th className="px-4 py-2 text-right">Commission</th>
+            </tr></thead>
+            <tbody>
+              {customerWise.length === 0 && <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+              {customerWise.map((c) => (
+                <tr key={c.customerId} className="border-t border-slate-100">
+                  <td className="px-4 py-2 font-bold">{c.customerName}</td>
+                  <td className="px-4 py-2 text-right">{c.count}</td>
+                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(c.commission)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
 
 /* ---------------- Sales Assistant ---------------- */
 
-function SalesAssistant({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments }) {
+function SalesAssistant({ customers }) {
   const [customerId, setCustomerId] = useState(customers[0]?.id || "");
-  const { language: lang } = useLanguage();
-  const [audience, setAudience] = useState("Builder");
+  const [language, setLanguage] = useState("en");
+  const customer = customers.find((c) => c.id === customerId);
   const [copied, setCopied] = useState(false);
 
-  const customer = customers.find((c) => c.id === customerId);
-  useEffect(() => { if (customer) setAudience(customer.audienceType || "Builder"); }, [customerId]);
+  const message = customer
+    ? (MESSAGE_TEMPLATES[language][customer.audienceType] || MESSAGE_TEMPLATES[language].Builder)(customer.name, 0)
+    : "";
 
-  if (customers.length === 0) return <div className="text-slate-400">Pehle Customers tab mein customer add karein.</div>;
-
-  const outstanding = customer ? computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding : 0;
-  const message = MESSAGE_TEMPLATES[lang][audience](customer?.name || "", outstanding);
-
-  function copy() {
-    navigator.clipboard?.writeText(message);
+  function copyText() {
+    navigator.clipboard.writeText(message);
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   }
@@ -4909,34 +5568,33 @@ function SalesAssistant({ customers, invoices, payments, returns, exchanges, pro
   return (
     <div>
       <h2 className="text-xl font-black uppercase tracking-tight mb-4">Sales Assistant</h2>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mb-4 max-w-3xl">
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Customer ke audience type ke hisaab se ek ready WhatsApp message generate karein — Builder, Contractor, Developer, ya Housing Society.
+      </div>
+      <div className="bg-white border border-slate-200 p-4 max-w-xl">
         <Field label="Customer">
           <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
-            {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Audience Type">
-          <select className={inputCls} value={audience} onChange={(e) => setAudience(e.target.value)}>
-            {AUDIENCE_TYPES.map((a) => <option key={a}>{a}</option>)}
+            {customers.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.audienceType})</option>)}
           </select>
         </Field>
         <Field label="Language">
-          <select className={inputCls} value={lang} onChange={(e) => setLang(e.target.value)}>
-            <option value="ur">Roman Urdu</option>
-            <option value="en">English</option>
-          </select>
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setLanguage("en")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase border ${language === "en" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>English</button>
+            <button type="button" onClick={() => setLanguage("ur")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase border ${language === "ur" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>Roman Urdu</button>
+          </div>
         </Field>
-      </div>
-      <div className="bg-white border border-slate-200 p-4 max-w-2xl">
-        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2">Generated Message</div>
-        <textarea readOnly className="w-full border border-slate-300 p-3 text-sm h-56 focus:outline-none" value={message} />
-        <div className="flex gap-2 mt-3">
-          <a href={waLink(customer?.phone, message)} target="_blank" rel="noreferrer">
-            <Btn>Send on WhatsApp</Btn>
-          </a>
-          <Btn variant="ghost" onClick={copy}>{copied ? "Copied!" : "Copy Text"}</Btn>
+        <Field label="Generated Message">
+          <textarea readOnly className={`${inputCls} h-40`} value={message} />
+        </Field>
+        <div className="flex gap-2">
+          <Btn onClick={copyText}>{copied ? "Copied!" : "Copy Text"}</Btn>
+          {customer?.phone && (
+            <a href={waLink(customer.phone, message)} target="_blank" rel="noreferrer"><Btn variant="dark">Send on WhatsApp</Btn></a>
+          )}
         </div>
-        {!customer?.phone && <div className="text-xs text-red-600 mt-2">Is customer ka phone number nahi hai — WhatsApp link kaam nahi karega jab tak add na karein.</div>}
+        {customer && !customer.phone && (
+          <div className="text-xs text-red-600 mt-2">Is customer ka phone number nahi hai — WhatsApp link kaam nahi karega jab tak add na karein.</div>
+        )}
       </div>
     </div>
   );
@@ -4944,41 +5602,35 @@ function SalesAssistant({ customers, invoices, payments, returns, exchanges, pro
 
 /* ---------------- Cement Estimator ---------------- */
 
-function CementEstimator() {
-  const [length, setLength] = useState("");
-  const [width, setWidth] = useState("");
+function CementEstimator({ settings }) {
+  const [width, setWidth] = useState(20);
+  const [length, setLength] = useState(40);
   const [floors, setFloors] = useState(1);
-  const [ratePerBag, setRatePerBag] = useState(1650);
+  const [rate, setRate] = useState(1500);
 
-  const area = (Number(length) || 0) * (Number(width) || 0) * (Number(floors) || 1);
-  // Standard rough construction estimation ratios (per sq.ft, single-storey slab-equivalent):
-  const cementBags = area * 0.4;
-  const sandCft = area * 0.8;
-  const crushCft = area * 1.2;
-  const steelKg = area * 3.5;
-  const estimatedCost = cementBags * ratePerBag + sandCft * 90 + crushCft * 130 + steelKg * 280;
+  const coveredArea = width * length * floors;
+  // Rough rule-of-thumb estimator: ~0.4 bags of cement per sq.ft of covered area.
+  const bagsNeeded = Math.ceil(coveredArea * 0.4);
+  const estimatedCost = bagsNeeded * rate;
 
   return (
     <div>
       <h2 className="text-xl font-black uppercase tracking-tight mb-4">Cement Estimator</h2>
-      <div className="bg-white border border-slate-200 p-4 max-w-lg mb-6">
+      <div className="bg-white border border-slate-200 p-4 max-w-md">
         <div className="grid grid-cols-2 gap-3">
-          <Field label="Length (ft)"><input type="number" className={inputCls} value={length} onChange={(e) => setLength(e.target.value)} /></Field>
-          <Field label="Width (ft)"><input type="number" className={inputCls} value={width} onChange={(e) => setWidth(e.target.value)} /></Field>
-          <Field label="Floors"><input type="number" className={inputCls} value={floors} onChange={(e) => setFloors(e.target.value)} /></Field>
-          <Field label="Cement Rate (Rs/bag)"><input type="number" className={inputCls} value={ratePerBag} onChange={(e) => setRatePerBag(e.target.value)} /></Field>
+          <Field label="Width (ft)"><input type="number" className={inputCls} value={width} onChange={(e) => setWidth(Number(e.target.value))} /></Field>
+          <Field label="Length (ft)"><input type="number" className={inputCls} value={length} onChange={(e) => setLength(Number(e.target.value))} /></Field>
         </div>
-      </div>
-      <div className="flex flex-wrap gap-3">
-        <Stat label="Covered Area" value={`${area.toLocaleString()} sq.ft`} />
-        <Stat label="Cement" value={`${Math.ceil(cementBags)} bags`} />
-        <Stat label="Sand" value={`${Math.ceil(sandCft)} cft`} />
-        <Stat label="Crush" value={`${Math.ceil(crushCft)} cft`} />
-        <Stat label="Steel" value={`${Math.ceil(steelKg)} kg`} />
-        <Stat label="Est. Cost" value={fmtMoney(estimatedCost)} accent="text-blue-700" />
-      </div>
-      <div className="text-xs text-slate-400 mt-4 max-w-lg">
-        Ye rough estimate hai, standard ratios par based (0.4 bag/sq.ft cement, 0.8 cft/sq.ft sand, 1.2 cft/sq.ft crush, 3.5 kg/sq.ft steel). Actual site requirement structure design par depend karta hai.
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Floors"><input type="number" className={inputCls} value={floors} onChange={(e) => setFloors(Number(e.target.value))} /></Field>
+          <Field label="Cement Rate (Rs/bag)"><input type="number" className={inputCls} value={rate} onChange={(e) => setRate(Number(e.target.value))} /></Field>
+        </div>
+        <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
+          <div className="flex justify-between"><span>Covered Area</span><span className="font-bold">{coveredArea.toLocaleString()} Sq.Ft</span></div>
+          <div className="flex justify-between"><span>Estimated Bags Needed</span><span className="font-bold">{bagsNeeded.toLocaleString()} Bags</span></div>
+          <div className="flex justify-between border-t border-slate-300 pt-1"><span className="font-bold">Estimated Cost</span><span className="font-black text-blue-700">{fmtMoney(estimatedCost)}</span></div>
+        </div>
+        <div className="text-[10px] text-slate-400 mt-2">Ye sirf ek rough estimate hai — actual requirement structure design par depend karti hai.</div>
       </div>
     </div>
   );
@@ -4986,1044 +5638,847 @@ function CementEstimator() {
 
 /* ---------------- Customer Portal ---------------- */
 
-function CustomerPortal({ currentUser, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, settings, offers, onLogout }) {
-  const [viewing, setViewing] = useState(null);
+function CustomerPortal({ currentUser, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, offers, settings }) {
   const customer = customers.find((c) => c.id === currentUser.id);
-  if (!customer) return <div className="p-6">Account nahi mila, admin se rabta karein.</div>;
-  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
-  const myInvoices = [...invoices].filter((i) => i.customerId === customer.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const [viewingInvoice, setViewingInvoice] = useState(null);
+  if (!customer) return <div className="p-6 text-slate-400">Account nahi mila, admin se rabta karein.</div>;
 
-  const activeOffers = (offers || []).filter((o) => o.active);
-  const bannerOffer = activeOffers.find((o) => o.bannerUrl);
-  const tickerText = activeOffers.map((o) => o.text).join("     ★     ");
+  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  const myInvoices = invoices.filter((i) => i.customerId === customer.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const activeOffers = offers.filter((o) => o.active);
 
   return (
-    <div className={`min-h-screen bg-slate-100 ${languageState === "ur" ? "rtl-ui" : "ltr-ui"}`}>
-      <style>{`
-        .rtl-ui { direction: rtl; }
-        .rtl-ui input, .rtl-ui textarea, .rtl-ui select { direction: rtl; text-align: right; }
-        .rtl-ui table { direction: rtl; }
-        .rtl-ui .text-left { text-align: right; }
-        .rtl-ui .text-right { text-align: left; }
-        .rtl-ui .ml-2 { margin-left: 0; margin-right: 0.5rem; }
-        .rtl-ui .mr-3 { margin-right: 0; margin-left: 0.75rem; }
-        .rtl-ui .space-x-2 > :not([hidden]) ~ :not([hidden]) { margin-right: 0.5rem; margin-left: 0; }
-        @media print {
-          body * { visibility: hidden; }
-          #print-invoice, #print-invoice * { visibility: visible; }
-          #print-invoice { position: absolute; left: 0; top: 0; width: 100%; padding: 24px; }
-        }
-        @keyframes ticker-scroll {
-          0% { transform: translateX(100%); }
-          100% { transform: translateX(-100%); }
-        }
-        .offer-ticker-track {
-          display: inline-block;
-          white-space: nowrap;
-          animation: ticker-scroll 22s linear infinite;
-        }
-      `}</style>
-      <div className="bg-slate-900 text-white px-6 py-4 flex items-center justify-between gap-4">
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] text-white font-bold">{settings.companyName} {t("Portal")}</div>
-          <div className="text-lg font-black">{customer.name}</div>
-        </div>
-        <div className="flex items-center gap-3">
-          <LanguageSwitcher compact />
-          <button onClick={onLogout} className="text-xs uppercase tracking-wide font-bold text-slate-400 hover:text-white">{t("Log out")}</button>
-        </div>
-      </div>
-
+    <div className="min-h-screen bg-slate-100">
       {activeOffers.length > 0 && (
-        <div className="bg-slate-900 overflow-hidden whitespace-nowrap py-1.5">
-          <span className="offer-ticker-track text-xs font-black uppercase tracking-wide text-white">{tickerText}</span>
+        <div className="bg-blue-700 text-white text-sm font-bold overflow-hidden whitespace-nowrap">
+          <div className="inline-block py-2 px-4 animate-pulse">{activeOffers.map((o) => o.text).join("   ·   ")}</div>
         </div>
       )}
-
-      {bannerOffer && (
-        <div className="w-full">
-          <img src={bannerOffer.bannerUrl} alt="Offer banner" className="w-full max-h-48 object-cover" />
+      <div className="max-w-3xl mx-auto p-4">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">Portal</div>
+            <div className="text-xl font-black uppercase tracking-tight text-slate-900">Welcome, {customer.name}</div>
+          </div>
+          {settings.logoUrl && <img src={settings.logoUrl} alt="Logo" className="w-10 h-10 object-contain" />}
         </div>
-      )}
 
-      <div className="p-6">
         <div className="flex flex-wrap gap-3 mb-6">
           <Stat label="Outstanding Balance" value={fmtMoney(outstanding)} accent={outstanding > 0 ? "text-red-600" : "text-emerald-600"} />
-          <Stat label="Credit Limit" value={fmtMoney(customer.creditLimit)} />
           <Stat label="Total Invoices" value={myInvoices.length} />
         </div>
 
-        <div className="bg-white border border-slate-200 mb-6">
+        <div className="bg-white border border-slate-200 overflow-x-auto mb-6">
           <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">My Invoices</div>
           <table className="w-full text-sm">
             <tbody>
               {myInvoices.length === 0 && <tr><td className="px-4 py-6 text-center text-slate-400">Koi invoice nahi.</td></tr>}
               {myInvoices.map((inv) => (
-                <tr key={inv.id} className="border-t border-slate-100 cursor-pointer hover:bg-slate-50" onClick={() => setViewing(inv)}>
+                <tr key={inv.id} className="border-t border-slate-100 cursor-pointer hover:bg-slate-50" onClick={() => setViewingInvoice(inv)}>
                   <td className="px-4 py-2 font-bold text-blue-700">{inv.number}</td>
                   <td className="px-4 py-2 text-slate-500">{fmtDate(inv.date)}</td>
                   <td className="px-4 py-2 text-right font-bold">{fmtMoney(inv.total)}</td>
-                  <td className="px-4 py-2 text-right text-red-600 font-bold">{inv.docStatus === "Cancelled" ? "Cancelled" : inv.balanceDue > 0 ? fmtMoney(inv.balanceDue) : "Paid"}</td>
+                  <td className="px-4 py-2 text-right">
+                    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${inv.status === "Paid" ? "bg-emerald-100 text-emerald-700" : inv.status === "Partial" ? "bg-blue-100 text-blue-700" : "bg-red-100 text-red-700"}`}>{inv.status}</span>
+                  </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
 
-        <div className="bg-white border border-slate-200">
-          <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Ledger</div>
+        <div className="bg-white border border-slate-200 overflow-x-auto">
+          <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">My Ledger</div>
           <table className="w-full text-sm">
             <tbody>
-              <tr className="bg-slate-50">
-                <td className="px-4 py-2 text-slate-500" colSpan={3}>Opening Balance</td>
-                <td className="px-4 py-2 text-right font-bold">{fmtMoney(customer.openingBalance || 0)}</td>
+              <tr className="border-t border-slate-100 bg-slate-50">
+                <td className="px-4 py-2 text-slate-500" colSpan={2}>Opening Balance</td>
+                <td className="px-4 py-2 text-right font-bold" colSpan={2}>{fmtMoney(customer.openingBalance || 0)}</td>
               </tr>
               {entries.map((e) => (
                 <tr key={e.id} className="border-t border-slate-100">
                   <td className="px-4 py-2">{fmtDate(e.date)}</td>
-                  <td className="px-4 py-2">{e.type} {e.ref ? `(${e.ref})` : ""}</td>
+                  <td className="px-4 py-2 text-slate-500">{e.type}</td>
                   <td className="px-4 py-2 text-right text-red-600">{e.debit ? fmtMoney(e.debit) : ""}</td>
-                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(e.balance)}</td>
+                  <td className="px-4 py-2 text-right text-emerald-600">{e.credit ? fmtMoney(e.credit) : ""}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
       </div>
-      {viewing && <InvoiceDetail invoice={viewing} settings={settings} returns={returns} exchanges={exchanges} onClose={() => setViewing(null)} />}
+
+      {viewingInvoice && (
+        <InvoiceDetail invoice={viewingInvoice} settings={settings} returns={returns} exchanges={exchanges} onClose={() => setViewingInvoice(null)} />
+      )}
     </div>
   );
 }
 
 /* ---------------- Settings ---------------- */
 
-function Settings({ settings, saveSettings, users, saveUser, deleteUser, currentUser, allData, onRestore, branches, saveBranch, deleteBranch }) {
+function Settings({ settings, saveSettings, users, saveUser, deleteUser, branches, saveBranch, deleteBranch, onRestoreBackup, exportBackup }) {
   const [form, setForm] = useState(settings);
-  const [newUser, setNewUser] = useState({ username: "", password: "", role: "staff", name: "", branchId: currentUser?.branchId || "" });
-  const [newBranchName, setNewBranchName] = useState("");
-  const [restoreMsg, setRestoreMsg] = useState("");
-  const isSuperAdmin = !currentUser?.branchId;
+  const [showUserForm, setShowUserForm] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
+  const [userForm, setUserForm] = useState({ username: "", password: "", role: "staff", name: "", branchId: "" });
+  const [showBranchForm, setShowBranchForm] = useState(false);
+  const [branchName, setBranchName] = useState("");
+  const fileInputRef = React.useRef(null);
+  const restoreInputRef = React.useRef(null);
 
-  function downloadBackup() {
-    const blob = new Blob([JSON.stringify(allData, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `chaudhary-traders-backup-${todayISO()}.json`;
-    a.click();
+  function saveCompanyInfo() {
+    saveSettings(form);
+    alert("Settings saved.");
   }
 
-  function handleFile(e) {
+  async function handleLogoUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { alert("Sirf image file (PNG/JPG) upload karein."); return; }
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 300);
+      const next = { ...form, logoUrl: dataUrl };
+      setForm(next);
+      saveSettings(next);
+    } catch { alert("Logo upload nahi ho saka, dobara try karein."); }
+  }
+
+  function openNewUser() { setEditingUser(null); setUserForm({ username: "", password: "", role: "staff", name: "", branchId: "" }); setShowUserForm(true); }
+  function openEditUser(u) { setEditingUser(u); setUserForm(u); setShowUserForm(true); }
+  function submitUser() {
+    if (!userForm.username.trim() || !userForm.password.trim()) { alert("Username aur password zaroori hai."); return; }
+    if (editingUser) saveUser({ ...editingUser, ...userForm });
+    else saveUser({ id: uid("u"), ...userForm });
+    setShowUserForm(false);
+  }
+
+  function submitBranch() {
+    if (!branchName.trim()) return;
+    saveBranch({ id: uid("branch"), name: branchName.trim() });
+    setBranchName(""); setShowBranchForm(false);
+  }
+
+  function handleRestoreFile(e) {
     const file = e.target.files[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
       try {
         const data = JSON.parse(reader.result);
-        onRestore(data);
-        setRestoreMsg("Backup restore ho gaya.");
+        if (!data || typeof data !== "object") throw new Error("invalid");
+        onRestoreBackup(data);
+        alert("Backup restore ho gaya.");
       } catch {
-        setRestoreMsg("Ye file valid backup nahi hai.");
+        alert("Ye file valid backup nahi hai.");
       }
     };
     reader.readAsText(file);
-  }
-
-  const [logoError, setLogoError] = useState("");
-
-  async function handleLogoFile(e) {
-    const file = e.target.files[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) { setLogoError("Sirf image file (PNG/JPG) upload karein."); return; }
-    try {
-      const dataUrl = await resizeImageToDataUrl(file, 300);
-      setForm((f) => ({ ...f, logoUrl: dataUrl }));
-      setLogoError("");
-    } catch {
-      setLogoError("Logo upload nahi ho saka, dobara try karein.");
-    }
+    e.target.value = "";
   }
 
   return (
     <div>
       <h2 className="text-xl font-black uppercase tracking-tight mb-4">Settings</h2>
 
-      <div className="bg-white border border-slate-200 p-4 mb-6 max-w-lg">
-        <div className="font-black uppercase text-xs tracking-wide text-slate-500 mb-3">Company Info</div>
+      <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-3">Company Info</div>
+        <Field label="Company Logo">
+          <div className="flex items-center gap-3">
+            {form.logoUrl && <img src={form.logoUrl} alt="Logo" className="w-14 h-14 object-contain border border-slate-200" />}
+            <input ref={fileInputRef} type="file" accept="image/*" onChange={handleLogoUpload} className="text-xs" />
+            {form.logoUrl && <button type="button" className="text-xs font-bold text-red-600" onClick={() => { const next = { ...form, logoUrl: "" }; setForm(next); saveSettings(next); }}>Remove</button>}
+          </div>
+        </Field>
         <Field label="Company Name"><input className={inputCls} value={form.companyName} onChange={(e) => setForm({ ...form, companyName: e.target.value })} /></Field>
         <Field label="Address"><input className={inputCls} value={form.companyAddress} onChange={(e) => setForm({ ...form, companyAddress: e.target.value })} /></Field>
         <Field label="Phone"><input className={inputCls} value={form.companyPhone} onChange={(e) => setForm({ ...form, companyPhone: e.target.value })} /></Field>
-
-        <Field label="Company Logo">
-          <div className="flex items-center gap-3">
-            {form.logoUrl ? (
-              <img src={form.logoUrl} alt="Logo" className="w-14 h-14 object-contain border border-slate-200" />
-            ) : (
-              <div className="w-14 h-14 bg-slate-900 flex items-center justify-center font-black text-white">CT</div>
-            )}
-            <label className="px-3 py-1.5 text-xs font-bold uppercase tracking-wide border border-slate-300 text-slate-600 hover:bg-slate-100 cursor-pointer">
-              {form.logoUrl ? "Change Logo" : "Upload Logo"}
-              <input type="file" accept="image/*" className="hidden" onChange={handleLogoFile} />
-            </label>
-            {form.logoUrl && (
-              <button type="button" className="text-xs font-bold text-red-600 hover:underline" onClick={() => setForm((f) => ({ ...f, logoUrl: "" }))}>
-                Remove
-              </button>
-            )}
-          </div>
-          {logoError && <div className="text-xs text-red-600 font-semibold mt-1">{logoError}</div>}
-          <div className="text-[11px] text-slate-400 mt-1">Logo invoice header aur sidebar par nazar aayega. Chota, square-ish image behtar rahega.</div>
-        </Field>
-
-        <Btn onClick={() => saveSettings(form)}>Save</Btn>
+        <Btn onClick={saveCompanyInfo}>Save</Btn>
       </div>
 
-      <div className="bg-white border border-slate-200 p-4 max-w-lg">
-        <div className="font-black uppercase text-xs tracking-wide text-slate-500 mb-3">Users (Admin / Staff)</div>
-        <table className="w-full text-sm mb-4">
-          <tbody>
-            {users.filter((u) => isSuperAdmin || u.branchId === currentUser.branchId).map((u) => (
-              <tr key={u.id} className="border-t border-slate-100">
-                <td className="py-2 font-bold">
-                  {u.name} <span className="text-[10px] uppercase text-slate-400">({u.role})</span>
-                  <div className="text-[10px] text-blue-700 font-bold uppercase">
-                    {u.branchId ? (branches.find((b) => b.id === u.branchId)?.name || "Unknown Branch") : "All Branches (Super Admin)"}
-                  </div>
-                </td>
-                <td className="py-2 text-slate-500">{u.username}</td>
-                <td className="py-2 text-right">
-                  {u.id !== currentUser.id && (
-                    <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => deleteUser(u.id)}>Delete</button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <div className="grid grid-cols-2 gap-2">
-          <input className={inputCls} placeholder="Full name" value={newUser.name} onChange={(e) => setNewUser({ ...newUser, name: e.target.value })} />
-          <select className={inputCls} value={newUser.role} onChange={(e) => setNewUser({ ...newUser, role: e.target.value })}>
-            <option value="staff">Staff</option><option value="admin">Admin</option>
-          </select>
-          <input className={inputCls} placeholder="Username" value={newUser.username} onChange={(e) => setNewUser({ ...newUser, username: e.target.value })} />
-          <input className={inputCls} placeholder="Password" value={newUser.password} onChange={(e) => setNewUser({ ...newUser, password: e.target.value })} />
+      <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">Branches</div>
+          <Btn small onClick={() => setShowBranchForm(true)}>Add Branch</Btn>
         </div>
-        {isSuperAdmin ? (
-          <div className="mt-2">
-            <Field label="Branch">
-              <select className={inputCls} value={newUser.branchId} onChange={(e) => setNewUser({ ...newUser, branchId: e.target.value })}>
-                <option value="">Unassigned (Super Admin — sees all branches)</option>
-                {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-              </select>
-            </Field>
-          </div>
-        ) : (
-          <div className="text-xs text-slate-400 mt-2 mb-2">
-            Ye user aapki branch ({branches.find((b) => b.id === currentUser.branchId)?.name || "-"}) mein hi add hoga.
+        {branches.length === 0 && <div className="text-slate-400 text-sm">Koi branch nahi bani.</div>}
+        <div className="divide-y divide-slate-100">
+          {branches.map((b) => (
+            <div key={b.id} className="py-2 flex items-center justify-between text-sm">
+              <span className="font-bold">{b.name}</span>
+              {b.id !== "branch_main" && (
+                <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete branch ${b.name}?`)) deleteBranch(b.id); }}>Delete</button>
+              )}
+            </div>
+          ))}
+        </div>
+        {showBranchForm && (
+          <div className="flex gap-2 mt-3">
+            <input className={inputCls} placeholder="Branch name" value={branchName} onChange={(e) => setBranchName(e.target.value)} />
+            <Btn small onClick={submitBranch}>Save</Btn>
+            <Btn small variant="ghost" onClick={() => setShowBranchForm(false)}>Cancel</Btn>
           </div>
         )}
-        <Btn onClick={() => {
-          if (!newUser.username.trim() || !newUser.password.trim()) return;
-          const branchId = isSuperAdmin ? newUser.branchId : currentUser.branchId;
-          saveUser({ id: uid("u"), ...newUser, branchId });
-          setNewUser({ username: "", password: "", role: "staff", name: "", branchId: currentUser?.branchId || "" });
-        }}>+ Add User</Btn>
       </div>
 
-      {isSuperAdmin && (
-        <div className="bg-white border border-slate-200 p-4 max-w-lg mt-6">
-          <div className="font-black uppercase text-xs tracking-wide text-slate-500 mb-3">Branches</div>
-          <table className="w-full text-sm mb-4">
-            <tbody>
-              {branches.length === 0 && <tr><td className="py-2 text-slate-400">Koi branch nahi bani.</td></tr>}
-              {branches.map((b) => (
-                <tr key={b.id} className="border-t border-slate-100">
-                  <td className="py-2 font-bold">{b.name}</td>
-                  <td className="py-2 text-right">
-                    <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete branch "${b.name}"? Us branch ke users ko dobara assign karna hoga.`)) deleteBranch(b.id); }}>Delete</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="flex gap-2">
-            <input className={inputCls} placeholder="Branch name (e.g. Okara Branch)" value={newBranchName} onChange={(e) => setNewBranchName(e.target.value)} />
-            <Btn onClick={() => {
-              if (!newBranchName.trim()) return;
-              saveBranch({ name: newBranchName.trim() });
-              setNewBranchName("");
-            }}>+ Add Branch</Btn>
-          </div>
-          <div className="text-[11px] text-slate-400 mt-2">
-            Har branch ke customers, invoices, ledger, bookings, orders aur leads alag rahenge. Us branch ke admin/staff ko Users section se assign karein.
-          </div>
+      <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">Users (Admin / Staff)</div>
+          <Btn small onClick={openNewUser}>+ Add User</Btn>
         </div>
-      )}
+        <div className="divide-y divide-slate-100">
+          {users.map((u) => (
+            <div key={u.id} className="py-2 flex items-center justify-between text-sm">
+              <div>
+                <span className="font-bold">{u.name || u.username}</span>{" "}
+                <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-100 text-slate-600 ml-1">{u.role}</span>
+                {u.branchId && <span className="text-slate-400 text-xs ml-2">{branches.find((b) => b.id === u.branchId)?.name}</span>}
+              </div>
+              <div>
+                <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => openEditUser(u)}>Edit</button>
+                <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete user ${u.username}?`)) deleteUser(u.id); }}>Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+        {showUserForm && (
+          <div className="mt-3 border-t border-slate-200 pt-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Username"><input className={inputCls} value={userForm.username} onChange={(e) => setUserForm({ ...userForm, username: e.target.value })} /></Field>
+              <Field label="Password"><input className={inputCls} value={userForm.password} onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} /></Field>
+            </div>
+            <Field label="Full name"><input className={inputCls} value={userForm.name} onChange={(e) => setUserForm({ ...userForm, name: e.target.value })} /></Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Role">
+                <select className={inputCls} value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}>
+                  <option value="admin">Admin</option><option value="staff">Staff</option>
+                </select>
+              </Field>
+              <Field label="Branch">
+                <select className={inputCls} value={userForm.branchId || ""} onChange={(e) => setUserForm({ ...userForm, branchId: e.target.value })}>
+                  <option value="">All Branches</option>
+                  {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div className="flex gap-2"><Btn onClick={submitUser}>Save</Btn><Btn variant="ghost" onClick={() => setShowUserForm(false)}>Cancel</Btn></div>
+          </div>
+        )}
+      </div>
 
-      {isSuperAdmin && (
-        <div className="bg-white border border-slate-200 p-4 max-w-lg mt-6">
-          <div className="font-black uppercase text-xs tracking-wide text-slate-500 mb-3">Backup</div>
-          <div className="flex gap-2 items-center flex-wrap">
-            <Btn variant="dark" onClick={downloadBackup}>Download Backup (JSON)</Btn>
-            <label className="px-4 py-2 text-sm font-bold uppercase tracking-wide border border-slate-300 text-slate-600 hover:bg-slate-100 cursor-pointer">
-              Restore from File
-              <input type="file" accept="application/json" className="hidden" onChange={handleFile} />
-            </label>
-          </div>
-          {restoreMsg && <div className="text-xs text-emerald-600 font-bold mt-2">{restoreMsg}</div>}
-          <div className="text-xs text-slate-400 mt-2">Restore purana data overwrite kar dega (sab branches). Pehle current data ka backup le lein.</div>
+      <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-3">Backup</div>
+        <div className="flex gap-2">
+          <Btn onClick={exportBackup}>Download Backup (JSON)</Btn>
+          <Btn variant="ghost" onClick={() => restoreInputRef.current?.click()}>Restore from File</Btn>
+          <input ref={restoreInputRef} type="file" accept="application/json" onChange={handleRestoreFile} className="hidden" />
         </div>
-      )}
+      </div>
+
+      <div className="flex items-center gap-2 mb-6">
+        <span className="text-[11px] uppercase tracking-wide font-bold text-slate-500">Language</span>
+        <LanguageSwitcher />
+      </div>
     </div>
   );
 }
 
-/* ---------------- App ---------------- */
+/* ==================== Root App Component ==================== */
 
-export default function App() {
-  const { language } = useLanguage();
+function App() {
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
   const [page, setPage] = useState("dashboard");
-  const [ledgerFocusId, setLedgerFocusId] = useState(null);
-  const [invoicePrefill, setInvoicePrefill] = useState(null);
+  const [prefill, setPrefill] = useState(null);
+  const [focusCustomerId, setFocusCustomerId] = useState(null);
   const [focusInvoiceId, setFocusInvoiceId] = useState(null);
-  const [globalSearch, setGlobalSearch] = useState("");
+  const [focusPromiseId, setFocusPromiseId] = useState(null);
 
   const [users, setUsers] = useState(DEFAULT_USERS);
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [customers, setCustomers] = useState([]);
-  const [products, setProducts] = useState([]);
   const [invoices, setInvoices] = useState([]);
   const [payments, setPayments] = useState([]);
-  const [bookings, setBookings] = useState([]);
-  const [leads, setLeads] = useState([]);
-  const [drivers, setDrivers] = useState([]);
-  const [orders, setOrders] = useState([]);
-  const [branches, setBranches] = useState(DEFAULT_BRANCHES);
-  const [offers, setOffers] = useState([]);
   const [returns, setReturns] = useState([]);
   const [exchanges, setExchanges] = useState([]);
   const [creditNotes, setCreditNotes] = useState([]);
-  const [auditLog, setAuditLog] = useState([]);
   const [promises, setPromises] = useState([]);
-  const [outstandingTransfers, setOutstandingTransfers] = useState([]);
+  const [transfers, setTransfers] = useState([]);
   const [adjustments, setAdjustments] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [drivers, setDrivers] = useState([]);
+  const [offers, setOffers] = useState([]);
+  const [bookings, setBookings] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [branches, setBranches] = useState(DEFAULT_BRANCHES);
+  const [auditLog, setAuditLog] = useState([]);
+
+  // Commission Management System state (additive; never modifies invoice/
+  // customer/payment tables above).
   const [commissionAgents, setCommissionAgents] = useState([]);
   const [commissionRules, setCommissionRules] = useState([]);
   const [commissionTransactions, setCommissionTransactions] = useState([]);
   const [commissionPayments, setCommissionPayments] = useState([]);
 
   useEffect(() => {
+    let cancelled = false;
     (async () => {
-      const [u, s, c, p, i, pay, bk, ld, dr, ord, br, off, ret, exc, cn, al, pr, ot, adj, ca, cr, ct, cp] = await Promise.all([
+      const [
+        u, c, inv, pay, ret, exch, cn, prom, tr, adj,
+        ld, prod, drv, off, bk, ord, set, br, aud,
+        cAgents, cRules, cTxns, cPays,
+      ] = await Promise.all([
         storeGet("ct-users", DEFAULT_USERS),
-        storeGet("ct-settings", DEFAULT_SETTINGS),
         storeGet("ct-customers", []),
-        storeGet("ct-products", []),
         storeGet("ct-invoices", []),
         storeGet("ct-payments", []),
-        storeGet("ct-bookings", []),
-        storeGet("ct-leads", []),
-        storeGet("ct-drivers", []),
-        storeGet("ct-orders", []),
-        storeGet("ct-branches", DEFAULT_BRANCHES),
-        storeGet("ct-offers", []),
         storeGet("ct-returns", []),
         storeGet("ct-exchanges", []),
         storeGet("ct-creditnotes", []),
-        storeGet("ct-auditlog", []),
         storeGet("ct-promises", []),
-        storeGet("ct-outstandingtransfers", []),
+        storeGet("ct-transfers", []),
         storeGet("ct-adjustments", []),
-        storeGet("ct-commission-agents", []),
-        storeGet("ct-commission-rules", []),
-        storeGet("ct-commission-transactions", []),
-        storeGet("ct-commission-payments", []),
+        storeGet("ct-leads", []),
+        storeGet("ct-products", []),
+        storeGet("ct-drivers", []),
+        storeGet("ct-offers", []),
+        storeGet("ct-bookings", []),
+        storeGet("ct-orders", []),
+        storeGet("ct-settings", DEFAULT_SETTINGS),
+        storeGet("ct-branches", DEFAULT_BRANCHES),
+        storeGet("ct-auditlog", []),
+        storeGet("ct-commissionagents", []),
+        storeGet("ct-commissionrules", []),
+        storeGet("ct-commissiontransactions", []),
+        storeGet("ct-commissionpayments", []),
       ]);
-      setUsers(u); setSettings(s); setCustomers(c); setProducts(p);
-      setInvoices(i); setPayments(pay); setBookings(bk); setLeads(ld); setDrivers(dr); setOrders(ord); setBranches(br); setOffers(off);
-      setReturns(ret); setExchanges(exc); setCreditNotes(cn); setAuditLog(al); setPromises(pr); setOutstandingTransfers(ot); setAdjustments(adj);
-      setCommissionAgents(ca); setCommissionRules(cr); setCommissionTransactions(ct); setCommissionPayments(cp);
-      if (u.length === 0) { setUsers(DEFAULT_USERS); await storeSet("ct-users", DEFAULT_USERS); }
+      if (cancelled) return;
+      setUsers(u); setCustomers(c); setInvoices(inv); setPayments(pay); setReturns(ret);
+      setExchanges(exch); setCreditNotes(cn); setPromises(prom); setTransfers(tr); setAdjustments(adj);
+      setLeads(ld); setProducts(prod); setDrivers(drv); setOffers(off); setBookings(bk); setOrders(ord);
+      setSettings({ ...DEFAULT_SETTINGS, ...set }); setBranches(br); setAuditLog(aud);
+      setCommissionAgents(cAgents); setCommissionRules(cRules); setCommissionTransactions(cTxns); setCommissionPayments(cPays);
       setLoading(false);
     })();
+    return () => { cancelled = true; };
   }, []);
 
-  // Live sync: when Supabase is configured, pick up changes saved from
-  // OTHER devices/browsers in real time (no manual refresh needed).
+  // Supabase realtime — when configured, keeps every connected device in
+  // sync live. Falls back to purely local state when Supabase isn't set up.
   useEffect(() => {
     if (!supabase) return;
     const setterByKey = {
-      "ct-users": setUsers, "ct-settings": setSettings, "ct-customers": setCustomers,
-      "ct-products": setProducts, "ct-invoices": setInvoices, "ct-payments": setPayments,
-      "ct-bookings": setBookings, "ct-leads": setLeads, "ct-drivers": setDrivers,
-      "ct-orders": setOrders, "ct-branches": setBranches, "ct-offers": setOffers,
-      "ct-returns": setReturns, "ct-exchanges": setExchanges, "ct-creditnotes": setCreditNotes,
-      "ct-auditlog": setAuditLog, "ct-promises": setPromises, "ct-outstandingtransfers": setOutstandingTransfers,
-      "ct-adjustments": setAdjustments,
-      "ct-commission-agents": setCommissionAgents,
-      "ct-commission-rules": setCommissionRules,
-      "ct-commission-transactions": setCommissionTransactions,
-      "ct-commission-payments": setCommissionPayments,
+      "ct-users": setUsers, "ct-customers": setCustomers, "ct-invoices": setInvoices, "ct-payments": setPayments,
+      "ct-returns": setReturns, "ct-exchanges": setExchanges, "ct-creditnotes": setCreditNotes, "ct-promises": setPromises,
+      "ct-transfers": setTransfers, "ct-adjustments": setAdjustments, "ct-leads": setLeads, "ct-products": setProducts,
+      "ct-drivers": setDrivers, "ct-offers": setOffers, "ct-bookings": setBookings, "ct-orders": setOrders,
+      "ct-settings": (v) => setSettings({ ...DEFAULT_SETTINGS, ...v }), "ct-branches": setBranches, "ct-auditlog": setAuditLog,
+      "ct-commissionagents": setCommissionAgents, "ct-commissionrules": setCommissionRules,
+      "ct-commissiontransactions": setCommissionTransactions, "ct-commissionpayments": setCommissionPayments,
     };
     const channel = supabase
-      .channel("kv_store-changes")
+      .channel("kv_store_changes")
       .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, (payload) => {
-        const row = payload.new;
-        if (row && setterByKey[row.key]) setterByKey[row.key](row.value);
+        const row = payload.new || payload.old;
+        if (!row) return;
+        const setter = setterByKey[row.key];
+        if (setter && payload.new) setter(payload.new.value);
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, []);
 
-  // persist helpers
   const persist = {
     users: (v) => { setUsers(v); storeSet("ct-users", v); },
-    settings: (v) => { setSettings(v); storeSet("ct-settings", v); },
     customers: (v) => { setCustomers(v); storeSet("ct-customers", v); },
-    products: (v) => { setProducts(v); storeSet("ct-products", v); },
     invoices: (v) => { setInvoices(v); storeSet("ct-invoices", v); },
     payments: (v) => { setPayments(v); storeSet("ct-payments", v); },
-    bookings: (v) => { setBookings(v); storeSet("ct-bookings", v); },
-    leads: (v) => { setLeads(v); storeSet("ct-leads", v); },
-    drivers: (v) => { setDrivers(v); storeSet("ct-drivers", v); },
-    orders: (v) => { setOrders(v); storeSet("ct-orders", v); },
-    branches: (v) => { setBranches(v); storeSet("ct-branches", v); },
-    offers: (v) => { setOffers(v); storeSet("ct-offers", v); },
     returns: (v) => { setReturns(v); storeSet("ct-returns", v); },
     exchanges: (v) => { setExchanges(v); storeSet("ct-exchanges", v); },
     creditNotes: (v) => { setCreditNotes(v); storeSet("ct-creditnotes", v); },
-    auditLog: (v) => { setAuditLog(v); storeSet("ct-auditlog", v); },
     promises: (v) => { setPromises(v); storeSet("ct-promises", v); },
-    outstandingTransfers: (v) => { setOutstandingTransfers(v); storeSet("ct-outstandingtransfers", v); },
+    transfers: (v) => { setTransfers(v); storeSet("ct-transfers", v); },
     adjustments: (v) => { setAdjustments(v); storeSet("ct-adjustments", v); },
-    commissionAgents: (v) => { setCommissionAgents(v); storeSet("ct-commission-agents", v); },
-    commissionRules: (v) => { setCommissionRules(v); storeSet("ct-commission-rules", v); },
-    commissionTransactions: (v) => { setCommissionTransactions(v); storeSet("ct-commission-transactions", v); },
-    commissionPayments: (v) => { setCommissionPayments(v); storeSet("ct-commission-payments", v); },
+    leads: (v) => { setLeads(v); storeSet("ct-leads", v); },
+    products: (v) => { setProducts(v); storeSet("ct-products", v); },
+    drivers: (v) => { setDrivers(v); storeSet("ct-drivers", v); },
+    offers: (v) => { setOffers(v); storeSet("ct-offers", v); },
+    bookings: (v) => { setBookings(v); storeSet("ct-bookings", v); },
+    orders: (v) => { setOrders(v); storeSet("ct-orders", v); },
+    settings: (v) => { setSettings(v); storeSet("ct-settings", v); },
+    branches: (v) => { setBranches(v); storeSet("ct-branches", v); },
+    auditLog: (v) => { setAuditLog(v); storeSet("ct-auditlog", v); },
+    commissionAgents: (v) => { setCommissionAgents(v); storeSet("ct-commissionagents", v); },
+    commissionRules: (v) => { setCommissionRules(v); storeSet("ct-commissionrules", v); },
+    commissionTransactions: (v) => { setCommissionTransactions(v); storeSet("ct-commissiontransactions", v); },
+    commissionPayments: (v) => { setCommissionPayments(v); storeSet("ct-commissionpayments", v); },
   };
 
-  function upsert(list, item) {
-    const idx = list.findIndex((x) => x.id === item.id);
-    if (idx === -1) return [...list, item];
-    const copy = [...list]; copy[idx] = item; return copy;
-  }
-
-  // Feature 13 (Phase 2) / Feature 16 (Phase 3): Audit Log helper. Records
-  // every Return, Exchange, Delete Return, Delete Exchange, Promise
-  // Created/Edited/Completed/Cancelled/Broken/Deleted, Outstanding Transfer
-  // Created/Reversed, and Invoice Status Change with user/date/time/reason.
   function logAudit(action, reference, reason) {
-    const entry = {
-      id: uid("al"), action, reference,
-      user: currentUser?.name || currentUser?.username || "Unknown",
-      at: new Date().toISOString(),
-      reason: reason || "",
-    };
-    persist.auditLog([...auditLog, entry]);
+    setAuditLog((prev) => {
+      const next = [...prev, {
+        id: uid("aud"), action, reference, reason: reason || "",
+        user: currentUser?.name || currentUser?.username || "System", at: new Date().toISOString(),
+      }];
+      storeSet("ct-auditlog", next);
+      return next;
+    });
   }
 
-  const saveCustomer = (c) => {
-    const finalBranchId = currentUser?.branchId ? currentUser.branchId : (c.branchId || "");
-    persist.customers(upsert(customers, { ...c, branchId: finalBranchId }));
-  };
-  const deleteCustomer = (id) => persist.customers(customers.filter((c) => c.id !== id));
-  const saveBranch = (b) => persist.branches(b.id ? upsert(branches, b) : [...branches, { id: uid("br"), ...b }]);
-  const deleteBranch = (id) => persist.branches(branches.filter((b) => b.id !== id));
-  const saveProduct = (p) => persist.products(upsert(products, p));
-  const deleteProduct = (id) => persist.products(products.filter((p) => p.id !== id));
-  const savePayment = (p) => {
-    persist.payments([...payments, p]);
-    // Feature 7 — applying a payment against a promise reduces the
-    // promised amount / updates remaining amount / status automatically
-    // (paidAmount is derived from summed linked payments below).
-    if (p.promiseId) {
-      const promise = promises.find((pr) => pr.id === p.promiseId);
-      if (promise) {
-        const newPaid = (Number(promise.paidAmount) || 0) + Number(p.amount);
-        const updated = promiseWithComputed({ ...promise, paidAmount: newPaid });
-        persist.promises(upsert(promises, updated));
-        logAudit("Promise Payment", `${promise.code} — Rs ${Number(p.amount).toLocaleString()} applied`, "Payment applied against promise");
+  /* ---------- Customers ---------- */
+  function saveCustomer(data) {
+    const exists = customers.some((c) => c.id === data.id);
+    persist.customers(exists ? customers.map((c) => (c.id === data.id ? data : c)) : [...customers, data]);
+    logAudit(exists ? "Customer Updated" : "Customer Created", data.name, "");
+  }
+  function deleteCustomer(id) {
+    persist.customers(customers.filter((c) => c.id !== id));
+  }
+  function openLedger(customerId) { setFocusCustomerId(customerId); setPage("ledger"); }
+
+  /* ---------- Commission helpers (defined before invoice handlers that call them) ---------- */
+  function nextCommissionAgentCode() {
+    return "COM-" + String(settings.commissionAgentCounter || 1).padStart(4, "0");
+  }
+
+  function syncCommissionForInvoice(inv) {
+    const existing = commissionTransactions.find((tx) => tx.invoiceId === inv.id && tx.status !== "Cancelled");
+    if (!inv.commissionAgentId) {
+      if (existing) {
+        const updated = { ...existing, status: "Cancelled", remainingAmount: 0, cancelReason: "Commission agent removed from invoice" };
+        persist.commissionTransactions(commissionTransactions.map((t) => (t.id === existing.id ? updated : t)));
+        logAudit("Commission Cancelled", `${existing.invoiceNumber} — ${existing.agentName}`, "Commission agent removed from invoice");
       }
-    }
-  };
-  const saveBooking = (b) => persist.bookings(upsert(bookings, b));
-
-  function createAdvanceBooking(data) {
-    const counter = settings.bookingCounter || 1;
-    const code = "ADV-" + String(counter).padStart(4, "0");
-    const expiryDate = addOneMonth(data.date);
-    const booking = { id: uid("bk"), code, expiryDate, status: "Booked", ...data };
-    persist.bookings([...bookings, booking]);
-    persist.settings({ ...settings, bookingCounter: counter + 1 });
-    if (Number(data.advanceAmount) > 0) {
-      persist.payments([...payments, {
-        id: uid("pay"), customerId: data.customerId, customerName: data.customerName,
-        date: data.date, amount: Number(data.advanceAmount), method: "Advance Booking",
-        note: `Advance for booking ${code} (${data.productName || "item"})`,
-      }]);
-    }
-  }
-
-  function convertBookingToInvoice(booking) {
-    setInvoicePrefill({
-      sourceType: "booking",
-      sourceId: booking.id,
-      sourceCode: booking.code,
-      customerId: booking.customerId,
-      productId: booking.productId || "",
-      productName: booking.productName,
-      unit: booking.unit,
-      qty: booking.qty,
-      rate: booking.rate,
-    });
-    setPage("invoices");
-  }
-
-  function convertOrderToInvoice(order) {
-    const product = products.find((p) => p.id === order.productId);
-    setInvoicePrefill({
-      sourceType: "order",
-      sourceId: order.id,
-      sourceCode: order.code,
-      customerId: order.customerId,
-      productId: order.productId || "",
-      productName: order.productName,
-      unit: order.unit,
-      qty: order.qty,
-      rate: product ? product.price : 0,
-    });
-    setPage("invoices");
-  }
-
-  function markBookingFulfilled(bookingId) {
-    const b = bookings.find((x) => x.id === bookingId);
-    if (b) persist.bookings(upsert(bookings, { ...b, status: "Completed" }));
-  }
-
-  function createOrder(data) {
-    const counter = settings.orderCounter || 1;
-    const code = "ORD-" + String(counter).padStart(4, "0");
-    persist.orders([...orders, { id: uid("ord"), code, status: "Pending", ...data }]);
-    persist.settings({ ...settings, orderCounter: counter + 1 });
-  }
-  const saveOrder = (o) => persist.orders(upsert(orders, o));
-  const deleteOrder = (id) => persist.orders(orders.filter((o) => o.id !== id));
-  function markOrderFulfilled(orderId) {
-    const o = orders.find((x) => x.id === orderId);
-    if (o) persist.orders(upsert(orders, { ...o, status: "Completed" }));
-  }
-
-  const saveLead = (l) => {
-    const isNew = !leads.some((x) => x.id === l.id);
-    const finalLead = isNew ? { ...l, branchId: currentUser?.branchId || l.branchId || "" } : l;
-    persist.leads(upsert(leads, finalLead));
-  };
-  const deleteLead = (id) => persist.leads(leads.filter((l) => l.id !== id));
-  const saveSettings = (s) => persist.settings(s);
-
-  function saveDriver(driverData) {
-    if (driverData.id) {
-      persist.drivers(upsert(drivers, driverData));
       return;
     }
-    const counter = settings.driverCounter || 1;
-    const code = "DRV-" + String(counter).padStart(4, "0");
-    persist.drivers([...drivers, { id: uid("drv"), code, ...driverData }]);
-    persist.settings({ ...settings, driverCounter: counter + 1 });
-  }
-  const deleteDriver = (id) => persist.drivers(drivers.filter((d) => d.id !== id));
-  const saveOffer = (o) => persist.offers(o.id ? upsert(offers, o) : [...offers, { id: uid("off"), ...o }]);
-  const deleteOffer = (id) => persist.offers(offers.filter((o) => o.id !== id));
-  const saveUser = (u) => persist.users(upsert(users, u));
-  const deleteUser = (id) => persist.users(users.filter((u) => u.id !== id));
-
-  function saveCommissionAgent(data) {
-    if (data.id) {
-      persist.commissionAgents(upsert(commissionAgents, data));
-      // Keep the agent's default commission settings usable from invoices.
-      // If the agent already has an all-products rule, update it; otherwise
-      // create one so adding an agent is immediately functional.
-      const existingRule = commissionRules.find(r => r.agentId === data.id && !r.productId && (!r.category || r.category === "All Products"));
-      const defaultRule = {
-        ...(existingRule || {}),
-        id: existingRule?.id || uid("com-rule"),
-        agentId: data.id,
-        productId: "",
-        category: "All Products",
-        type: data.commissionType || "percentage",
-        rate: Number(data.commissionRate) || 0,
-        minimumSaleAmount: 0,
-        maximumCommission: 0,
-        startDate: existingRule?.startDate || "",
-        endDate: existingRule?.endDate || "",
-        status: data.status === "Active" ? "Active" : "Inactive",
-        updatedAt: new Date().toISOString(),
-      };
-      persist.commissionRules(upsert(commissionRules, defaultRule));
-      return;
-    }
-    const counter = settings.commissionAgentCounter || 1;
-    const agent = { ...data, minimumBags: Number(data.minimumBags) > 0 ? Number(data.minimumBags) : 100, id: uid("com-agent"), code: "COM-" + String(counter).padStart(4, "0"), createdDate: todayISO(), status: "Active" };
-    persist.commissionAgents([...commissionAgents, agent]);
-    // IMPORTANT: create a default All Products rule at the same time.
-    // This means the newly added agent can immediately be selected on an
-    // invoice and commission is calculated without requiring a second setup.
-    const defaultRule = {
-      id: uid("com-rule"),
-      agentId: agent.id,
-      productId: "",
-      category: "All Products",
-      type: agent.commissionType || "percentage",
-      rate: Number(agent.commissionRate) || 0,
-      minimumSaleAmount: 0,
-      maximumCommission: 0,
-      startDate: "",
-      endDate: "",
-      status: "Active",
-      createdAt: new Date().toISOString(),
-    };
-    persist.commissionRules([...commissionRules, defaultRule]);
-    persist.settings({ ...settings, commissionAgentCounter: counter + 1 });
-  }
-  function deactivateCommissionAgent(agent) {
-    persist.commissionAgents(upsert(commissionAgents, { ...agent, status: agent.status === "Active" ? "Inactive" : "Active" }));
-  }
-  function saveCommissionRule(data) {
-    const rule = data.id ? data : { ...data, id: uid("com-rule"), createdAt: new Date().toISOString() };
-    persist.commissionRules(upsert(commissionRules, rule));
-  }
-  function deleteCommissionRule(id) {
-    persist.commissionRules(upsert(commissionRules, { ...(commissionRules.find(r=>r.id===id)||{}), id, status:"Inactive" }));
-  }
-  function createOrUpdateCommissionForInvoice(inv) {
-    if (!inv.commissionAgentId) return;
-    const agent = commissionAgents.find(a => a.id === inv.commissionAgentId);
+    const agent = commissionAgents.find((a) => a.id === inv.commissionAgentId);
     if (!agent) return;
-    const calc = calculateCommissionForInvoice(inv, commissionRules, products);
-    const existing = commissionTransactions.find(t => t.invoiceId === inv.id);
-    const bagQty = (inv.items || []).reduce((sum, item) => sum + (String(item.unit || "").toLowerCase() === "bag" ? (Number(item.qty) || 0) : 0), 0);
-    const minimumBags = Number(agent.minimumBags) > 0 ? Number(agent.minimumBags) : 100;
-    const tx = {
-      id: existing?.id || uid("com-tx"),
-      agentId: agent.id, agentName: agent.name, invoiceId: inv.id, invoiceNumber: inv.number,
-      customerId: inv.customerId, customerName: inv.customerName, saleAmount: Number(inv.total)||0,
-      bagQty, minimumBags,
-      commissionType: calc.breakdown[0]?.ruleType || agent.commissionType || "percentage",
-      commissionRate: calc.breakdown[0]?.rate || Number(agent.commissionRate)||0,
-      commissionAmount: calc.amount, paidAmount: existing?.paidAmount || 0,
-      remainingAmount: Math.max(0, calc.amount - (existing?.paidAmount || 0)),
-      status: existing?.status === "approved" && calc.amount > (existing?.paidAmount || 0) ? "approved" : (existing?.status === "paid" ? (calc.amount <= (existing?.paidAmount || 0) ? "paid" : "approved") : "pending"),
-      date: inv.date, branchId: inv.branchId || "", breakdown: calc.breakdown,
-      createdAt: existing?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString()
-    };
-    persist.commissionTransactions(upsert(commissionTransactions, tx));
-  }
-
-  // Rebuild/sync commission transactions from existing invoices. This is
-  // important for invoices that were created before the Commission module
-  // was installed, or before an agent/rule was configured. It never deletes
-  // financial history; it only creates/updates the related commission record.
-  function syncCommissionFromInvoices() {
-    const next = [...commissionTransactions];
-    invoices.forEach((inv) => {
-      const existingIndex = next.findIndex((t) => t.invoiceId === inv.id);
-      if (!inv.commissionAgentId) return;
-      const agent = commissionAgents.find((a) => a.id === inv.commissionAgentId);
-      if (!agent) return;
-      const calc = calculateCommissionForInvoice(inv, commissionRules, products);
-      const existing = existingIndex >= 0 ? next[existingIndex] : null;
-      const bagQty = (inv.items || []).reduce((sum, item) => sum + (String(item.unit || '').toLowerCase() === 'bag' ? (Number(item.qty) || 0) : 0), 0);
-      const minimumBags = Number(agent.minimumBags) > 0 ? Number(agent.minimumBags) : 100;
-      const paidAmount = Number(existing?.paidAmount || 0);
-      const cancelled = inv.docStatus === 'Cancelled' || inv.status === 'Cancelled';
-      const tx = {
-        id: existing?.id || uid('com-tx'),
-        agentId: agent.id, agentName: agent.name, invoiceId: inv.id, invoiceNumber: inv.number,
-        customerId: inv.customerId, customerName: inv.customerName, saleAmount: Number(inv.total) || 0,
-        bagQty, minimumBags,
-        commissionType: calc.breakdown[0]?.ruleType || agent.commissionType || 'percentage',
-        commissionRate: calc.breakdown[0]?.rate || Number(agent.commissionRate) || 0,
-        commissionAmount: calc.amount, paidAmount,
-        remainingAmount: cancelled ? 0 : Math.max(0, calc.amount - paidAmount),
-        status: cancelled ? 'cancelled' : (calc.amount <= paidAmount && calc.amount > 0 ? 'paid' : (existing?.status === 'approved' ? 'approved' : 'pending')),
-        date: inv.date, branchId: inv.branchId || '', breakdown: calc.breakdown,
-        createdAt: existing?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString()
+    const { total, lines } = computeCommissionForInvoice(agent, commissionRules, inv.items, inv.date, inv.subtotal);
+    if (existing && existing.agentId === agent.id) {
+      const paid = Number(existing.paidAmount) || 0;
+      const remaining = Math.max(0, roundMoney(total - paid));
+      const updated = {
+        ...existing, saleAmount: inv.subtotal, commissionAmount: total, breakdown: lines,
+        remainingAmount: remaining,
+        commissionType: lines.length === 1 ? lines[0].commissionType : "mixed",
+        commissionRate: lines.length === 1 ? lines[0].commissionRate : 0,
+        status: existing.status === "Paid" && remaining > 0 ? "Approved" : existing.status,
       };
-      if (existingIndex >= 0) next[existingIndex] = tx; else next.push(tx);
-    });
-    persist.commissionTransactions(next);
-    return next;
-  }
-
-  function approveCommission(tx) {
-    if (currentUser?.role !== "admin") return;
-    persist.commissionTransactions(upsert(commissionTransactions, { ...tx, status: "approved", updatedAt: new Date().toISOString() }));
-    logAudit("Commission Approved", `${tx.invoiceNumber} — ${tx.agentName}`, "");
-  }
-  function payCommission(tx, data) {
-    if (currentUser?.role !== "admin") return;
-    const agentInvoices = invoices.filter((inv) => inv.commissionAgentId === tx.agentId && inv.docStatus !== "Cancelled");
-    const soldBags = agentInvoices.reduce((sum, inv) => sum + (inv.items || []).reduce((n, item) => n + (String(item.unit || "").toLowerCase() === "bag" ? (Number(item.qty) || 0) : 0), 0), 0);
-    const minimumBags = Number(tx.minimumBags || commissionAgents.find((a) => a.id === tx.agentId)?.minimumBags) || 100;
-    if (soldBags < minimumBags) {
-      alert(`Commission payment abhi lock hai. ${minimumBags} bags complete hone par payment milegi. Abhi ${soldBags} bags complete hue hain.`);
+      persist.commissionTransactions(commissionTransactions.map((t) => (t.id === existing.id ? updated : t)));
       return;
     }
-    const amount = Math.min(Number(data.amount)||0, Number(tx.remainingAmount)||0);
-    if (amount <= 0) return;
-    const payment = { id: uid("com-pay"), transactionId: tx.id, agentId: tx.agentId, date: data.date, amount, method: data.method, reference: data.reference || "", notes: data.notes || "", paidBy: currentUser?.name || currentUser?.username || "Unknown", createdAt: new Date().toISOString() };
-    const paidAmount = Number(tx.paidAmount||0) + amount;
-    const remainingAmount = Math.max(0, Number(tx.commissionAmount||0) - paidAmount);
-    const updated = { ...tx, paidAmount, remainingAmount, status: remainingAmount <= 0 ? "paid" : "approved", updatedAt: new Date().toISOString() };
-    persist.commissionPayments([...commissionPayments, payment]);
-    persist.commissionTransactions(upsert(commissionTransactions, updated));
-    logAudit("Commission Payment", `${tx.invoiceNumber} — ${tx.agentName} — Rs ${amount.toLocaleString()}`, data.notes || "");
-  }
-  function cancelCommission(tx) {
-    if (currentUser?.role !== "admin") return;
-    persist.commissionTransactions(upsert(commissionTransactions, { ...tx, status: "cancelled", remainingAmount: 0, updatedAt: new Date().toISOString() }));
-    logAudit("Commission Cancelled", `${tx.invoiceNumber} — ${tx.agentName}`, "");
+    let workingList = commissionTransactions;
+    if (existing) {
+      const cancelled = { ...existing, status: "Cancelled", remainingAmount: 0, cancelReason: "Commission agent changed on invoice" };
+      workingList = workingList.map((t) => (t.id === existing.id ? cancelled : t));
+      logAudit("Commission Cancelled", `${existing.invoiceNumber} — ${existing.agentName}`, "Commission agent changed on invoice");
+    }
+    if (total > 0) {
+      const tx = {
+        id: uid("ctx"), agentId: agent.id, agentName: agent.name,
+        invoiceId: inv.id, invoiceNumber: inv.number, customerId: inv.customerId, customerName: inv.customerName,
+        invoiceDate: inv.date, saleAmount: inv.subtotal,
+        commissionType: lines.length === 1 ? lines[0].commissionType : "mixed",
+        commissionRate: lines.length === 1 ? lines[0].commissionRate : 0,
+        commissionAmount: total, breakdown: lines, paidAmount: 0, remainingAmount: total,
+        status: "Pending", createdAt: new Date().toISOString(),
+      };
+      workingList = [...workingList, tx];
+      logAudit("Commission Created", `${tx.invoiceNumber} — ${agent.name}`, `Commission ${fmtMoney(total)} generated`);
+    }
+    persist.commissionTransactions(workingList);
   }
 
+  function recalcCommissionAfterReturnOrExchange(invoiceId, nextReturns, nextExchanges) {
+    const inv = invoices.find((i) => i.id === invoiceId);
+    if (!inv || !inv.commissionAgentId) return;
+    const existing = commissionTransactions.find((tx) => tx.invoiceId === invoiceId && tx.status !== "Cancelled");
+    if (!existing) return;
+    const agent = commissionAgents.find((a) => a.id === inv.commissionAgentId);
+    if (!agent) return;
+    const { total, lines } = recalculatedCommissionAmount(agent, commissionRules, inv, nextReturns, nextExchanges);
+    const paid = Number(existing.paidAmount) || 0;
+    const remaining = Math.max(0, roundMoney(total - paid));
+    const updated = {
+      ...existing, commissionAmount: total, breakdown: lines, remainingAmount: remaining,
+      status: existing.status === "Paid" && remaining > 0 ? "Approved" : existing.status,
+    };
+    persist.commissionTransactions(commissionTransactions.map((t) => (t.id === existing.id ? updated : t)));
+    logAudit("Commission Adjusted", `${existing.invoiceNumber} — ${agent.name}`, "Recalculated after return/exchange");
+  }
+
+  /* ---------- Invoices ---------- */
   function saveInvoice(inv) {
     persist.invoices([...invoices, inv]);
-    createOrUpdateCommissionForInvoice(inv);
     persist.settings({ ...settings, invoiceCounter: settings.invoiceCounter + 1 });
     if (inv.paymentReceived > 0) {
       persist.payments([...payments, {
-        id: uid("pay"), customerId: inv.customerId, customerName: inv.customerName,
-        date: inv.date, amount: inv.paymentReceived, method: "Cash", note: `Against ${inv.number}`, invoiceId: inv.id,
-        branchId: inv.branchId || "",
+        id: uid("pay"), customerId: inv.customerId, customerName: inv.customerName, date: inv.date,
+        amount: inv.paymentReceived, method: "Cash", note: `Against ${inv.number}`, invoiceId: inv.id, branchId: inv.branchId || "",
       }]);
     }
+    syncCommissionForInvoice(inv);
+    logAudit("Invoice Created", inv.number, "");
   }
 
-  function openLedger(customerId) { setLedgerFocusId(customerId); setPage("ledger"); }
-
-  // ---------- Phase 2: Sales Return / Exchange / Credit Notes ----------
-
-  function createSalesReturn(data) {
-    const counter = settings.returnCounter || 1;
-    const invoice = invoices.find((i) => i.id === data.invoiceId);
-    const code = invoice ? `RET-${invoice.number.replace(/^CT-/, "")}-${String(counter).padStart(2, "0")}` : "RET-" + String(counter).padStart(4, "0");
-    const ret = { id: uid("ret"), code, status: "Active", ...data };
-
-    const cnCounter = settings.creditNoteCounter || 1;
-    const cnNumber = "CN-" + String(cnCounter).padStart(4, "0");
-    const creditNote = {
-      id: uid("cn"), number: cnNumber, date: data.date, customerId: data.customerId, customerName: data.customerName,
-      amount: data.amount, reason: `Sales Return ${code}`, status: "Issued", sourceReturnId: ret.id,
-      linkedInvoiceNumber: "",
+  function updateInvoice(inv, original) {
+    const editEntry = {
+      action: "Edited", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString(),
+      previousValues: { total: original.total, status: original.status },
+      newValues: { total: inv.total, status: inv.status },
     };
-
-    persist.returns([...returns, ret]);
-    persist.creditNotes([...creditNotes, creditNote]);
-    const commissionTx = commissionTransactions.find(t => t.invoiceId === data.invoiceId && t.status !== "cancelled");
-    if (commissionTx && Number(invoice?.total) > 0) {
-      const ratio = Math.min(1, Number(data.amount || 0) / Number(invoice.total));
-      const reduction = roundMoney(Number(commissionTx.commissionAmount || 0) * ratio);
-      const adjustedAmount = Math.max(0, roundMoney(Number(commissionTx.commissionAmount || 0) - reduction));
-      const paid = Number(commissionTx.paidAmount || 0);
-      persist.commissionTransactions(upsert(commissionTransactions, { ...commissionTx, commissionAmount: adjustedAmount, remainingAmount: Math.max(0, adjustedAmount-paid), status: adjustedAmount <= paid ? "paid" : commissionTx.status, updatedAt: new Date().toISOString(), returnAdjusted: true }));
+    const finalInv = { ...inv, editHistory: [...(original.editHistory || []), editEntry] };
+    persist.invoices(invoices.map((i) => (i.id === inv.id ? finalInv : i)));
+    const linkedPayment = payments.find((p) => p.invoiceId === inv.id || p.note === `Against ${original.number}`);
+    if (inv.paymentReceived !== original.paymentReceived) {
+      if (linkedPayment) {
+        persist.payments(payments.map((p) => (p === linkedPayment ? { ...p, amount: inv.paymentReceived, invoiceId: inv.id, note: `Against ${inv.number}` } : p)));
+      } else if (inv.paymentReceived > 0) {
+        persist.payments([...payments, { id: uid("pay"), customerId: inv.customerId, customerName: inv.customerName, date: inv.date, amount: inv.paymentReceived, method: "Cash", note: `Against ${inv.number}`, invoiceId: inv.id, branchId: inv.branchId || "" }]);
+      }
     }
-    persist.settings({ ...settings, returnCounter: counter + 1, creditNoteCounter: cnCounter + 1 });
-    logAudit("Sales Return", `${code} (Invoice ${data.invoiceNumber})`, data.reason);
+    syncCommissionForInvoice(finalInv);
+    logAudit("Invoice Edited", inv.number, "");
+  }
 
-    const inv = invoices.find((i) => i.id === data.invoiceId);
-    if (inv) {
-      const newStatus = computeInvoiceReturnStatus({ ...inv }, [...returns, ret], exchanges).status;
-      logAudit("Invoice Status Change", `${inv.number} → ${newStatus}`, `Auto-updated after Sales Return ${code}`);
+  function cancelInvoiceFn(inv) {
+    const editEntry = { action: "Cancelled", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString() };
+    const updated = { ...inv, docStatus: "Cancelled", editHistory: [...(inv.editHistory || []), editEntry] };
+    persist.invoices(invoices.map((i) => (i.id === inv.id ? updated : i)));
+    const linkedTx = commissionTransactions.find((tx) => tx.invoiceId === inv.id && tx.status !== "Cancelled");
+    if (linkedTx) {
+      const updatedTx = { ...linkedTx, status: "Cancelled", remainingAmount: 0, cancelReason: "Invoice cancelled" };
+      persist.commissionTransactions(commissionTransactions.map((t) => (t.id === linkedTx.id ? updatedTx : t)));
+      logAudit("Commission Cancelled", `${linkedTx.invoiceNumber} — ${linkedTx.agentName}`, "Invoice cancelled");
     }
+    logAudit("Invoice Cancelled", inv.number, "");
   }
 
-  // Delete Return (Feature 6): reverse ledger (automatic via computeLedger
-  // excluding non-Active returns), restore invoice qty/status (automatic via
-  // computeInvoiceReturnStatus), and reverse the linked Credit Note.
-  function deleteSalesReturn(ret, reason) {
-    const finalRet = {
-      ...ret, status: "Deleted", deletedBy: currentUser?.name || currentUser?.username || "Unknown",
-      deletedAt: new Date().toISOString(), deleteReason: reason,
-    };
-    persist.returns(upsert(returns, finalRet));
-    const linkedCn = creditNotes.find((cn) => cn.sourceReturnId === ret.id);
-    if (linkedCn) persist.creditNotes(upsert(creditNotes, { ...linkedCn, status: "Reversed" }));
-    logAudit("Delete Return", `${ret.code} (Invoice ${ret.invoiceNumber})`, reason);
-    const inv = invoices.find((i) => i.id === ret.invoiceId);
-    if (inv) {
-      const newStatus = computeInvoiceReturnStatus(inv, upsert(returns, finalRet), exchanges).status;
-      logAudit("Invoice Status Change", `${inv.number} → ${newStatus}`, `Auto-updated after deleting Return ${ret.code}`);
+  function savePayment(p) {
+    persist.payments([...payments, p]);
+    if (p.promiseId) {
+      const promise = promises.find((pr) => pr.id === p.promiseId);
+      if (promise) {
+        const nextPaid = roundMoney((Number(promise.paidAmount) || 0) + p.amount);
+        persist.promises(promises.map((pr) => (pr.id === promise.id ? { ...pr, paidAmount: nextPaid } : pr)));
+      }
     }
+    logAudit("Payment Recorded", p.customerName, fmtMoney(p.amount));
   }
 
-  function createExchangeFn(data) {
-    const counter = settings.exchangeCounter || 1;
-    const invoice = invoices.find((i) => i.id === data.invoiceId);
-    const code = invoice ? `EX-${invoice.number.replace(/^CT-/, "")}-${String(counter).padStart(2, "0")}` : "EXC-" + String(counter).padStart(4, "0");
-    const exchange = { id: uid("exc"), code, status: "Active", ...data };
-    persist.exchanges([...exchanges, exchange]);
-    persist.settings({ ...settings, exchangeCounter: counter + 1 });
-    logAudit("Exchange", `${code} (Invoice ${data.invoiceNumber})`, data.reason);
-    const inv = invoices.find((i) => i.id === data.invoiceId);
-    if (inv) {
-      const newStatus = computeInvoiceReturnStatus(inv, returns, [...exchanges, exchange]).status;
-      logAudit("Invoice Status Change", `${inv.number} → ${newStatus}`, `Auto-updated after Exchange ${code}`);
+  /* ---------- Sales Return / Exchange ---------- */
+  function onCreateReturn(data) {
+    const returnCode = "RET-" + String(settings.returnCounter).padStart(4, "0");
+    const record = { id: uid("ret"), code: returnCode, status: "Active", ...data };
+    const nextReturns = [...returns, record];
+    persist.returns(nextReturns);
+
+    const cnNumber = "CN-" + String(settings.creditNoteCounter).padStart(4, "0");
+    const cn = { id: uid("cn"), number: cnNumber, date: data.date, customerId: data.customerId, customerName: data.customerName, amount: data.amount, reason: data.reason, status: "Active", linkedInvoiceNumber: "", returnId: record.id };
+    persist.creditNotes([...creditNotes, cn]);
+
+    persist.settings({ ...settings, returnCounter: settings.returnCounter + 1, creditNoteCounter: settings.creditNoteCounter + 1 });
+
+    recalcCommissionAfterReturnOrExchange(data.invoiceId, nextReturns, exchanges);
+    logAudit("Sales Return", returnCode, data.reason);
+  }
+
+  function onDeleteReturn(record, reason) {
+    const updated = { ...record, status: "Deleted", deleteReason: reason };
+    const nextReturns = returns.map((r) => (r.id === record.id ? updated : r));
+    persist.returns(nextReturns);
+    const linkedCn = creditNotes.find((cn) => cn.returnId === record.id);
+    if (linkedCn) persist.creditNotes(creditNotes.map((cn) => (cn.id === linkedCn.id ? { ...cn, status: "Reversed" } : cn)));
+    recalcCommissionAfterReturnOrExchange(record.invoiceId, nextReturns, exchanges);
+    logAudit("Sales Return Deleted", record.code, reason);
+  }
+
+  function onCreateExchange(data) {
+    const code = "EX-" + String(settings.exchangeCounter).padStart(4, "0");
+    const record = { id: uid("ex"), code, status: "Active", ...data };
+    const nextExchanges = [...exchanges, record];
+    persist.exchanges(nextExchanges);
+    persist.settings({ ...settings, exchangeCounter: settings.exchangeCounter + 1 });
+    recalcCommissionAfterReturnOrExchange(data.invoiceId, returns, nextExchanges);
+    logAudit("Exchange", code, data.reason);
+  }
+
+  function onDeleteExchange(record, reason) {
+    const updated = { ...record, status: "Deleted", deleteReason: reason };
+    const nextExchanges = exchanges.map((ex) => (ex.id === record.id ? updated : ex));
+    persist.exchanges(nextExchanges);
+    recalcCommissionAfterReturnOrExchange(record.invoiceId, returns, nextExchanges);
+    logAudit("Exchange Deleted", record.code, reason);
+  }
+
+  function onLinkCreditNoteInvoice(cnId, invoiceNumber) {
+    persist.creditNotes(creditNotes.map((cn) => (cn.id === cnId ? { ...cn, linkedInvoiceNumber: invoiceNumber } : cn)));
+  }
+
+  /* ---------- Outstanding Transfer / Adjustments ---------- */
+  function onCreateTransfer(data) {
+    const code = "OT-" + String(settings.transferCounter).padStart(4, "0");
+    const record = { id: uid("tr"), code, date: todayISO(), status: "Active", createdBy: currentUser?.name || currentUser?.username, ...data };
+    persist.transfers([...transfers, record]);
+    persist.settings({ ...settings, transferCounter: settings.transferCounter + 1 });
+    logAudit("Outstanding Transfer", code, data.reason);
+  }
+  function onReverseTransfer(record, reason) {
+    persist.transfers(transfers.map((t) => (t.id === record.id ? { ...t, status: "Reversed", reverseReason: reason } : t)));
+    logAudit("Outstanding Transfer Reversed", record.code, reason);
+  }
+
+  function onCreateAdjustment(data) {
+    const code = "ADJ-" + String(settings.adjustmentCounter).padStart(4, "0");
+    const record = { id: uid("adj"), code, status: "Active", createdBy: currentUser?.name || currentUser?.username, ...data };
+    persist.adjustments([...adjustments, record]);
+    persist.settings({ ...settings, adjustmentCounter: settings.adjustmentCounter + 1 });
+    logAudit("Adjustment Created", code, data.reason);
+  }
+  function onUpdateAdjustment(original, data) {
+    persist.adjustments(adjustments.map((a) => (a.id === original.id ? { ...original, ...data } : a)));
+    logAudit("Adjustment Updated", original.code, data.reason);
+  }
+  function onReverseAdjustment(record, reason) {
+    persist.adjustments(adjustments.map((a) => (a.id === record.id ? { ...a, status: "Reversed", reverseReason: reason } : a)));
+    logAudit("Adjustment Reversed", record.code, reason);
+  }
+
+  /* ---------- Promise To Pay ---------- */
+  function onCreatePromise(data) {
+    const code = "PTP-" + String(settings.promiseCounter).padStart(4, "0");
+    const record = { id: uid("ptp"), code, status: "Pending", paidAmount: 0, ...data };
+    persist.promises([...promises, record]);
+    persist.settings({ ...settings, promiseCounter: settings.promiseCounter + 1 });
+    logAudit("Promise Created", code, fmtMoney(data.amount));
+  }
+  function onUpdatePromise(original, data) {
+    persist.promises(promises.map((p) => (p.id === original.id ? { ...original, ...data } : p)));
+    logAudit("Promise Updated", original.code, "");
+  }
+  function onCancelPromise(record, reason) {
+    persist.promises(promises.map((p) => (p.id === record.id ? { ...p, status: "Cancelled", cancelReason: reason } : p)));
+    logAudit("Promise Cancelled", record.code, reason);
+  }
+
+  /* ---------- Bookings / Orders ---------- */
+  function onCreateAdvanceBooking(data) {
+    const code = "BK-" + String(settings.bookingCounter).padStart(4, "0");
+    const record = { id: uid("bk"), code, status: "Booked", expiryDate: addOneMonth(data.date), ...data };
+    persist.bookings([...bookings, record]);
+    persist.settings({ ...settings, bookingCounter: settings.bookingCounter + 1 });
+    logAudit("Advance Booking Created", code, "");
+  }
+  function saveBooking(b) { persist.bookings(bookings.map((x) => (x.id === b.id ? b : x))); }
+  function onBookingFulfilled(id) { persist.bookings(bookings.map((b) => (b.id === id ? { ...b, status: "Completed" } : b))); }
+
+  function onCreateOrder(data) {
+    const code = "ORD-" + String(settings.orderCounter).padStart(4, "0");
+    const record = { id: uid("ord"), code, status: "Pending", ...data };
+    persist.orders([...orders, record]);
+    persist.settings({ ...settings, orderCounter: settings.orderCounter + 1 });
+    logAudit("Order Created", code, "");
+  }
+  function saveOrder(o) { persist.orders(orders.map((x) => (x.id === o.id ? o : x))); }
+  function onOrderFulfilled(id) { persist.orders(orders.map((o) => (o.id === id ? { ...o, status: "Completed" } : o))); }
+
+  function convertBookingToInvoice(b) {
+    setPrefill({ sourceType: "booking", sourceId: b.id, sourceCode: b.code, customerId: b.customerId, productId: b.productId, productName: b.productName, unit: b.unit, qty: b.qty, rate: b.rate });
+    setPage("invoices");
+  }
+  function convertOrderToInvoice(o) {
+    const product = products.find((p) => p.id === o.productId);
+    setPrefill({ sourceType: "order", sourceId: o.id, sourceCode: o.code, customerId: o.customerId, productId: o.productId, productName: o.productName, unit: o.unit, qty: o.qty, rate: product ? product.price : 0 });
+    setPage("invoices");
+  }
+
+  /* ---------- Leads / Products / Drivers / Offers ---------- */
+  function saveLead(l) {
+    const exists = leads.some((x) => x.id === l.id);
+    persist.leads(exists ? leads.map((x) => (x.id === l.id ? l : x)) : [...leads, l]);
+  }
+  function deleteLead(id) { persist.leads(leads.filter((l) => l.id !== id)); }
+
+  function saveProduct(p) {
+    const exists = products.some((x) => x.id === p.id);
+    persist.products(exists ? products.map((x) => (x.id === p.id ? p : x)) : [...products, p]);
+  }
+  function deleteProduct(id) { persist.products(products.filter((p) => p.id !== id)); }
+
+  function saveDriver(d) {
+    const exists = drivers.some((x) => x.id === d.id);
+    persist.drivers(exists ? drivers.map((x) => (x.id === d.id ? d : x)) : [...drivers, d]);
+    if (!exists) persist.settings({ ...settings, driverCounter: settings.driverCounter + 1 });
+  }
+  function deleteDriver(id) { persist.drivers(drivers.filter((d) => d.id !== id)); }
+
+  function saveOffer(o) {
+    const exists = offers.some((x) => x.id === o.id);
+    persist.offers(exists ? offers.map((x) => (x.id === o.id ? o : x)) : [...offers, o]);
+  }
+  function deleteOffer(id) { persist.offers(offers.filter((o) => o.id !== id)); }
+
+  /* ---------- Branches / Users / Settings / Backup ---------- */
+  function saveBranch(b) { persist.branches([...branches, b]); }
+  function deleteBranch(id) { persist.branches(branches.filter((b) => b.id !== id)); }
+  function saveUser(u) {
+    const exists = users.some((x) => x.id === u.id);
+    persist.users(exists ? users.map((x) => (x.id === u.id ? u : x)) : [...users, u]);
+  }
+  function deleteUser(id) { persist.users(users.filter((u) => u.id !== id)); }
+  function onResetUsers() { persist.users(DEFAULT_USERS); }
+  function saveSettings(s) { persist.settings(s); }
+
+  function exportBackup() {
+    const data = {
+      users, customers, invoices, payments, returns, exchanges, creditNotes, promises, transfers, adjustments,
+      leads, products, drivers, offers, bookings, orders, settings, branches, auditLog,
+      commissionAgents, commissionRules, commissionTransactions, commissionPayments,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `chaudhary_traders_backup_${todayISO()}.json`; a.click();
+    URL.revokeObjectURL(url);
+  }
+  function onRestoreBackup(data) {
+    if (data.users) persist.users(data.users);
+    if (data.customers) persist.customers(data.customers);
+    if (data.invoices) persist.invoices(data.invoices);
+    if (data.payments) persist.payments(data.payments);
+    if (data.returns) persist.returns(data.returns);
+    if (data.exchanges) persist.exchanges(data.exchanges);
+    if (data.creditNotes) persist.creditNotes(data.creditNotes);
+    if (data.promises) persist.promises(data.promises);
+    if (data.transfers) persist.transfers(data.transfers);
+    if (data.adjustments) persist.adjustments(data.adjustments);
+    if (data.leads) persist.leads(data.leads);
+    if (data.products) persist.products(data.products);
+    if (data.drivers) persist.drivers(data.drivers);
+    if (data.offers) persist.offers(data.offers);
+    if (data.bookings) persist.bookings(data.bookings);
+    if (data.orders) persist.orders(data.orders);
+    if (data.settings) persist.settings({ ...DEFAULT_SETTINGS, ...data.settings });
+    if (data.branches) persist.branches(data.branches);
+    if (data.auditLog) persist.auditLog(data.auditLog);
+    if (data.commissionAgents) persist.commissionAgents(data.commissionAgents);
+    if (data.commissionRules) persist.commissionRules(data.commissionRules);
+    if (data.commissionTransactions) persist.commissionTransactions(data.commissionTransactions);
+    if (data.commissionPayments) persist.commissionPayments(data.commissionPayments);
+  }
+
+  /* ---------- Commission Management handlers ---------- */
+  function createCommissionAgent(data) {
+    const code = nextCommissionAgentCode();
+    const agent = { id: code, ...data, createdAt: todayISO(), createdBy: currentUser?.name || currentUser?.username };
+    persist.commissionAgents([...commissionAgents, agent]);
+    persist.settings({ ...settings, commissionAgentCounter: (settings.commissionAgentCounter || 1) + 1 });
+    logAudit("Commission Agent Created", agent.id, agent.name);
+  }
+  function updateCommissionAgent(original, data) {
+    const updated = { ...original, ...data };
+    persist.commissionAgents(commissionAgents.map((a) => (a.id === original.id ? updated : a)));
+    logAudit("Commission Agent Updated", original.id, updated.name);
+  }
+  function toggleCommissionAgentStatus(agent) {
+    const nextStatus = agent.status === "Active" ? "Inactive" : "Active";
+    persist.commissionAgents(commissionAgents.map((a) => (a.id === agent.id ? { ...a, status: nextStatus } : a)));
+    logAudit(nextStatus === "Active" ? "Commission Agent Activated" : "Commission Agent Deactivated", agent.id, agent.name);
+  }
+
+  function createCommissionRule(data) {
+    const rule = { id: uid("crule"), ...data, createdAt: todayISO() };
+    persist.commissionRules([...commissionRules, rule]);
+    logAudit("Commission Rule Created", rule.agentId, `${rule.productMatch} — ${fmtCommissionRate(rule.commissionType, rule.commissionRate)}`);
+  }
+  function updateCommissionRule(original, data) {
+    const updated = { ...original, ...data };
+    persist.commissionRules(commissionRules.map((r) => (r.id === original.id ? updated : r)));
+    logAudit("Commission Rule Updated", original.agentId, `${updated.productMatch} — ${fmtCommissionRate(updated.commissionType, updated.commissionRate)}`);
+  }
+
+  function approveCommissionTransaction(tx) {
+    const updated = { ...tx, status: "Approved" };
+    persist.commissionTransactions(commissionTransactions.map((t) => (t.id === tx.id ? updated : t)));
+    logAudit("Commission Approved", `${tx.invoiceNumber} — ${tx.agentName}`, "");
+  }
+  function cancelCommissionTransaction(tx, reason) {
+    const updated = { ...tx, status: "Cancelled", remainingAmount: 0, cancelReason: reason };
+    persist.commissionTransactions(commissionTransactions.map((t) => (t.id === tx.id ? updated : t)));
+    logAudit("Commission Cancelled", `${tx.invoiceNumber} — ${tx.agentName}`, reason);
+  }
+
+  function payCommissionTransaction(tx, data) {
+    const paidAmount = roundMoney((Number(tx.paidAmount) || 0) + data.amount);
+    const remainingAmount = Math.max(0, roundMoney(tx.commissionAmount - paidAmount));
+    const updated = { ...tx, paidAmount, remainingAmount, status: remainingAmount <= 0 ? "Paid" : tx.status };
+    persist.commissionTransactions(commissionTransactions.map((t) => (t.id === tx.id ? updated : t)));
+    const payment = {
+      id: uid("cpay"), agentId: tx.agentId, agentName: tx.agentName,
+      date: data.date, amount: data.amount, method: data.method,
+      referenceNumber: data.referenceNumber, notes: data.notes,
+      allocations: [{ transactionId: tx.id, amount: data.amount }],
+      createdBy: currentUser?.name || currentUser?.username, createdAt: new Date().toISOString(),
+    };
+    persist.commissionPayments([...commissionPayments, payment]);
+    logAudit("Commission Paid", `${tx.invoiceNumber} — ${tx.agentName}`, fmtMoney(data.amount));
+  }
+
+  function payCommissionAgent(agent, data) {
+    const eligible = commissionTransactions
+      .filter((tx) => tx.agentId === agent.id && tx.status === "Approved" && tx.remainingAmount > 0)
+      .sort((a, b) => new Date(a.invoiceDate) - new Date(b.invoiceDate));
+    let amountLeft = data.amount;
+    const allocations = [];
+    const updates = {};
+    for (const tx of eligible) {
+      if (amountLeft <= 0) break;
+      const applied = Math.min(amountLeft, tx.remainingAmount);
+      const paidAmount = roundMoney((Number(tx.paidAmount) || 0) + applied);
+      const remainingAmount = Math.max(0, roundMoney(tx.commissionAmount - paidAmount));
+      updates[tx.id] = { ...tx, paidAmount, remainingAmount, status: remainingAmount <= 0 ? "Paid" : tx.status };
+      allocations.push({ transactionId: tx.id, amount: roundMoney(applied) });
+      amountLeft = roundMoney(amountLeft - applied);
     }
-  }
-
-  // Delete Exchange (Feature 7): reverse ledger + restore quantities/status
-  // automatically since computeLedgerForCustomer and
-  // computeInvoiceReturnStatus both ignore non-Active exchanges.
-  function deleteExchangeFn(exchange, reason) {
-    const finalEx = {
-      ...exchange, status: "Deleted", deletedBy: currentUser?.name || currentUser?.username || "Unknown",
-      deletedAt: new Date().toISOString(), deleteReason: reason,
+    persist.commissionTransactions(commissionTransactions.map((t) => updates[t.id] || t));
+    const payment = {
+      id: uid("cpay"), agentId: agent.id, agentName: agent.name,
+      date: data.date, amount: data.amount, method: data.method,
+      referenceNumber: data.referenceNumber, notes: data.notes,
+      allocations, createdBy: currentUser?.name || currentUser?.username, createdAt: new Date().toISOString(),
     };
-    persist.exchanges(upsert(exchanges, finalEx));
-    logAudit("Delete Exchange", `${exchange.code} (Invoice ${exchange.invoiceNumber})`, reason);
-    const inv = invoices.find((i) => i.id === exchange.invoiceId);
-    if (inv) {
-      const newStatus = computeInvoiceReturnStatus(inv, returns, upsert(exchanges, finalEx)).status;
-      logAudit("Invoice Status Change", `${inv.number} → ${newStatus}`, `Auto-updated after deleting Exchange ${exchange.code}`);
-    }
+    persist.commissionPayments([...commissionPayments, payment]);
+    logAudit("Commission Paid", agent.name, fmtMoney(data.amount));
   }
 
-  function linkCreditNoteToInvoice(creditNoteId, invoiceNumber) {
-    const cn = creditNotes.find((c) => c.id === creditNoteId);
-    if (!cn) return;
-    persist.creditNotes(upsert(creditNotes, { ...cn, linkedInvoiceNumber: invoiceNumber }));
-  }
+  /* ---------- Branch-scoped visibility ---------- */
+  // Products, drivers, and the entire Commission module stay global/
+  // unscoped (same as the pre-existing pattern for products/drivers) —
+  // only customers/invoices/payments are filtered per-branch for staff
+  // who are assigned to a specific branch.
+  const isBranchScoped = currentUser && currentUser.role !== "admin" && !!currentUser.branchId;
+  const visibleCustomers = isBranchScoped ? customers.filter((c) => c.branchId === currentUser.branchId) : customers;
+  const visibleCustomerIds = new Set(visibleCustomers.map((c) => c.id));
+  const visibleInvoices = isBranchScoped
+    ? invoices.filter((i) => (i.branchId ? i.branchId === currentUser.branchId : visibleCustomerIds.has(i.customerId)))
+    : invoices;
+  const visiblePayments = isBranchScoped
+    ? payments.filter((p) => (p.branchId ? p.branchId === currentUser.branchId : visibleCustomerIds.has(p.customerId)))
+    : payments;
 
-  // ---------- Phase 3: Promise To Pay ----------
-
-  // Feature 2 / 3 — Create Promise (auto-numbered PTP-xxxx, one customer
-  // can have many). Feature 14 — reminder fields prepared but unused.
-  function createPromise(data) {
-    const counter = settings.promiseCounter || 1;
-    const code = "PTP-" + String(counter).padStart(4, "0");
-    const promise = promiseWithComputed({
-      id: uid("ptp"), code, ...data,
-      paidAmount: 0,
-      createdBy: currentUser?.name || currentUser?.username || "Unknown",
-      createdAt: new Date().toISOString(),
-      status: "Pending",
-      lastReminderDate: "",
-      reminderCount: 0,
-      reminderStatus: "Not Sent",
-    });
-    persist.promises([...promises, promise]);
-    persist.settings({ ...settings, promiseCounter: counter + 1 });
-    logAudit("Promise Created", `${code} — ${data.customerName} — Rs ${Number(data.amount).toLocaleString()}`, "");
-  }
-
-  function updatePromiseFn(promise, reason) {
-    const updated = promiseWithComputed(promise);
-    persist.promises(upsert(promises, updated));
-    const action = updated.status === "Completed" ? "Promise Completed" : "Promise Edited";
-    logAudit(action, `${updated.code} — ${updated.customerName}`, reason || "");
-  }
-
-  function cancelPromiseFn(promise, reason) {
-    const updated = { ...promise, status: "Cancelled" };
-    persist.promises(upsert(promises, updated));
-    logAudit("Promise Cancelled", `${promise.code} — ${promise.customerName}`, reason);
-  }
-
-  // Delete Promise (Feature 16 / admin-only per Feature 18): soft-delete so
-  // it disappears from lists/ledger (computeLedgerForCustomer already
-  // filters status !== "Deleted") without losing the audit trail.
-  function deletePromiseFn(promise, reason) {
-    const updated = {
-      ...promise, status: "Deleted",
-      deletedBy: currentUser?.name || currentUser?.username || "Unknown",
-      deletedAt: new Date().toISOString(), deleteReason: reason,
-    };
-    persist.promises(upsert(promises, updated));
-    logAudit("Promise Deleted", `${promise.code} — ${promise.customerName}`, reason);
-  }
-
-  // Feature 11 — Auto Status sweep. Runs whenever promises load/change so
-  // that Pending/Partially Paid promises whose Expected Date has passed
-  // flip to "Broken Promise" without requiring a manual save.
-  useEffect(() => {
-    if (loading || promises.length === 0) return;
-    let changed = false;
-    const swept = promises.map((p) => {
-      if (p.status === "Completed" || p.status === "Cancelled" || p.status === "Deleted") return p;
-      const computed = computePromiseStatus(p);
-      if (computed !== p.status) { changed = true; return { ...p, status: computed }; }
-      return p;
-    });
-    if (changed) persist.promises(swept);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, promises.length]);
-
-  // ---------- Outstanding Transfer ----------
-
-  // Create Outstanding Transfer — moves outstanding balance from one
-  // customer to another. This is NOT a payment: it never touches the
-  // payments table, and both sides' ledger entries are derived purely
-  // from the transfer record inside computeLedgerForCustomer.
-  function createOutstandingTransfer(data) {
-    const counter = settings.transferCounter || 1;
-    const code = "OT-" + String(counter).padStart(4, "0");
-    const transfer = {
-      id: uid("ot"), code, status: "Active", date: todayISO(),
-      ...data,
-      createdBy: currentUser?.name || currentUser?.username || "Unknown",
-      createdAt: new Date().toISOString(),
-    };
-    persist.outstandingTransfers([...outstandingTransfers, transfer]);
-    persist.settings({ ...settings, transferCounter: counter + 1 });
-    logAudit(
-      "Outstanding Transfer",
-      `${code} — ${data.fromCustomerName} → ${data.toCustomerName} — Rs ${Number(data.amount).toLocaleString()}`,
-      data.reason
-    );
-  }
-
-  // Reverse Outstanding Transfer (admin-only, per UI gating) — soft-marks
-  // the transfer as Reversed. Since computeLedgerForCustomer only counts
-  // "Active" transfers, this automatically restores both customers'
-  // balances to what they were before the transfer.
-  function reverseOutstandingTransfer(transfer, reason) {
-    const updated = {
-      ...transfer, status: "Reversed",
-      reversedBy: currentUser?.name || currentUser?.username || "Unknown",
-      reversedAt: new Date().toISOString(),
-      reverseReason: reason,
-    };
-    persist.outstandingTransfers(upsert(outstandingTransfers, updated));
-    logAudit(
-      "Outstanding Transfer Reversed",
-      `${transfer.code} — ${transfer.fromCustomerName} → ${transfer.toCustomerName}`,
-      reason
-    );
-  }
-
-  // ---------- Adjustment ----------
-
-  // Create Adjustment — manually increases ("Add") or decreases ("Reduce")
-  // a customer's outstanding balance for a real business reason (transport,
-  // labour, repair, discount, compensation, balance correction, etc).
-  // This is NOT a payment or invoice: it never touches the payments or
-  // invoices tables. Ledger effect is derived purely from this record
-  // inside computeLedgerForCustomer.
-  function createOutstandingAdjustment(data) {
-    const counter = settings.adjustmentCounter || 1;
-    const code = "ADJ-" + String(counter).padStart(4, "0");
-    const adjustment = {
-      id: uid("adj"), code, status: "Active",
-      ...data,
-      createdBy: currentUser?.name || currentUser?.username || "Unknown",
-      createdAt: new Date().toISOString(),
-      editHistory: [],
-    };
-    persist.adjustments([...adjustments, adjustment]);
-    persist.settings({ ...settings, adjustmentCounter: counter + 1 });
-    logAudit(
-      "Adjustment Created",
-      `${code} — ${data.customerName} — ${data.type === "Add" ? "+" : "-"}Rs ${Number(data.amount).toLocaleString()} (${data.category})`,
-      data.reason
-    );
-  }
-
-  // Edit Adjustment (admin-only, per UI gating) — updates the same Active
-  // record's type/amount/category/reason/note/date in place. Since the
-  // ledger balance is recomputed fresh from every active adjustment's
-  // current fields (never stored incrementally), this correctly "reverses
-  // the old amount and applies the new one" without corrupting the ledger.
-  // previousValues/newValues are kept in editHistory for a full audit trail.
-  function updateOutstandingAdjustment(original, data) {
-    const editedBy = currentUser?.name || currentUser?.username || "Unknown";
-    const editedAt = new Date().toISOString();
-    const previousValues = { type: original.type, amount: original.amount, category: original.category, reason: original.reason };
-    const newValues = { type: data.type, amount: data.amount, category: data.category, reason: data.reason };
-    const historyEntry = { action: "Edited", editedBy, editedAt, previousValues, newValues };
-    const updated = {
-      ...original, ...data,
-      editHistory: [...(original.editHistory || []), historyEntry],
-    };
-    persist.adjustments(upsert(adjustments, updated));
-    logAudit(
-      "Adjustment Edited",
-      `${original.code} — ${data.customerName} — ${data.type === "Add" ? "+" : "-"}Rs ${Number(data.amount).toLocaleString()} (${data.category})`,
-      `Was: ${original.type === "Add" ? "+" : "-"}Rs ${Number(original.amount).toLocaleString()} (${original.category})`
-    );
-  }
-
-  // Reverse Adjustment (admin-only, per UI gating) — soft-marks the
-  // adjustment as Reversed rather than deleting it. Since
-  // computeLedgerForCustomer only counts "Active" adjustments, this
-  // automatically restores the customer's balance to what it was before
-  // the adjustment while keeping both the original and the reversal
-  // visible in history/audit.
-  function reverseOutstandingAdjustment(adjustment, reason) {
-    const updated = {
-      ...adjustment, status: "Reversed",
-      reversedBy: currentUser?.name || currentUser?.username || "Unknown",
-      reversedAt: new Date().toISOString(),
-      reverseReason: reason,
-    };
-    persist.adjustments(upsert(adjustments, updated));
-    logAudit(
-      "Adjustment Reversed",
-      `${adjustment.code} — ${adjustment.customerName} — ${adjustment.type === "Add" ? "+" : "-"}Rs ${Number(adjustment.amount).toLocaleString()}`,
-      reason
-    );
-  }
-
-  // Feature 12: Global search — resolves INV-xxxx / RET-xxxx-xx / EX-xxxx-xx
-  // to the linked invoice and opens its detail (with full Return/Exchange history).
-  function runGlobalSearch(query) {
-    const q = query.trim().toUpperCase();
-    if (!q) return;
-    let invoiceId = null;
-    const invByNumber = invoices.find((i) => i.number.toUpperCase() === q);
-    if (invByNumber) invoiceId = invByNumber.id;
-    if (!invoiceId) {
-      const retMatch = returns.find((r) => r.code.toUpperCase() === q);
-      if (retMatch) invoiceId = retMatch.invoiceId;
-    }
-    if (!invoiceId) {
-      const exMatch = exchanges.find((ex) => ex.code.toUpperCase() === q);
-      if (exMatch) invoiceId = exMatch.invoiceId;
-    }
-    if (invoiceId) {
-      setPage("invoices");
-      setFocusInvoiceId(invoiceId);
-    } else if (promises.some((p) => p.code.toUpperCase() === q)) {
-      setPage("promises");
-    } else if (outstandingTransfers.some((t) => t.code.toUpperCase() === q)) {
-      setPage("outstandingTransfer");
-    } else if (adjustments.some((a) => a.code.toUpperCase() === q)) {
-      setPage("adjustments");
-    } else {
-      alert("Koi invoice, return, exchange, promise, transfer ya adjustment is number se nahi mila.");
-    }
-  }
-
-  function goToReturnInvoice(ret) { setPage("invoices"); setFocusInvoiceId(ret.invoiceId); }
-  function goToExchangeInvoice(ex) { setPage("invoices"); setFocusInvoiceId(ex.invoiceId); }
+  function handleLogin(user) { setCurrentUser(user); }
+  function handleLogout() { setCurrentUser(null); setPage("dashboard"); }
 
   if (loading) {
-    return <>
-      <I18nDomBridge />
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center text-slate-400 text-sm font-bold uppercase tracking-wide">Loading...</div>
-    </>;
+    return <div className="min-h-screen flex items-center justify-center bg-slate-100 text-slate-400 font-bold uppercase tracking-wide">Loading...</div>;
   }
+
   if (!currentUser) {
     return (
       <>
         <I18nDomBridge />
-        <Login
-        users={users}
-        customers={customers}
-        onLogin={setCurrentUser}
-        companyName={settings.companyName}
-        logoUrl={settings.logoUrl}
-        onResetUsers={() => persist.users(DEFAULT_USERS)}
-        />
+        <Login users={users} customers={customers} onLogin={handleLogin} companyName={settings.companyName} logoUrl={settings.logoUrl} onResetUsers={onResetUsers} />
       </>
     );
   }
@@ -6033,252 +6488,130 @@ export default function App() {
       <>
         <I18nDomBridge />
         <CustomerPortal
-        currentUser={currentUser}
-        customers={customers}
-        invoices={invoices}
-        payments={payments}
-        returns={returns}
-        exchanges={exchanges}
-        promises={promises}
-        transfers={outstandingTransfers}
-        adjustments={adjustments}
-        settings={settings}
-        offers={offers}
-        onLogout={() => setCurrentUser(null)}
+          currentUser={currentUser} customers={customers} invoices={invoices} payments={payments}
+          returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
+          offers={offers} settings={settings}
         />
       </>
     );
   }
 
-  function handleRestore(data) {
-    if (data.users) persist.users(data.users);
-    if (data.settings) persist.settings(data.settings);
-    if (data.customers) persist.customers(data.customers);
-    if (data.products) persist.products(data.products);
-    if (data.invoices) persist.invoices(data.invoices);
-    if (data.payments) persist.payments(data.payments);
-    if (data.bookings) persist.bookings(data.bookings);
-    if (data.leads) persist.leads(data.leads);
-    if (data.drivers) persist.drivers(data.drivers);
-    if (data.orders) persist.orders(data.orders);
-    if (data.branches) persist.branches(data.branches);
-    if (data.offers) persist.offers(data.offers);
-    if (data.returns) persist.returns(data.returns);
-    if (data.exchanges) persist.exchanges(data.exchanges);
-    if (data.creditNotes) persist.creditNotes(data.creditNotes);
-    if (data.auditLog) persist.auditLog(data.auditLog);
-    if (data.promises) persist.promises(data.promises);
-    if (data.outstandingTransfers) persist.outstandingTransfers(data.outstandingTransfers);
-    if (data.adjustments) persist.adjustments(data.adjustments);
-    if (data.commissionAgents) persist.commissionAgents(data.commissionAgents);
-    if (data.commissionRules) persist.commissionRules(data.commissionRules);
-    if (data.commissionTransactions) persist.commissionTransactions(data.commissionTransactions);
-    if (data.commissionPayments) persist.commissionPayments(data.commissionPayments);
-  }
-
-  // Invoice EDIT: recompute totals, keep number/id, tag docStatus, log history,
-  // and sync the "payment received now" record so ledger stays accurate.
-  function updateInvoice(newInv, oldInv) {
-    const editedBy = currentUser?.name || currentUser?.username || "Unknown";
-    const editedAt = new Date().toISOString();
-    const previousValues = {
-      customer: oldInv.customerName,
-      date: oldInv.date,
-      total: oldInv.total,
-      discount: oldInv.discount,
-      deliveryCharges: oldInv.deliveryCharges,
-      paymentReceived: oldInv.paymentReceived,
-    };
-    const newValues = {
-      customer: newInv.customerName,
-      date: newInv.date,
-      total: newInv.total,
-      discount: newInv.discount,
-      deliveryCharges: newInv.deliveryCharges,
-      paymentReceived: newInv.paymentReceived,
-    };
-    const historyEntry = { action: "Edited", editedBy, editedAt, previousValues, newValues };
-    const finalInv = {
-      ...newInv,
-      docStatus: oldInv.docStatus || "Active",
-      editHistory: [...(oldInv.editHistory || []), historyEntry],
-    };
-    persist.invoices(upsert(invoices, finalInv));
-    if (finalInv.commissionAgentId) {
-      createOrUpdateCommissionForInvoice(finalInv);
-    } else {
-      // If an edited invoice removes its commission agent, do not leave the
-      // old commission payable. Keep the transaction for audit history but
-      // mark it cancelled.
-      const oldCommission = commissionTransactions.find(t => t.invoiceId === oldInv.id && t.status !== "cancelled");
-      if (oldCommission) {
-        persist.commissionTransactions(upsert(commissionTransactions, {
-          ...oldCommission, status: "cancelled", remainingAmount: 0,
-          updatedAt: new Date().toISOString(), reason: "Commission agent removed from invoice"
-        }));
-      }
-    }
-
-    // Sync the payment record tied to this invoice (created at invoice time).
-    const existingPayment = payments.find(
-      (p) => p.invoiceId === oldInv.id || (p.note === `Against ${oldInv.number}` && p.customerId === oldInv.customerId)
-    );
-    let nextPayments = payments;
-    if (Number(newInv.paymentReceived) > 0) {
-      if (existingPayment) {
-        nextPayments = upsert(payments, {
-          ...existingPayment,
-          amount: Number(newInv.paymentReceived),
-          date: newInv.date,
-          customerId: newInv.customerId,
-          customerName: newInv.customerName,
-          note: `Against ${newInv.number}`,
-          invoiceId: newInv.id,
-        });
-      } else {
-        nextPayments = [...payments, {
-          id: uid("pay"), customerId: newInv.customerId, customerName: newInv.customerName,
-          date: newInv.date, amount: Number(newInv.paymentReceived), method: "Cash",
-          note: `Against ${newInv.number}`, invoiceId: newInv.id,
-        }];
-      }
-    } else if (existingPayment) {
-      nextPayments = payments.filter((p) => p.id !== existingPayment.id);
-    }
-    persist.payments(nextPayments);
-  }
-
-  // Invoice CANCEL: mark cancelled, log history. Ledger/dashboard update
-  // automatically because computeLedgerForCustomer excludes cancelled
-  // invoices (and their linked payment) from every calculation.
-  function cancelInvoiceFn(inv) {
-    const editedBy = currentUser?.name || currentUser?.username || "Unknown";
-    const editedAt = new Date().toISOString();
-    const historyEntry = {
-      action: "Cancelled", editedBy, editedAt,
-      previousValues: { status: "Active" }, newValues: { status: "Cancelled" },
-    };
-    const finalInv = { ...inv, docStatus: "Cancelled", editHistory: [...(inv.editHistory || []), historyEntry] };
-    persist.invoices(upsert(invoices, finalInv));
-    const commissionTx = commissionTransactions.find(t => t.invoiceId === inv.id);
-    if (commissionTx && commissionTx.status !== "paid") {
-      persist.commissionTransactions(upsert(commissionTransactions, { ...commissionTx, status: "cancelled", remainingAmount: 0, updatedAt: new Date().toISOString() }));
-    }
-    logAudit("Invoice Status Change", `${inv.number} → Cancelled`, "Manually cancelled");
-  }
-
-  // Branch scoping: users with a branchId only see their own branch's customer data.
-  // Users with no branchId (Super Admin) see everything across all branches.
-  const myBranchId = currentUser?.branchId || "";
-  const myBranchName = branches.find((b) => b.id === myBranchId)?.name || "";
-  const visibleCustomers = myBranchId ? customers.filter((c) => c.branchId === myBranchId) : customers;
-  const visibleCustomerIds = new Set(visibleCustomers.map((c) => c.id));
-  const visibleInvoices = myBranchId
-    ? invoices.filter((i) => visibleCustomerIds.has(i.customerId) || (i.customerType === "Cash" && i.branchId === myBranchId))
-    : invoices;
-  const visiblePayments = myBranchId
-    ? payments.filter((p) => visibleCustomerIds.has(p.customerId) || p.branchId === myBranchId)
-    : payments;
-  const visibleBookings = myBranchId ? bookings.filter((b) => visibleCustomerIds.has(b.customerId)) : bookings;
-  const visibleOrders = myBranchId ? orders.filter((o) => visibleCustomerIds.has(o.customerId)) : orders;
-  const visibleLeads = myBranchId ? leads.filter((l) => l.branchId === myBranchId) : leads;
-  const visibleReturns = myBranchId ? returns.filter((r) => visibleCustomerIds.has(r.customerId)) : returns;
-  const visibleExchanges = myBranchId ? exchanges.filter((e) => visibleCustomerIds.has(e.customerId)) : exchanges;
-  const visibleCreditNotes = myBranchId ? creditNotes.filter((c) => visibleCustomerIds.has(c.customerId)) : creditNotes;
-  const visiblePromises = myBranchId ? promises.filter((p) => visibleCustomerIds.has(p.customerId)) : promises;
-  const visibleTransfers = myBranchId
-    ? outstandingTransfers.filter((t) => visibleCustomerIds.has(t.fromCustomerId) || visibleCustomerIds.has(t.toCustomerId))
-    : outstandingTransfers;
-  const visibleAdjustments = myBranchId
-    ? adjustments.filter((a) => visibleCustomerIds.has(a.customerId))
-    : adjustments;
-  const visibleCommissionTransactions = myBranchId
-    ? commissionTransactions.filter((tx) => tx.branchId === myBranchId || visibleCustomerIds.has(tx.customerId))
-    : commissionTransactions;
+  const nextDriverCode = "DRV-" + String(settings.driverCounter).padStart(4, "0");
 
   const pages = {
-    dashboard: <Dashboard customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} leads={visibleLeads} bookings={visibleBookings} onOpenPromises={() => setPage("promises")} />,
+    dashboard: (
+      <Dashboard
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments}
+        returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
+        leads={leads} bookings={bookings} onOpenPromises={() => setPage("promises")}
+      />
+    ),
     customers: (
       <Customers
-        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments}
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments}
+        returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
         saveCustomer={saveCustomer} deleteCustomer={deleteCustomer} openLedger={openLedger}
         branches={branches} currentUser={currentUser}
       />
     ),
     invoices: (
       <Invoices
-        customers={visibleCustomers} products={products} drivers={drivers} invoices={visibleInvoices} payments={visiblePayments}
-        returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments}
-        bookings={visibleBookings} settings={settings} currentUser={currentUser}
-        commissionAgents={commissionAgents} commissionRules={commissionRules}
+        customers={visibleCustomers} products={products} drivers={drivers}
+        invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments}
+        commissionAgents={commissionAgents} commissionRules={commissionRules} commissionTransactions={commissionTransactions}
+        bookings={bookings} settings={settings} currentUser={currentUser}
         saveInvoice={saveInvoice} updateInvoice={updateInvoice} cancelInvoice={cancelInvoiceFn}
-        prefill={invoicePrefill} onClearPrefill={() => setInvoicePrefill(null)} onBookingFulfilled={markBookingFulfilled} onOrderFulfilled={markOrderFulfilled}
+        prefill={prefill} onClearPrefill={() => setPrefill(null)}
+        onBookingFulfilled={onBookingFulfilled} onOrderFulfilled={onOrderFulfilled}
         focusInvoiceId={focusInvoiceId} setFocusInvoiceId={setFocusInvoiceId}
-        onGoToReturn={goToReturnInvoice} onGoToExchange={goToExchangeInvoice}
+        onGoToReturn={() => setPage("returns")} onGoToExchange={() => setPage("exchange")}
       />
     ),
     invoiceHistory: <InvoiceHistoryPage invoices={visibleInvoices} auditLog={auditLog} />,
-    returns: <SalesReturnPage customers={visibleCustomers} invoices={visibleInvoices} returns={visibleReturns} exchanges={visibleExchanges} currentUser={currentUser} onCreateReturn={createSalesReturn} onDeleteReturn={deleteSalesReturn} />,
-    exchange: <ExchangePage customers={visibleCustomers} products={products} invoices={visibleInvoices} returns={visibleReturns} exchanges={visibleExchanges} currentUser={currentUser} onCreateExchange={createExchangeFn} onDeleteExchange={deleteExchangeFn} />,
-    creditNotes: <CreditNotesPage creditNotes={visibleCreditNotes} onLinkInvoice={linkCreditNoteToInvoice} />,
-    ledger: (
-      <LedgerView
-        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges}
-        promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments}
-        focusId={ledgerFocusId} setFocusId={setLedgerFocusId} settings={settings} currentUser={currentUser}
-        onCreateAdjustment={createOutstandingAdjustment} onUpdateAdjustment={updateOutstandingAdjustment} onReverseAdjustment={reverseOutstandingAdjustment}
+    returns: (
+      <SalesReturnPage
+        customers={visibleCustomers} invoices={visibleInvoices} returns={returns} exchanges={exchanges}
+        onCreateReturn={onCreateReturn} onDeleteReturn={onDeleteReturn} currentUser={currentUser}
       />
     ),
-    payments: <Payments customers={visibleCustomers} payments={visiblePayments} promises={visiblePromises} savePayment={savePayment} />,
-    commission: <CommissionPage agents={commissionAgents} rules={commissionRules} transactions={visibleCommissionTransactions} payments={commissionPayments} invoices={visibleInvoices} customers={visibleCustomers} products={products} currentUser={currentUser}
-      saveAgent={saveCommissionAgent} saveRule={saveCommissionRule} deactivateAgent={deactivateCommissionAgent} deleteRule={deleteCommissionRule}
-      approveCommission={approveCommission} payCommission={payCommission} cancelCommission={cancelCommission} onSync={syncCommissionFromInvoices} />,
+    exchange: (
+      <ExchangePage
+        customers={visibleCustomers} products={products} invoices={visibleInvoices} returns={returns} exchanges={exchanges}
+        onCreateExchange={onCreateExchange} onDeleteExchange={onDeleteExchange} currentUser={currentUser}
+      />
+    ),
+    creditNotes: <CreditNotesPage creditNotes={creditNotes} onLinkInvoice={onLinkCreditNoteInvoice} />,
+    ledger: (
+      <LedgerView
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments}
+        focusId={focusCustomerId || visibleCustomers[0]?.id} setFocusId={setFocusCustomerId}
+        settings={settings} currentUser={currentUser}
+        onCreateAdjustment={onCreateAdjustment} onUpdateAdjustment={onUpdateAdjustment} onReverseAdjustment={onReverseAdjustment}
+      />
+    ),
+    payments: <Payments customers={visibleCustomers} payments={visiblePayments} promises={promises} savePayment={savePayment} />,
     outstandingTransfer: (
       <OutstandingTransferPage
-        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns}
-        exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} currentUser={currentUser}
-        onCreateTransfer={createOutstandingTransfer} onReverseTransfer={reverseOutstandingTransfer}
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments} currentUser={currentUser}
+        onCreateTransfer={onCreateTransfer} onReverseTransfer={onReverseTransfer}
       />
     ),
     adjustments: (
       <AdjustmentsPage
-        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns}
-        exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} currentUser={currentUser}
-        onCreateAdjustment={createOutstandingAdjustment} onUpdateAdjustment={updateOutstandingAdjustment} onReverseAdjustment={reverseOutstandingAdjustment}
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments} currentUser={currentUser}
+        onCreateAdjustment={onCreateAdjustment} onUpdateAdjustment={onUpdateAdjustment} onReverseAdjustment={onReverseAdjustment}
+      />
+    ),
+    commission: (
+      <CommissionPage
+        agents={commissionAgents} rules={commissionRules} transactions={commissionTransactions} payments={commissionPayments}
+        products={products} invoices={invoices} currentUser={currentUser}
+        onCreateAgent={createCommissionAgent} onUpdateAgent={updateCommissionAgent} onToggleAgentStatus={toggleCommissionAgentStatus}
+        onCreateRule={createCommissionRule} onUpdateRule={updateCommissionRule}
+        onApproveTransaction={approveCommissionTransaction} onCancelTransaction={cancelCommissionTransaction}
+        onPayAgent={payCommissionAgent} onPayTransaction={payCommissionTransaction}
       />
     ),
     bookings: (
-      <Bookings
-        customers={visibleCustomers} products={products} bookings={visibleBookings} saveBooking={saveBooking}
-        onCreateAdvanceBooking={createAdvanceBooking} onConvertToInvoice={convertBookingToInvoice}
-      />
+      <Bookings customers={visibleCustomers} products={products} bookings={bookings} saveBooking={saveBooking}
+        onCreateAdvanceBooking={onCreateAdvanceBooking} onConvertToInvoice={convertBookingToInvoice} />
     ),
     orders: (
-      <Orders
-        customers={visibleCustomers} products={products} orders={visibleOrders}
-        onCreateOrder={createOrder} saveOrder={saveOrder} onConvertToInvoice={convertOrderToInvoice}
-      />
+      <Orders customers={visibleCustomers} products={products} orders={orders} onCreateOrder={onCreateOrder}
+        saveOrder={saveOrder} onConvertToInvoice={convertOrderToInvoice} />
     ),
     promises: (
       <PromiseToPayPage
-        customers={visibleCustomers} promises={visiblePromises} currentUser={currentUser}
-        onCreatePromise={createPromise} onUpdatePromise={updatePromiseFn}
-        onCancelPromise={cancelPromiseFn} onDeletePromise={deletePromiseFn}
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments} currentUser={currentUser}
+        onCreatePromise={onCreatePromise} onUpdatePromise={onUpdatePromise} onCancelPromise={onCancelPromise}
+        focusPromiseId={focusPromiseId} setFocusPromiseId={setFocusPromiseId}
       />
     ),
-    leads: <Leads leads={visibleLeads} saveLead={saveLead} deleteLead={deleteLead} />,
+    leads: <Leads leads={leads} saveLead={saveLead} deleteLead={deleteLead} />,
     products: <Products products={products} saveProduct={saveProduct} deleteProduct={deleteProduct} />,
-    drivers: <Drivers drivers={drivers} saveDriver={saveDriver} deleteDriver={deleteDriver} />,
+    drivers: <Drivers drivers={drivers} saveDriver={saveDriver} deleteDriver={deleteDriver} nextCode={nextDriverCode} />,
     offers: <Offers offers={offers} saveOffer={saveOffer} deleteOffer={deleteOffer} />,
-    reports: <Reports customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} leads={visibleLeads} bookings={visibleBookings} />,
-    assistant: <SalesAssistant customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} />,
-    estimator: <CementEstimator />,
+    reports: (
+      <Reports
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments} orders={orders}
+        commissionAgents={commissionAgents} commissionRules={commissionRules} commissionTransactions={commissionTransactions}
+        products={products}
+      />
+    ),
+    assistant: <SalesAssistant customers={visibleCustomers} />,
+    estimator: <CementEstimator settings={settings} />,
     settings: (
       <Settings
-        settings={settings} saveSettings={saveSettings} users={users} saveUser={saveUser} deleteUser={deleteUser}
-        currentUser={currentUser} onRestore={handleRestore}
-        allData={{ users, settings, customers, products, invoices, payments, bookings, leads, drivers, orders, branches, offers, returns, exchanges, creditNotes, auditLog, promises, outstandingTransfers, adjustments, commissionAgents, commissionRules, commissionTransactions, commissionPayments }}
+        settings={settings} saveSettings={saveSettings}
+        users={users} saveUser={saveUser} deleteUser={deleteUser}
         branches={branches} saveBranch={saveBranch} deleteBranch={deleteBranch}
+        onRestoreBackup={onRestoreBackup} exportBackup={exportBackup}
       />
     ),
   };
@@ -6286,49 +6619,20 @@ export default function App() {
   return (
     <>
       <I18nDomBridge />
-      <div className={`h-screen flex bg-slate-100 text-slate-900 ${language === "ur" ? "rtl-ui" : "ltr-ui"}`}>
-      <style>{`
-        .rtl-ui { direction: rtl; }
-        .rtl-ui input, .rtl-ui textarea, .rtl-ui select { direction: rtl; text-align: right; }
-        .rtl-ui table { direction: rtl; }
-        .rtl-ui .text-left { text-align: right; }
-        .rtl-ui .text-right { text-align: left; }
-        .rtl-ui .ml-2 { margin-left: 0; margin-right: 0.5rem; }
-        .rtl-ui .mr-3 { margin-right: 0; margin-left: 0.75rem; }
-        .rtl-ui .space-x-2 > :not([hidden]) ~ :not([hidden]) { margin-right: 0.5rem; margin-left: 0; }
-        @media print {
-          body * { visibility: hidden; }
-          #print-invoice, #print-invoice * { visibility: visible; }
-          #print-invoice { position: absolute; left: 0; top: 0; width: 100%; padding: 24px; }
-          #print-ledger, #print-ledger * { visibility: visible; }
-          #print-ledger { display: block !important; position: absolute; left: 0; top: 0; width: 100%; padding: 24px; }
-        }
-      `}</style>
-      <Sidebar page={page} setPage={setPage} role={currentUser.role} onLogout={() => setCurrentUser(null)} companyName={settings.companyName} logoUrl={settings.logoUrl} />
-      <div className="flex-1 overflow-y-auto">
-        <div className="flex items-center justify-between px-6 py-3 bg-white border-b border-slate-200 gap-4">
-          <div className="text-sm text-slate-500 whitespace-nowrap">
-            Welcome, <span className="font-bold text-slate-900">{currentUser.name}</span>
-            {myBranchName && <span className="ml-2 text-xs text-blue-700 font-bold uppercase">· {myBranchName}</span>}
-            {!myBranchId && <span className="ml-2 text-xs text-blue-700 font-bold uppercase">· All Branches</span>}
-          </div>
-          <div className="flex-1 max-w-xs">
-            <input
-              className={`${inputCls} text-xs`}
-              placeholder="Search INV-xxxx / RET-xxxx-xx / EX-xxxx-xx / PTP-xxxx / OT-xxxx / ADJ-xxxx..."
-              value={globalSearch}
-              onChange={(e) => setGlobalSearch(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") { runGlobalSearch(globalSearch); setGlobalSearch(""); } }}
-            />
-          </div>
-          <div className="flex items-center gap-3">
+      <div className="flex h-screen bg-slate-100 text-slate-900">
+        <Sidebar page={page} setPage={setPage} role={currentUser.role} onLogout={handleLogout} companyName={settings.companyName} logoUrl={settings.logoUrl} />
+        <div className="flex-1 overflow-y-auto">
+          <div className="flex items-center justify-end gap-3 px-6 py-2 border-b border-slate-200 bg-white print:hidden">
+            <span className="text-xs text-slate-500">{t("Welcome,")} <span className="font-bold text-slate-700">{currentUser.name || currentUser.username}</span></span>
             <LanguageSwitcher compact />
-            <div className="text-[10px] uppercase tracking-wide font-bold text-slate-400 whitespace-nowrap">{tStatus(currentUser.role)}</div>
+          </div>
+          <div className="p-6">
+            {pages[page] || pages.dashboard}
           </div>
         </div>
-        <div className="p-6">{pages[page]}</div>
-      </div>
       </div>
     </>
   );
 }
+
+export default App;
