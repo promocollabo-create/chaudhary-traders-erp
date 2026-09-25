@@ -181,6 +181,42 @@ const translations = {
     "Reason": "وجہ",
     "Reason / Note": "وجہ / نوٹ",
     "Remaining": "باقی",
+    "Commission": "کمیشن",
+    "Commission Agent": "کمیشن ایجنٹ",
+    "Commission Agents": "کمیشن ایجنٹس",
+    "Commission Rule": "کمیشن کا اصول",
+    "Commission Rules": "کمیشن کے اصول",
+    "Commission Rate": "کمیشن کی شرح",
+    "Commission Amount": "کمیشن کی رقم",
+    "Paid Commission": "ادا شدہ کمیشن",
+    "Pending Commission": "زیرِ التوا کمیشن",
+    "Approved Commission": "منظور شدہ کمیشن",
+    "Outstanding Commission": "بقایا کمیشن",
+    "Total Commission": "کل کمیشن",
+    "This Month Commission": "اس ماہ کا کمیشن",
+    "Pay Commission": "کمیشن ادا کریں",
+    "Commission Ledger": "کمیشن کھاتہ",
+    "Commission History": "کمیشن ہسٹری",
+    "Percentage": "فیصد",
+    "Fixed Amount": "مقررہ رقم",
+    "Per Bag": "فی بیگ",
+    "Per Item": "فی آئٹم",
+    "Approved": "منظور شدہ",
+    "Paid": "ادا شدہ",
+    "Cash": "نقد",
+    "Online Transfer": "آن لائن منتقلی",
+    "Payment Date": "ادائیگی کی تاریخ",
+    "Reference Number": "حوالہ نمبر",
+    "Agent ID": "ایجنٹ آئی ڈی",
+    "Agent Name": "ایجنٹ کا نام",
+    "Commission Type": "کمیشن کی قسم",
+    "Created Date": "تخلیق کی تاریخ",
+    "Activate": "فعال کریں",
+    "Deactivate": "غیر فعال کریں",
+    "Approve": "منظور کریں",
+    "Commission Payment": "کمیشن ادائیگی",
+    "All Agents": "تمام ایجنٹس",
+    "All Products": "تمام مصنوعات",
     "Current Balance": "موجودہ بیلنس",
     "Previous Balance": "پچھلا بیلنس",
     "Customer Ledger": "گاہک کا لیجر",
@@ -670,6 +706,8 @@ const AUDIENCE_TYPES = ["Builder", "Contractor", "Developer", "Housing Society"]
 const VEHICLE_TYPES = ["Rickshaw", "Truck", "Mazda", "Loader Rickshaw", "Other"];
 const PROMISE_STATUSES = ["Pending", "Partially Paid", "Completed", "Broken Promise", "Cancelled"];
 const PROMISE_PAYMENT_METHODS = ["Cash", "Bank", "Online", "Cheque", "Other"];
+const COMMISSION_STATUSES = ["Pending", "Approved", "Paid", "Cancelled"];
+const COMMISSION_TYPES = ["percentage", "fixed", "perBag", "perItem"];
 
 const MESSAGE_TEMPLATES = {
   en: {
@@ -839,6 +877,7 @@ function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl }) {
     { id: "creditNotes", label: "Credit Notes", icon: "📝" },
     { id: "ledger", label: "Ledger", icon: "≡" },
     { id: "payments", label: "Payments", icon: "◎" },
+    { id: "commission", label: "Commission", icon: "٪" },
     { id: "outstandingTransfer", label: "Outstanding Transfer", icon: "⇄" },
     { id: "adjustments", label: "Adjustments", icon: "±" },
     { id: "bookings", label: "Advance Booking", icon: "▦" },
@@ -1783,7 +1822,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
 
 /* ---------------- Invoices ---------------- */
 
-function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
+function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
   const isEdit = !!editingInvoice;
   // Cash Customer / Walk-In: customerType is "Regular" (existing workflow,
   // unchanged) or "Cash" (no customer account required). The type is fixed
@@ -1809,6 +1848,7 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const [manualDriverName, setManualDriverName] = useState(editingInvoice && !editingInvoice.driverId ? editingInvoice.driverName || "" : "");
   const [paymentReceived, setPaymentReceived] = useState(editingInvoice?.paymentReceived || 0);
   const [receivedBy, setReceivedBy] = useState(editingInvoice?.receivedBy || "");
+  const [commissionAgentId, setCommissionAgentId] = useState(editingInvoice?.commissionAgentId || "");
   const [issuedToName, setIssuedToName] = useState(editingInvoice?.issuedTo?.name || "");
   const [issuedToPhone, setIssuedToPhone] = useState(editingInvoice?.issuedTo?.phone || "");
   const [issuedToRelation, setIssuedToRelation] = useState(editingInvoice?.issuedTo?.relation || "");
@@ -1902,7 +1942,7 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
       // BUGFIX: item qty (which may be a fractional Feet/Meter/KG/Liter/
       // Sq.Ft amount) and total are rounded so the per-unit rate derived
       // later (total ÷ qty) is stable instead of drifting.
-      items: cleanItems.map((it) => ({ name: it.name, unit: it.unit || "", qty: roundQty(it.qty), price: roundMoney(it.price), total: roundMoney(roundQty(it.qty) * Number(it.price)) })),
+      items: cleanItems.map((it) => ({ productId: it.productId || "", name: it.name, unit: it.unit || "", qty: roundQty(it.qty), price: roundMoney(it.price), total: roundMoney(roundQty(it.qty) * Number(it.price)) })),
       rickshawRent: Number(rickshawRent) || 0,
       deliveryCharges: Number(deliveryCharges) || 0,
       discount: Number(discount) || 0,
@@ -1967,6 +2007,14 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
         </div>
       )}
 
+      <div className="mb-3">
+        <Field label="Commission Agent">
+          <select className={inputCls} value={commissionAgentId} onChange={(e)=>setCommissionAgentId(e.target.value)}>
+            <option value="">No Commission Agent</option>
+            {commissionAgents.filter(a=>a.status==="Active").map(a=><option key={a.id} value={a.id}>{a.code} — {a.name}</option>)}
+          </select>
+        </Field>
+      </div>
       <div className="grid grid-cols-2 gap-3">
         {customerType === "Regular" && (
           <Field label="Customer">
@@ -2362,7 +2410,7 @@ function buildInvoiceWaMessage(invoice, settings) {
   return lines.join("\n");
 }
 
-function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, adjustments, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
+function Invoices({ commissionAgents, customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, adjustments, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
   const [showForm, setShowForm] = useState(false);
   const [editingInvoice, setEditingInvoice] = useState(null);
   const [viewing, setViewing] = useState(null);
@@ -2454,6 +2502,7 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
       {showForm && (
         <Modal title={editingInvoice ? `Edit Invoice ${editingInvoice.number}` : prefill ? `New Invoice — from ${prefill.sourceCode}` : "New Invoice"} onClose={closeForm} wide>
           <InvoiceForm
+            commissionAgents={commissionAgents}
             customers={customers}
             products={products}
             drivers={drivers}
@@ -4435,7 +4484,7 @@ function Drivers({ drivers, saveDriver, deleteDriver }) {
 
 /* ---------------- Reports ---------------- */
 
-function Reports({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, masters, masterPayments, masterAdjustments }) {
+function Reports({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, masters, masterPayments, masterAdjustments, commissionTransactions, commissionAgents }) {
   const [from, setFrom] = useState(todayISO().slice(0, 8) + "01");
   const [to, setTo] = useState(todayISO());
   const [promiseTab, setPromiseTab] = useState("today");
@@ -4458,6 +4507,19 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
   const adjustmentsInRange = (adjustments || []).filter((a) => a.status === "Active" && a.date >= from && a.date <= to);
   const adjustmentsAddTotal = adjustmentsInRange.filter((a) => a.type === "Add").reduce((s, a) => s + a.amount, 0);
   const adjustmentsReduceTotal = adjustmentsInRange.filter((a) => a.type === "Reduce").reduce((s, a) => s + a.amount, 0);
+  const commissionInRange = (commissionTransactions || []).filter((c) => c.date >= from && c.date <= to && c.status !== "Cancelled");
+  const commissionTotal = commissionInRange.reduce((s,c)=>s + Number(c.adjustedAmount != null ? c.adjustedAmount : c.commissionAmount || 0), 0);
+  const commissionPaid = commissionInRange.reduce((s,c)=>s + Number(c.paidAmount || 0), 0);
+  const commissionOutstanding = Math.max(0, commissionTotal - commissionPaid);
+  const commissionByAgent = {};
+  commissionInRange.forEach(c => {
+    const key = c.agentName || commissionAgents?.find(a=>a.id===c.agentId)?.name || "Unknown";
+    if (!commissionByAgent[key]) commissionByAgent[key] = { sales:0, commission:0, paid:0, outstanding:0 };
+    commissionByAgent[key].sales += Number(c.saleAmount)||0;
+    commissionByAgent[key].commission += Number(c.adjustedAmount != null ? c.adjustedAmount : c.commissionAmount)||0;
+    commissionByAgent[key].paid += Number(c.paidAmount)||0;
+    commissionByAgent[key].outstanding += Number(c.remainingAmount != null ? c.remainingAmount : Math.max(0, (Number(c.adjustedAmount != null ? c.adjustedAmount : c.commissionAmount)||0)-(Number(c.paidAmount)||0)));
+  });
 
   function exportCSV() {
     const rows = [["Invoice", "Customer", "Date", "Total", "Received", "Balance", "Status"]];
@@ -4510,6 +4572,20 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
         <Stat label="Invoices" value={inRange.length} />
         <Stat label="Adjustments Added" value={fmtMoney(adjustmentsAddTotal)} accent="text-red-600" />
         <Stat label="Adjustments Reduced" value={fmtMoney(adjustmentsReduceTotal)} accent="text-emerald-600" />
+      </div>
+      <div className="mb-8">
+        <div className="flex flex-wrap gap-3 mb-4">
+          <Stat label={t("Total Commission")} value={fmtMoney(commissionTotal)} />
+          <Stat label={t("Paid Commission")} value={fmtMoney(commissionPaid)} accent="text-emerald-600" />
+          <Stat label={t("Outstanding Commission")} value={fmtMoney(commissionOutstanding)} accent="text-red-600" />
+        </div>
+        <div className="bg-white border border-slate-200 overflow-x-auto">
+          <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">{t("Commission")} — Agent-wise</div>
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase text-slate-500 border-b"><th className="px-4 py-2">Agent</th><th className="px-4 py-2">Total Sales</th><th className="px-4 py-2">Total Commission</th><th className="px-4 py-2">Paid</th><th className="px-4 py-2">Outstanding</th></tr></thead>
+            <tbody>{Object.entries(commissionByAgent).map(([name,v])=><tr key={name} className="border-b border-slate-100"><td className="px-4 py-2 font-bold">{name}</td><td className="px-4 py-2">{fmtMoney(v.sales)}</td><td className="px-4 py-2">{fmtMoney(v.commission)}</td><td className="px-4 py-2">{fmtMoney(v.paid)}</td><td className="px-4 py-2">{fmtMoney(v.outstanding)}</td></tr>)}</tbody>
+          </table>
+        </div>
       </div>
       <div className="bg-white border border-slate-200 mb-8">
         <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Customers with Outstanding Balance</div>
@@ -4964,7 +5040,152 @@ function Settings({ settings, saveSettings, users, saveUser, deleteUser, current
 
 /* ---------------- App ---------------- */
 
-export default function App() {
+export default 
+function commissionRuleMatches(rule, agentId, item) {
+  if (!rule || rule.status !== "Active" || rule.agentId !== agentId) return false;
+  if (rule.productId && rule.productId !== "all" && rule.productId !== item.productId) return false;
+  if (rule.category && rule.category !== "all" && rule.category !== item.category) return false;
+  const today = todayISO();
+  if (rule.startDate && today < rule.startDate) return false;
+  if (rule.endDate && today > rule.endDate) return false;
+  return true;
+}
+
+function pickCommissionRule(rules, agentId, item) {
+  const active = rules.filter((r) => commissionRuleMatches(r, agentId, item));
+  const score = (r) => {
+    let s = 0;
+    if (r.productId && r.productId !== "all") s += 100;
+    if (r.category && r.category !== "all") s += 10;
+    return s;
+  };
+  return [...active].sort((a,b) => score(b) - score(a))[0] || null;
+}
+
+function calculateCommissionForInvoice(invoice, agents, rules, products) {
+  if (!invoice?.commissionAgentId) return { amount: 0, type: "", rate: 0, details: [] };
+  let amount = 0;
+  const details = [];
+  (invoice.items || []).forEach((item, originalIndex) => {
+    const product = products.find((p) => p.id === item.productId || p.name === item.name);
+    const enriched = { ...item, productId: item.productId || product?.id || "", category: product?.category || "" };
+    const rule = pickCommissionRule(rules, invoice.commissionAgentId, enriched);
+    if (!rule) return;
+    const qty = Number(item.qty) || 0;
+    const lineTotal = Number(item.total) || qty * (Number(item.price) || 0);
+    let lineCommission = 0;
+    if (rule.commissionType === "percentage") lineCommission = lineTotal * (Number(rule.rate) || 0) / 100;
+    else if (rule.commissionType === "fixed") lineCommission = Number(rule.rate) || 0;
+    else lineCommission = qty * (Number(rule.rate) || 0);
+    if (rule.minSaleAmount && lineTotal < Number(rule.minSaleAmount)) lineCommission = 0;
+    if (rule.maxCommission && lineCommission > Number(rule.maxCommission)) lineCommission = Number(rule.maxCommission);
+    amount += lineCommission;
+    details.push({ itemIndex: originalIndex, name: item.name, qty, unit: item.unit, lineTotal, ruleId: rule.id, commissionType: rule.commissionType, rate: Number(rule.rate)||0, commission: roundMoney(lineCommission) });
+  });
+  return {
+    amount: roundMoney(amount),
+    type: details.length === 1 ? details[0].commissionType : "mixed",
+    rate: details.length === 1 ? details[0].rate : 0,
+    details,
+  };
+}
+
+function CommissionPage({ agents, rules, transactions, commissionPayments, invoices, customers, products, currentUser, onSaveAgent, onSaveRule, onDeactivateAgent, onApprove, onPay, onCancel }) {
+  const [tab, setTab] = useState("dashboard");
+  const [showAgent, setShowAgent] = useState(false);
+  const [showRule, setShowRule] = useState(false);
+  const [agentForm, setAgentForm] = useState({ name:"", phone:"", whatsapp:"", address:"", commissionType:"percentage", commissionRate:0, status:"Active", notes:"" });
+  const [ruleForm, setRuleForm] = useState({ agentId:"", productId:"all", category:"all", commissionType:"percentage", rate:0, minSaleAmount:0, maxCommission:0, startDate:todayISO(), endDate:"", status:"Active" });
+  const [paying, setPaying] = useState(null);
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [paymentMethod, setPaymentMethod] = useState("Cash");
+  const [paymentDate, setPaymentDate] = useState(todayISO());
+  const [reference, setReference] = useState("");
+  const [search, setSearch] = useState("");
+
+  const effective = transactions.map((tx) => {
+    const inv = invoices.find((i) => i.id === tx.invoiceId);
+    let adjusted = Number(tx.commissionAmount)||0;
+    if (inv) {
+      const calc = calculateCommissionForInvoice(inv, agents, rules, products);
+      const activeReturns = (inv.returns || []);
+      // Existing return records are applied below from the transaction's original details.
+      const linkedReturns = [];
+      // Return data is not embedded in old invoices, so transaction amount remains
+      // stable for backward compatibility. New return handler updates adjustedAmount.
+      if (tx.adjustedAmount != null) adjusted = Number(tx.adjustedAmount)||0;
+    }
+    const paid = Number(tx.paidAmount)||0;
+    return { ...tx, effectiveAmount: roundMoney(adjusted), paidAmount: roundMoney(paid), remainingAmount: Math.max(0, roundMoney(adjusted-paid)) };
+  });
+
+  const totals = {
+    total: effective.reduce((s,x)=>s+x.effectiveAmount,0),
+    pending: effective.filter(x=>x.status==="Pending").reduce((s,x)=>s+x.effectiveAmount,0),
+    approved: effective.filter(x=>x.status==="Approved").reduce((s,x)=>s+x.remainingAmount,0),
+    paid: effective.reduce((s,x)=>s+x.paidAmount,0),
+    outstanding: effective.reduce((s,x)=>s+x.remainingAmount,0),
+    month: effective.filter(x=>String(x.date||"").slice(0,7)===todayISO().slice(0,7)).reduce((s,x)=>s+x.effectiveAmount,0),
+  };
+
+  function submitAgent(e) {
+    e.preventDefault();
+    if (!agentForm.name.trim()) return alert("Agent Name is required.");
+    onSaveAgent(agentForm);
+    setAgentForm({ name:"", phone:"", whatsapp:"", address:"", commissionType:"percentage", commissionRate:0, status:"Active", notes:"" });
+    setShowAgent(false);
+  }
+  function submitRule(e) {
+    e.preventDefault();
+    if (!ruleForm.agentId) return alert("Select an agent.");
+    onSaveRule(ruleForm);
+    setShowRule(false);
+  }
+  function submitPayment(e) {
+    e.preventDefault();
+    const n = Number(paymentAmount)||0;
+    if (!paying || n <= 0 || n > paying.remainingAmount + 0.01) return alert("Payment amount must be greater than 0 and not exceed remaining commission.");
+    onPay(paying, { amount:n, date:paymentDate, method:paymentMethod, reference:reference.trim() });
+    setPaying(null); setPaymentAmount(""); setReference("");
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4 gap-3">
+        <div><h2 className="text-xl font-black uppercase tracking-tight">{t("Commission")}</h2><div className="text-xs text-slate-400">Commission management integrated with existing invoices</div></div>
+        <div className="flex gap-2">{currentUser.role==="admin" && <><Btn onClick={()=>setShowAgent(true)}>+ {t("Commission Agent")}</Btn><Btn onClick={()=>setShowRule(true)}>+ {t("Commission Rule")}</Btn></>}</div>
+      </div>
+      <div className="flex gap-2 mb-4 border-b border-slate-200">
+        {["dashboard","agents","rules","ledger","history"].map(x=><button key={x} onClick={()=>setTab(x)} className={`px-3 py-2 text-xs font-bold uppercase ${tab===x?"border-b-2 border-slate-900 text-slate-900":"text-slate-400"}`}>{t(x==="dashboard"?"Dashboard":x==="agents"?"Commission Agents":x==="rules"?"Commission Rules":x==="ledger"?"Commission Ledger":"Commission History")}</button>)}
+      </div>
+
+      {tab==="dashboard" && <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+        {[["Total Commission",totals.total],["Pending Commission",totals.pending],["Approved Commission",totals.approved],["Paid Commission",totals.paid],["Outstanding Commission",totals.outstanding],["This Month Commission",totals.month]].map(([l,v])=><Stat key={l} label={t(l)} value={fmtMoney(v)} />)}
+      </div>}
+
+      {tab==="agents" && <div className="bg-white border border-slate-200 overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-[11px] uppercase text-slate-500 border-b"><th className="px-4 py-2">ID</th><th className="px-4 py-2">{t("Agent Name")}</th><th className="px-4 py-2">{t("Phone")}</th><th className="px-4 py-2">{t("Commission Type")}</th><th className="px-4 py-2">{t("Commission Rate")}</th><th className="px-4 py-2">{t("Status")}</th></tr></thead><tbody>
+        {agents.map(a=><tr key={a.id} className="border-b border-slate-100"><td className="px-4 py-2">{a.code}</td><td className="px-4 py-2 font-bold">{a.name}</td><td className="px-4 py-2">{a.phone||"-"}</td><td className="px-4 py-2">{a.commissionType}</td><td className="px-4 py-2">{a.commissionRate}</td><td className="px-4 py-2"><button className="text-xs font-bold underline" onClick={()=>onDeactivateAgent(a)}>{a.status}</button></td></tr>)}
+        </tbody></table></div>}
+
+      {tab==="rules" && <div className="bg-white border border-slate-200 overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-[11px] uppercase text-slate-500 border-b"><th className="px-4 py-2">Agent</th><th className="px-4 py-2">Product</th><th className="px-4 py-2">Type</th><th className="px-4 py-2">Rate</th><th className="px-4 py-2">Status</th></tr></thead><tbody>{rules.map(r=><tr key={r.id} className="border-b border-slate-100"><td className="px-4 py-2">{agents.find(a=>a.id===r.agentId)?.name||"-"}</td><td className="px-4 py-2">{r.productId==="all"?"All Products":products.find(p=>p.id===r.productId)?.name||r.category||"All"}</td><td className="px-4 py-2">{r.commissionType}</td><td className="px-4 py-2">{r.rate}</td><td className="px-4 py-2">{r.status}</td></tr>)}</tbody></table></div>}
+
+      {(tab==="ledger" || tab==="history") && <div>
+        <div className="mb-3"><input className={inputCls+" text-xs max-w-sm"} placeholder="Search invoice / agent / customer..." value={search} onChange={e=>setSearch(e.target.value)} /></div>
+        <div className="bg-white border border-slate-200 overflow-x-auto"><table className="w-full text-sm"><thead><tr className="text-left text-[11px] uppercase text-slate-500 border-b"><th className="px-4 py-2">Date</th><th className="px-4 py-2">Invoice</th><th className="px-4 py-2">Agent</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Sale</th><th className="px-4 py-2">Commission</th><th className="px-4 py-2">Paid</th><th className="px-4 py-2">Remaining</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Action</th></tr></thead><tbody>
+        {effective.filter(x=>{const q=search.toLowerCase(); return !q || `${x.invoiceNumber} ${x.agentName} ${x.customerName}`.toLowerCase().includes(q)}).map(x=><tr key={x.id} className="border-b border-slate-100"><td className="px-4 py-2">{fmtDate(x.date)}</td><td className="px-4 py-2">{x.invoiceNumber}</td><td className="px-4 py-2">{x.agentName}</td><td className="px-4 py-2">{x.customerName}</td><td className="px-4 py-2">{fmtMoney(x.saleAmount)}</td><td className="px-4 py-2">{fmtMoney(x.effectiveAmount)}</td><td className="px-4 py-2">{fmtMoney(x.paidAmount)}</td><td className="px-4 py-2">{fmtMoney(x.remainingAmount)}</td><td className="px-4 py-2">{tStatus(x.status)}</td><td className="px-4 py-2 flex gap-2">{currentUser.role==="admin" && x.status==="Pending" && <Btn onClick={()=>onApprove(x)}>Approve</Btn>}{currentUser.role==="admin" && x.remainingAmount>0 && x.status!=="Pending" && x.status!=="Cancelled" && <Btn onClick={()=>{setPaying(x);setPaymentAmount(String(x.remainingAmount));}}>Pay</Btn>}{currentUser.role==="admin" && x.status!=="Paid" && <button className="text-xs underline text-red-600" onClick={()=>onCancel(x)}>Cancel</button>}</td></tr>)}
+        </tbody></table></div>
+      </div>}
+
+      {showAgent && <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"><form onSubmit={submitAgent} className="bg-white p-5 w-full max-w-lg space-y-3"><h3 className="font-black text-lg">{t("Commission Agent")}</h3>{["name","phone","whatsapp","address","notes"].map(k=><input key={k} className={inputCls} placeholder={k} value={agentForm[k]} onChange={e=>setAgentForm({...agentForm,[k]:e.target.value})}/>)}<div className="grid grid-cols-2 gap-2"><select className={inputCls} value={agentForm.commissionType} onChange={e=>setAgentForm({...agentForm,commissionType:e.target.value})}>{COMMISSION_TYPES.map(x=><option key={x} value={x}>{x}</option>)}</select><input type="number" className={inputCls} placeholder="Commission Rate" value={agentForm.commissionRate} onChange={e=>setAgentForm({...agentForm,commissionRate:e.target.value})}/></div><div className="flex gap-2"><Btn type="submit">Save</Btn><button type="button" className="px-3 py-2 border" onClick={()=>setShowAgent(false)}>Cancel</button></div></form></div>}
+
+      {showRule && <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"><form onSubmit={submitRule} className="bg-white p-5 w-full max-w-xl space-y-3"><h3 className="font-black text-lg">{t("Commission Rule")}</h3><select className={inputCls} value={ruleForm.agentId} onChange={e=>setRuleForm({...ruleForm,agentId:e.target.value})}><option value="">Select Agent</option>{agents.filter(a=>a.status==="Active").map(a=><option key={a.id} value={a.id}>{a.name} ({a.code})</option>)}</select><select className={inputCls} value={ruleForm.productId} onChange={e=>setRuleForm({...ruleForm,productId:e.target.value})}><option value="all">All Products</option>{products.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select><div className="grid grid-cols-2 gap-2"><select className={inputCls} value={ruleForm.commissionType} onChange={e=>setRuleForm({...ruleForm,commissionType:e.target.value})}>{COMMISSION_TYPES.map(x=><option key={x} value={x}>{x}</option>)}</select><input type="number" className={inputCls} placeholder="Rate" value={ruleForm.rate} onChange={e=>setRuleForm({...ruleForm,rate:e.target.value})}/><input type="number" className={inputCls} placeholder="Minimum Sale Amount" value={ruleForm.minSaleAmount} onChange={e=>setRuleForm({...ruleForm,minSaleAmount:e.target.value})}/><input type="number" className={inputCls} placeholder="Maximum Commission" value={ruleForm.maxCommission} onChange={e=>setRuleForm({...ruleForm,maxCommission:e.target.value})}/><input type="date" className={inputCls} value={ruleForm.startDate} onChange={e=>setRuleForm({...ruleForm,startDate:e.target.value})}/><input type="date" className={inputCls} value={ruleForm.endDate} onChange={e=>setRuleForm({...ruleForm,endDate:e.target.value})}/></div><div className="flex gap-2"><Btn type="submit">Save</Btn><button type="button" className="px-3 py-2 border" onClick={()=>setShowRule(false)}>Cancel</button></div></form></div>}
+
+      {paying && <div className="fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4"><form onSubmit={submitPayment} className="bg-white p-5 w-full max-w-md space-y-3"><h3 className="font-black text-lg">{t("Pay Commission")}</h3><div className="text-sm">Total: {fmtMoney(paying.effectiveAmount)} · Paid: {fmtMoney(paying.paidAmount)} · Remaining: {fmtMoney(paying.remainingAmount)}</div><input type="number" min="0.01" step="0.01" className={inputCls} placeholder="Payment Amount" value={paymentAmount} onChange={e=>setPaymentAmount(e.target.value)}/><div className="grid grid-cols-2 gap-2"><input type="date" className={inputCls} value={paymentDate} onChange={e=>setPaymentDate(e.target.value)}/><select className={inputCls} value={paymentMethod} onChange={e=>setPaymentMethod(e.target.value)}><option>Cash</option><option>Bank</option><option>Online Transfer</option><option>Other</option></select></div><input className={inputCls} placeholder="Reference Number" value={reference} onChange={e=>setReference(e.target.value)}/><div className="flex gap-2"><Btn type="submit">Pay</Btn><button type="button" className="px-3 py-2 border" onClick={()=>setPaying(null)}>Cancel</button></div></form></div>}
+    </div>
+  );
+}
+
+function App() {
   const { language } = useLanguage();
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
@@ -4993,10 +5214,14 @@ export default function App() {
   const [promises, setPromises] = useState([]);
   const [outstandingTransfers, setOutstandingTransfers] = useState([]);
   const [adjustments, setAdjustments] = useState([]);
+  const [commissionAgents, setCommissionAgents] = useState([]);
+  const [commissionRules, setCommissionRules] = useState([]);
+  const [commissionTransactions, setCommissionTransactions] = useState([]);
+  const [commissionPayments, setCommissionPayments] = useState([]);
 
   useEffect(() => {
     (async () => {
-      const [u, s, c, p, i, pay, bk, ld, dr, ord, br, off, ret, exc, cn, al, pr, ot, adj] = await Promise.all([
+      const [u, s, c, p, i, pay, bk, ld, dr, ord, br, off, ret, exc, cn, al, pr, ot, adj, ca, cr, ct, cp] = await Promise.all([
         storeGet("ct-users", DEFAULT_USERS),
         storeGet("ct-settings", DEFAULT_SETTINGS),
         storeGet("ct-customers", []),
@@ -5016,10 +5241,15 @@ export default function App() {
         storeGet("ct-promises", []),
         storeGet("ct-outstandingtransfers", []),
         storeGet("ct-adjustments", []),
+        storeGet("ct-commission-agents", []),
+        storeGet("ct-commission-rules", []),
+        storeGet("ct-commission-transactions", []),
+        storeGet("ct-commission-payments", []),
       ]);
       setUsers(u); setSettings(s); setCustomers(c); setProducts(p);
       setInvoices(i); setPayments(pay); setBookings(bk); setLeads(ld); setDrivers(dr); setOrders(ord); setBranches(br); setOffers(off);
       setReturns(ret); setExchanges(exc); setCreditNotes(cn); setAuditLog(al); setPromises(pr); setOutstandingTransfers(ot); setAdjustments(adj);
+      setCommissionAgents(ca); setCommissionRules(cr); setCommissionTransactions(ct); setCommissionPayments(cp);
       if (u.length === 0) { setUsers(DEFAULT_USERS); await storeSet("ct-users", DEFAULT_USERS); }
       setLoading(false);
     })();
@@ -5036,7 +5266,8 @@ export default function App() {
       "ct-orders": setOrders, "ct-branches": setBranches, "ct-offers": setOffers,
       "ct-returns": setReturns, "ct-exchanges": setExchanges, "ct-creditnotes": setCreditNotes,
       "ct-auditlog": setAuditLog, "ct-promises": setPromises, "ct-outstandingtransfers": setOutstandingTransfers,
-      "ct-adjustments": setAdjustments,
+      "ct-adjustments": setAdjustments, "ct-commission-agents": setCommissionAgents, "ct-commission-rules": setCommissionRules,
+      "ct-commission-transactions": setCommissionTransactions, "ct-commission-payments": setCommissionPayments,
     };
     const channel = supabase
       .channel("kv_store-changes")
@@ -5069,6 +5300,10 @@ export default function App() {
     promises: (v) => { setPromises(v); storeSet("ct-promises", v); },
     outstandingTransfers: (v) => { setOutstandingTransfers(v); storeSet("ct-outstandingtransfers", v); },
     adjustments: (v) => { setAdjustments(v); storeSet("ct-adjustments", v); },
+    commissionAgents: (v) => { setCommissionAgents(v); storeSet("ct-commission-agents", v); },
+    commissionRules: (v) => { setCommissionRules(v); storeSet("ct-commission-rules", v); },
+    commissionTransactions: (v) => { setCommissionTransactions(v); storeSet("ct-commission-transactions", v); },
+    commissionPayments: (v) => { setCommissionPayments(v); storeSet("ct-commission-payments", v); },
   };
 
   function upsert(list, item) {
@@ -5206,9 +5441,80 @@ export default function App() {
   const saveUser = (u) => persist.users(upsert(users, u));
   const deleteUser = (id) => persist.users(users.filter((u) => u.id !== id));
 
+  function recalculateCommissionForInvoice(invoiceId, allReturns = returns) {
+    const tx = commissionTransactions.find(x => x.invoiceId === invoiceId);
+    if (!tx) return;
+    const invoice = invoices.find(i => i.id === invoiceId);
+    if (!invoice) return;
+    const base = Number(tx.commissionAmount) || 0;
+    const activeReturns = allReturns.filter(r => r.invoiceId === invoiceId && r.status === "Active");
+    let adjusted = base;
+    if (activeReturns.length && Array.isArray(tx.details)) {
+      adjusted = tx.details.reduce((sum, d) => {
+        const originalQty = Number(d.qty) || 0;
+        if (originalQty <= 0) return sum + Number(d.commission || 0);
+        const returnedQty = activeReturns.reduce((s, r) => s + ((r.items || []).find(i => i.itemIndex === d.itemIndex)?.qtyReturned || 0), 0);
+        const factor = Math.max(0, 1 - returnedQty / originalQty);
+        return sum + Number(d.commission || 0) * factor;
+      }, 0);
+    }
+    const paid = Number(tx.paidAmount) || 0;
+    const remaining = Math.max(0, roundMoney(adjusted - paid));
+    const overpaid = Math.max(0, roundMoney(paid - adjusted));
+    const status = tx.status === "Cancelled" ? "Cancelled" : remaining <= 0.01 ? "Paid" : tx.status === "Approved" ? "Approved" : "Pending";
+    persist.commissionTransactions(upsert(commissionTransactions, { ...tx, adjustedAmount: roundMoney(adjusted), remainingAmount: remaining, overpaidAmount: overpaid, status }));
+  }
+
+  function saveCommissionAgent(data) {
+    if (data.id) return persist.commissionAgents(upsert(commissionAgents, data));
+    const code = "COM-" + String(commissionAgents.length + 1).padStart(4, "0");
+    persist.commissionAgents([...commissionAgents, { id: uid("com"), code, ...data, createdDate: todayISO() }]);
+  }
+  function toggleCommissionAgent(agent) {
+    persist.commissionAgents(upsert(commissionAgents, { ...agent, status: agent.status === "Active" ? "Inactive" : "Active" }));
+  }
+  function saveCommissionRule(data) {
+    persist.commissionRules([...commissionRules.filter(r => r.id !== data.id), { id: data.id || uid("cr"), ...data }]);
+  }
+  function approveCommission(tx) {
+    if (currentUser.role !== "admin") return;
+    persist.commissionTransactions(upsert(commissionTransactions, { ...tx, status: "Approved", approvedBy: currentUser.name || currentUser.username, approvedAt: new Date().toISOString() }));
+  }
+  function cancelCommission(tx) {
+    if (currentUser.role !== "admin") return;
+    persist.commissionTransactions(upsert(commissionTransactions, { ...tx, status: "Cancelled", cancelledBy: currentUser.name || currentUser.username, cancelledAt: new Date().toISOString() }));
+  }
+  function payCommission(tx, payment) {
+    if (currentUser.role !== "admin") return;
+    const payable = Number(tx.adjustedAmount != null ? tx.adjustedAmount : tx.commissionAmount) || 0;
+    const paid = Number(tx.paidAmount || 0) + Number(payment.amount || 0);
+    const remaining = Math.max(0, roundMoney(payable - paid));
+    const status = remaining <= 0.01 ? "Paid" : "Approved";
+    const cp = { id: uid("cmp"), transactionId: tx.id, agentId: tx.agentId, amount: Number(payment.amount), date: payment.date, method: payment.method, reference: payment.reference || "", invoiceId: tx.invoiceId, createdBy: currentUser.name || currentUser.username, createdAt: new Date().toISOString() };
+    persist.commissionPayments([...commissionPayments, cp]);
+    persist.commissionTransactions(upsert(commissionTransactions, { ...tx, paidAmount: roundMoney(paid), remainingAmount: roundMoney(remaining), status }));
+    logAudit("Commission Payment", `${tx.invoiceNumber} — ${tx.agentName} — Rs ${Number(payment.amount).toLocaleString()}`, payment.reference || "");
+  }
+
+  function createCommissionForInvoice(inv) {
+    if (!inv.commissionAgentId) return;
+    const calc = calculateCommissionForInvoice(inv, commissionAgents, commissionRules, products);
+    if (!calc.amount) return;
+    const agent = commissionAgents.find(a => a.id === inv.commissionAgentId);
+    const tx = {
+      id: uid("comtx"), agentId: inv.commissionAgentId, agentName: agent?.name || "",
+      invoiceId: inv.id, invoiceNumber: inv.number, customerId: inv.customerId, customerName: inv.customerName,
+      saleAmount: Number(inv.total)||0, commissionType: calc.type, commissionRate: calc.rate,
+      commissionAmount: calc.amount, paidAmount: 0, remainingAmount: calc.amount, status: "Pending",
+      details: calc.details, date: inv.date, createdAt: new Date().toISOString()
+    };
+    persist.commissionTransactions([...commissionTransactions.filter(x => x.invoiceId !== inv.id), tx]);
+  }
+
   function saveInvoice(inv) {
     persist.invoices([...invoices, inv]);
     persist.settings({ ...settings, invoiceCounter: settings.invoiceCounter + 1 });
+    createCommissionForInvoice(inv);
     if (inv.paymentReceived > 0) {
       persist.payments([...payments, {
         id: uid("pay"), customerId: inv.customerId, customerName: inv.customerName,
@@ -5236,8 +5542,10 @@ export default function App() {
       linkedInvoiceNumber: "",
     };
 
-    persist.returns([...returns, ret]);
+    const nextReturns = [...returns, ret];
+    persist.returns(nextReturns);
     persist.creditNotes([...creditNotes, creditNote]);
+    recalculateCommissionForInvoice(data.invoiceId, nextReturns);
     persist.settings({ ...settings, returnCounter: counter + 1, creditNoteCounter: cnCounter + 1 });
     logAudit("Sales Return", `${code} (Invoice ${data.invoiceNumber})`, data.reason);
 
@@ -5256,7 +5564,9 @@ export default function App() {
       ...ret, status: "Deleted", deletedBy: currentUser?.name || currentUser?.username || "Unknown",
       deletedAt: new Date().toISOString(), deleteReason: reason,
     };
-    persist.returns(upsert(returns, finalRet));
+    const nextReturns = upsert(returns, finalRet);
+    persist.returns(nextReturns);
+    recalculateCommissionForInvoice(ret.invoiceId, nextReturns);
     const linkedCn = creditNotes.find((cn) => cn.sourceReturnId === ret.id);
     if (linkedCn) persist.creditNotes(upsert(creditNotes, { ...linkedCn, status: "Reversed" }));
     logAudit("Delete Return", `${ret.code} (Invoice ${ret.invoiceNumber})`, reason);
@@ -5581,6 +5891,10 @@ export default function App() {
     if (data.promises) persist.promises(data.promises);
     if (data.outstandingTransfers) persist.outstandingTransfers(data.outstandingTransfers);
     if (data.adjustments) persist.adjustments(data.adjustments);
+    if (data.commissionAgents) persist.commissionAgents(data.commissionAgents);
+    if (data.commissionRules) persist.commissionRules(data.commissionRules);
+    if (data.commissionTransactions) persist.commissionTransactions(data.commissionTransactions);
+    if (data.commissionPayments) persist.commissionPayments(data.commissionPayments);
   }
 
   // Invoice EDIT: recompute totals, keep number/id, tag docStatus, log history,
@@ -5639,6 +5953,25 @@ export default function App() {
       nextPayments = payments.filter((p) => p.id !== existingPayment.id);
     }
     persist.payments(nextPayments);
+    if (newInv.commissionAgentId) {
+      const existingTx = commissionTransactions.find(x => x.invoiceId === newInv.id);
+      if (!existingTx) createCommissionForInvoice(newInv);
+      else {
+        const calc = calculateCommissionForInvoice(newInv, commissionAgents, commissionRules, products);
+        persist.commissionTransactions(upsert(commissionTransactions, {
+          ...existingTx,
+          agentId: newInv.commissionAgentId,
+          agentName: commissionAgents.find(a=>a.id===newInv.commissionAgentId)?.name || existingTx.agentName,
+          saleAmount: Number(newInv.total)||0,
+          commissionType: calc.type,
+          commissionRate: calc.rate,
+          commissionAmount: calc.amount,
+          adjustedAmount: calc.amount,
+          remainingAmount: Math.max(0, roundMoney(calc.amount - Number(existingTx.paidAmount||0))),
+          details: calc.details,
+        }));
+      }
+    }
   }
 
   // Invoice CANCEL: mark cancelled, log history. Ledger/dashboard update
@@ -5653,6 +5986,8 @@ export default function App() {
     };
     const finalInv = { ...inv, docStatus: "Cancelled", editHistory: [...(inv.editHistory || []), historyEntry] };
     persist.invoices(upsert(invoices, finalInv));
+    const linkedCommission = commissionTransactions.find(x => x.invoiceId === inv.id);
+    if (linkedCommission) persist.commissionTransactions(upsert(commissionTransactions, { ...linkedCommission, status: "Cancelled", cancelledBy: editedBy, cancelledAt: editedAt }));
     logAudit("Invoice Status Change", `${inv.number} → Cancelled`, "Manually cancelled");
   }
 
@@ -5693,7 +6028,7 @@ export default function App() {
     ),
     invoices: (
       <Invoices
-        customers={visibleCustomers} products={products} drivers={drivers} invoices={visibleInvoices} payments={visiblePayments}
+        commissionAgents={commissionAgents} customers={visibleCustomers} products={products} drivers={drivers} invoices={visibleInvoices} payments={visiblePayments}
         returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments}
         bookings={visibleBookings} settings={settings} currentUser={currentUser} saveInvoice={saveInvoice}
         updateInvoice={updateInvoice} cancelInvoice={cancelInvoiceFn}
@@ -5752,14 +6087,15 @@ export default function App() {
     products: <Products products={products} saveProduct={saveProduct} deleteProduct={deleteProduct} />,
     drivers: <Drivers drivers={drivers} saveDriver={saveDriver} deleteDriver={deleteDriver} />,
     offers: <Offers offers={offers} saveOffer={saveOffer} deleteOffer={deleteOffer} />,
-    reports: <Reports customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} leads={visibleLeads} bookings={visibleBookings} />,
+    commission: <CommissionPage agents={commissionAgents} rules={commissionRules} transactions={commissionTransactions} commissionPayments={commissionPayments} invoices={visibleInvoices} customers={visibleCustomers} products={products} currentUser={currentUser} onSaveAgent={saveCommissionAgent} onSaveRule={saveCommissionRule} onDeactivateAgent={toggleCommissionAgent} onApprove={approveCommission} onPay={payCommission} onCancel={cancelCommission} />,
+    reports: <Reports customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} leads={visibleLeads} bookings={visibleBookings} commissionTransactions={commissionTransactions} commissionAgents={commissionAgents} />,
     assistant: <SalesAssistant customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns} exchanges={visibleExchanges} promises={visiblePromises} transfers={visibleTransfers} adjustments={visibleAdjustments} />,
     estimator: <CementEstimator />,
     settings: (
       <Settings
         settings={settings} saveSettings={saveSettings} users={users} saveUser={saveUser} deleteUser={deleteUser}
         currentUser={currentUser} onRestore={handleRestore}
-        allData={{ users, settings, customers, products, invoices, payments, bookings, leads, drivers, orders, branches, offers, returns, exchanges, creditNotes, auditLog, promises, outstandingTransfers, adjustments }}
+        allData={{ users, settings, customers, products, invoices, payments, bookings, leads, drivers, orders, branches, offers, returns, exchanges, creditNotes, auditLog, promises, outstandingTransfers, adjustments, commissionAgents, commissionRules, commissionTransactions, commissionPayments }}
         branches={branches} saveBranch={saveBranch} deleteBranch={deleteBranch}
       />
     ),
