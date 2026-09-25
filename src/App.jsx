@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
 import { supabase } from "./supabaseClient.js";
 
 /* ============================================================
@@ -17,6 +17,263 @@ const VEHICLE_TYPES = ["Rickshaw", "Truck", "Mazda", "Loader Rickshaw", "Other"]
 const PROMISE_STATUSES = ["Pending", "Partially Paid", "Completed", "Broken Promise", "Cancelled"];
 const PROMISE_PAYMENT_METHODS = ["Cash", "Bank", "Online", "Cheque", "Other"];
 
+
+/* ============================================================
+   BILINGUAL UI — English / Urdu
+   Presentation-only i18n layer. Stored business values remain
+   unchanged (Pending, Completed, Builder, etc.).
+   ============================================================ */
+const CT_LANGUAGE_KEY = "ct-language";
+
+const CT_TRANSLATIONS = {
+  "Dashboard": "ڈیش بورڈ",
+  "Customers": "گاہک",
+  "Invoices": "انوائسز",
+  "Invoice History": "انوائس ہسٹری",
+  "Sales Return": "سیلز ریٹرن",
+  "Exchange": "تبادلہ",
+  "Credit Notes": "کریڈٹ نوٹس",
+  "Ledger": "کھاتہ",
+  "Payments": "ادائیگیاں",
+  "Outstanding Transfer": "بقایا منتقلی",
+  "Adjustments": "ایڈجسٹمنٹس",
+  "Advance Booking": "ایڈوانس بکنگ",
+  "Daily Orders": "روزانہ آرڈرز",
+  "Promise To Pay": "ادائیگی کا وعدہ",
+  "Leads": "لیڈز",
+  "Products": "مصنوعات",
+  "Drivers": "ڈرائیورز",
+  "Offers": "آفرز",
+  "Reports": "رپورٹس",
+  "Sales Assistant": "سیلز اسسٹنٹ",
+  "Cement Estimator": "سیمنٹ تخمینہ",
+  "Settings": "ترتیبات",
+  "Welcome": "خوش آمدید",
+  "Welcome, ": "خوش آمدید، ",
+  "All Branches": "تمام برانچز",
+  "Search": "تلاش کریں",
+  "Search name or phone...": "نام یا فون تلاش کریں...",
+  "Search customer...": "گاہک تلاش کریں...",
+  "Username": "صارف نام",
+  "Password": "پاس ورڈ",
+  "Login": "لاگ اِن",
+  "Log In": "لاگ اِن",
+  "Sign In": "سائن اِن",
+  "Logout": "لاگ آؤٹ",
+  "Log out": "لاگ آؤٹ",
+  "Email": "ای میل",
+  "Phone": "فون",
+  "Address": "پتہ",
+  "City": "شہر",
+  "Customer": "گاہک",
+  "Customer Name": "گاہک کا نام",
+  "Customer Details": "گاہک کی تفصیلات",
+  "Customer Type": "گاہک کی قسم",
+  "Add Customer": "گاہک شامل کریں",
+  "+ New Customer": "+ نیا گاہک",
+  "Save Customer": "گاہک محفوظ کریں",
+  "Update Customer": "گاہک اپ ڈیٹ کریں",
+  "Edit Customer": "گاہک میں ترمیم کریں",
+  "Delete Customer": "گاہک حذف کریں",
+  "Edit": "ترمیم کریں",
+  "Delete": "حذف کریں",
+  "Save": "محفوظ کریں",
+  "Cancel": "منسوخ کریں",
+  "Submit": "جمع کریں",
+  "Print": "پرنٹ کریں",
+  "Download": "ڈاؤن لوڈ کریں",
+  "Create Invoice": "انوائس بنائیں",
+  "Invoice Number": "انوائس نمبر",
+  "Invoice Date": "انوائس کی تاریخ",
+  "Product": "مصنوعات",
+  "Quantity": "مقدار",
+  "Unit Price": "فی یونٹ قیمت",
+  "Discount": "رعایت",
+  "Tax": "ٹیکس",
+  "Subtotal": "ذیلی کل",
+  "Grand Total": "کل رقم",
+  "Paid": "ادا شدہ",
+  "Unpaid": "غیر ادا شدہ",
+  "Partial": "جزوی",
+  "Balance": "بقایا",
+  "Save Invoice": "انوائس محفوظ کریں",
+  "Print Invoice": "انوائس پرنٹ کریں",
+  "Download Invoice": "انوائس ڈاؤن لوڈ کریں",
+  "Date": "تاریخ",
+  "Description": "تفصیل",
+  "Debit": "ڈیبٹ",
+  "Credit": "کریڈٹ",
+  "Opening Balance": "ابتدائی بقایا",
+  "Closing Balance": "اختتامی بقایا",
+  "Payment": "ادائیگی",
+  "Sale": "فروخت",
+  "Return": "واپسی",
+  "Total": "کل",
+  "Add Payment": "ادائیگی شامل کریں",
+  "Payment Amount": "ادائیگی کی رقم",
+  "Payment Date": "ادائیگی کی تاریخ",
+  "Payment Method": "ادائیگی کا طریقہ",
+  "Cash": "نقد",
+  "Bank": "بینک",
+  "Online": "آن لائن",
+  "Reference": "حوالہ",
+  "Notes": "نوٹس",
+  "Save Payment": "ادائیگی محفوظ کریں",
+  "Daily Sales": "روزانہ فروخت",
+  "Monthly Sales": "ماہانہ فروخت",
+  "Total Sales": "کل فروخت",
+  "Total Payments": "کل ادائیگیاں",
+  "Outstanding": "بقایا",
+  "Outstanding Balance": "بقایا رقم",
+  "Customer Report": "گاہک رپورٹ",
+  "Invoice Report": "انوائس رپورٹ",
+  "Sales Report": "فروخت رپورٹ",
+  "Print Report": "رپورٹ پرنٹ کریں",
+  "Export Report": "رپورٹ ایکسپورٹ کریں",
+  "Pending": "زیرِ التوا",
+  "Processing": "زیرِ کارروائی",
+  "Completed": "مکمل",
+  "Cancelled": "منسوخ",
+  "New": "نیا",
+  "Contacted": "رابطہ کیا گیا",
+  "Qualified": "موزوں",
+  "Won": "کامیاب",
+  "Lost": "ناکام",
+  "Booked": "بک شدہ",
+  "Partially Delivered": "جزوی ڈیلیوری",
+  "Active": "فعال",
+  "Reversed": "واپس منسوخ",
+  "Partially Paid": "جزوی ادائیگی",
+  "Broken Promise": "وعدہ پورا نہیں ہوا",
+  "Save": "محفوظ کریں",
+  "Loading...": "لوڈ ہو رہا ہے...",
+  "No Customers Found": "کوئی گاہک نہیں ملا",
+  "Today's Sales": "آج کی فروخت",
+  "This Month": "اس ماہ",
+  "Total Outstanding": "کل بقایا",
+  "Active Leads": "فعال لیڈز",
+  "Open Bookings": "کھلی بکنگز",
+  "Promise To Pay Overview": "ادائیگی کے وعدوں کا جائزہ",
+  "Today's Promises": "آج کے وعدے",
+  "Upcoming (7 Days)": "آئندہ (7 دن)",
+  "Overdue Promises": "میعاد گزرے وعدے",
+  "Pending Promises": "زیرِ التوا وعدے",
+  "Completed Promises": "مکمل وعدے",
+  "Broken Promises": "ٹوٹے ہوئے وعدے",
+  "Total Promised Amount": "وعدہ شدہ کل رقم",
+  "Promise Customers": "وعدہ کرنے والے گاہک",
+  "Recent Invoices": "حالیہ انوائسز",
+  "Koi invoice nahi bana abhi tak.": "ابھی تک کوئی انوائس نہیں بنی۔",
+  "Payment Received": "ادائیگی موصول ہو گئی",
+  "Invoice Created Successfully": "انوائس کامیابی سے بنا دی گئی ہے",
+  "Invalid credentials": "صارف نام یا پاس ورڈ غلط ہے",
+  "Remember Me": "مجھے یاد رکھیں",
+  "Forgot Password": "پاس ورڈ بھول گئے؟",
+  "Role": "کردار",
+  "Branch": "برانچ",
+  "Notifications": "اطلاعات",
+  "Profile": "پروفائل",
+  "Account Information": "اکاؤنٹ کی معلومات",
+  "My Invoices": "میری انوائسز",
+  "My Ledger": "میرا کھاتہ",
+  "Invoice Details": "انوائس کی تفصیلات",
+  "English": "English",
+  "اردو": "اردو",
+};
+
+const CT_STATUS_TRANSLATIONS = {
+  Pending: "زیرِ التوا", Paid: "ادا شدہ", Unpaid: "غیر ادا شدہ",
+  Completed: "مکمل", Cancelled: "منسوخ", Processing: "زیرِ کارروائی",
+  New: "نیا", Contacted: "رابطہ کیا گیا", Qualified: "موزوں",
+  Won: "کامیاب", Lost: "ناکام", Booked: "بک شدہ",
+  "Partially Delivered": "جزوی ڈیلیوری", "Partially Paid": "جزوی ادائیگی",
+  "Broken Promise": "وعدہ پورا نہیں ہوا", Active: "فعال", Reversed: "واپس منسوخ",
+  Builder: "بلڈر", Contractor: "کنٹریکٹر", Developer: "ڈویلپر",
+  "Housing Society": "ہاؤسنگ سوسائٹی",
+};
+
+const CTLanguageContext = createContext(null);
+
+function CTLanguageProvider({ children }) {
+  const [language, setLanguageState] = useState(() => {
+    try { return localStorage.getItem(CT_LANGUAGE_KEY) || "en"; } catch { return "en"; }
+  });
+  const isUrdu = language === "ur";
+
+  const setLanguage = useCallback((next) => {
+    const value = next === "ur" ? "ur" : "en";
+    setLanguageState(value);
+    try { localStorage.setItem(CT_LANGUAGE_KEY, value); } catch {}
+  }, []);
+
+  const t = useCallback((key) => {
+    if (language === "en") return key;
+    return CT_TRANSLATIONS[key] || CT_STATUS_TRANSLATIONS[key] || key;
+  }, [language]);
+
+  useEffect(() => {
+    document.documentElement.lang = isUrdu ? "ur" : "en";
+    document.documentElement.dir = isUrdu ? "rtl" : "ltr";
+    document.body.dir = isUrdu ? "rtl" : "ltr";
+    document.body.classList.toggle("ct-urdu", isUrdu);
+
+    const translate = (root = document.body) => {
+      if (!root) return;
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      let node;
+      while ((node = walker.nextNode())) {
+        if (node.parentElement && !["SCRIPT","STYLE","TEXTAREA"].includes(node.parentElement.tagName)) nodes.push(node);
+      }
+      nodes.forEach((n) => {
+        const raw = n.nodeValue;
+        const trimmed = raw.trim();
+        if (!trimmed) return;
+        const lead = raw.slice(0, raw.indexOf(trimmed));
+        const trail = raw.slice(raw.indexOf(trimmed) + trimmed.length);
+        const translated = isUrdu
+          ? (CT_TRANSLATIONS[trimmed] || CT_STATUS_TRANSLATIONS[trimmed] || trimmed)
+          : Object.keys(CT_TRANSLATIONS).find(k => CT_TRANSLATIONS[k] === trimmed) || trimmed;
+        if (translated !== trimmed) n.nodeValue = lead + translated + trail;
+      });
+
+      root.querySelectorAll("input[placeholder], textarea[placeholder], [title], [aria-label]").forEach((el) => {
+        for (const attr of ["placeholder","title","aria-label"]) {
+          const value = el.getAttribute(attr);
+          if (!value) continue;
+          const translated = isUrdu
+            ? (CT_TRANSLATIONS[value] || CT_STATUS_TRANSLATIONS[value])
+            : Object.keys(CT_TRANSLATIONS).find(k => CT_TRANSLATIONS[k] === value);
+          if (translated) el.setAttribute(attr, translated);
+        }
+      });
+    };
+
+    translate(document.body);
+    const observer = new MutationObserver(() => translate(document.body));
+    observer.observe(document.body, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, [isUrdu]);
+
+  return <CTLanguageContext.Provider value={{ language, setLanguage, isUrdu, t }}>{children}</CTLanguageContext.Provider>;
+}
+
+function useCTLanguage() {
+  return useContext(CTLanguageContext) || {
+    language: "en", setLanguage: () => {}, isUrdu: false, t: (x) => x
+  };
+}
+
+function LanguageSwitcher() {
+  const { language, setLanguage } = useCTLanguage();
+  return (
+    <div className="ct-language-switcher" role="group" aria-label="Language">
+      <button type="button" onClick={() => setLanguage("en")} className={language === "en" ? "active" : ""}>English</button>
+      <button type="button" onClick={() => setLanguage("ur")} className={language === "ur" ? "active" : ""}>اردو</button>
+    </div>
+  );
+}
+
 const MESSAGE_TEMPLATES = {
   en: {
     Builder: (n, o) => `Assalam-o-Alaikum ${n},\n\nThis is Chaudhary Traders. We supply cement, bricks, sand and crush at competitive rates with reliable on-site delivery for your ongoing projects.${o > 0 ? `\n\nQuick reminder — your current outstanding balance is Rs ${o.toLocaleString()}. Kindly clear it at your convenience.` : ""}\n\nLet us know your next material requirement and we'll send a quote right away.`,
@@ -25,10 +282,10 @@ const MESSAGE_TEMPLATES = {
     "Housing Society": (n, o) => `Assalam-o-Alaikum ${n},\n\nChaudhary Traders is offering society-wide supply rates for cement, bricks and sand for common infrastructure work.${o > 0 ? `\n\nOutstanding balance: Rs ${o.toLocaleString()}.` : ""}\n\nWe'd be glad to prepare a bulk quotation for the society.`,
   },
   ur: {
-    Builder: (n, o) => `Assalam-o-Alaikum ${n},\n\nYe Chaudhary Traders hai. Hum cement, bricks, ret aur crush acchi rates par supply karte hain, saath hi site par time par delivery.${o > 0 ? `\n\nYaad dahani: aap ka outstanding balance Rs ${o.toLocaleString()} hai. Jaldi clear kar dein.` : ""}\n\nAgla order bata dein, foran quote bhej dete hain.`,
-    Contractor: (n, o) => `Assalam-o-Alaikum ${n},\n\nChaudhary Traders — bulk rate cement aur material available hai, same-day delivery ke saath.${o > 0 ? `\n\nAap ka Rs ${o.toLocaleString()} outstanding hai, yaad dahani ke tor par bata rahe hain.` : ""}\n\nAgla order reply mein bata dein.`,
-    Developer: (n, o) => `Assalam-o-Alaikum ${n},\n\nAap ke project ke liye Chaudhary Traders volume pricing aur dedicated delivery schedule offer kar sakta hai.${o > 0 ? `\n\nOutstanding balance: Rs ${o.toLocaleString()}.` : ""}\n\nStanding supply arrangement discuss karne ke liye waqt bata dein.`,
-    "Housing Society": (n, o) => `Assalam-o-Alaikum ${n},\n\nChaudhary Traders society ke liye bulk rate offer kar raha hai cement, bricks aur ret par.${o > 0 ? `\n\nOutstanding balance: Rs ${o.toLocaleString()}.` : ""}\n\nSociety ke liye bulk quotation tayyar kar dete hain, bata dein.`,
+    Builder: (n, o) => `السلام علیکم ${n}،\n\nیہ چوہدری ٹریڈرز ہے۔ ہم سیمنٹ، اینٹیں، ریت اور کرش مسابقتی نرخوں پر فراہم کرتے ہیں، اور آپ کے جاری منصوبوں کے لیے قابلِ اعتماد سائٹ ڈیلیوری بھی فراہم کرتے ہیں۔${o > 0 ? `\n\nیاد دہانی: آپ کے اکاؤنٹ میں ${o.toLocaleString()} روپے بقایا ہیں۔ براہِ کرم اپنی سہولت کے مطابق ادائیگی کر دیں۔` : ""}\n\nاپنی اگلی میٹریل ضرورت بتا دیں، ہم فوراً کوٹیشن بھیج دیں گے۔`,
+    Contractor: (n, o) => `السلام علیکم ${n}،\n\nچوہدری ٹریڈرز کی جانب سے سیمنٹ اور تعمیراتی میٹریل کے بلک ریٹس دستیاب ہیں، ساتھ ہی اسی دن رکشہ/ٹرک ڈیلیوری کی سہولت بھی موجود ہے۔${o > 0 ? `\n\nآپ کے اکاؤنٹ میں ${o.toLocaleString()} روپے بقایا ہیں، براہِ کرم ادائیگی کر دیں۔` : ""}\n\nاپنا اگلا آرڈر جواب میں بھیج دیں، ہم فوراً کارروائی کریں گے۔`,
+    Developer: (n, o) => `السلام علیکم ${n}،\n\nآپ کے ڈویلپمنٹ منصوبے کے لیے چوہدری ٹریڈرز تمام مراحل کے لیے حجم کے مطابق قیمتیں اور مخصوص ڈیلیوری شیڈول فراہم کر سکتا ہے۔${o > 0 ? `\n\nآپ کے اکاؤنٹ میں بقایا رقم: ${o.toLocaleString()} روپے۔` : ""}\n\nمسلسل سپلائی کے انتظام کے لیے مناسب وقت بتا دیں۔`,
+    "Housing Society": (n, o) => `السلام علیکم ${n}،\n\nچوہدری ٹریڈرز ہاؤسنگ سوسائٹی کے انفراسٹرکچر کام کے لیے سیمنٹ، اینٹوں اور ریت پر خصوصی بلک ریٹس فراہم کر رہا ہے۔${o > 0 ? `\n\nبقایا رقم: ${o.toLocaleString()} روپے۔` : ""}\n\nہم سوسائٹی کے لیے بلک کوٹیشن تیار کر سکتے ہیں، براہِ کرم بتا دیں۔`,
   },
 };
 
@@ -318,6 +575,7 @@ function Login({ users, customers, onLogin, companyName, logoUrl, onResetUsers }
   return (
     <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
       <div className="bg-white w-full max-w-sm border-t-4 border-slate-900">
+        <div className="flex justify-end px-4 pt-3"><LanguageSwitcher /></div>
         <div className="px-6 pt-6 pb-2">
           {logoUrl && <img src={logoUrl} alt="Logo" className="w-12 h-12 object-contain mb-2" />}
           <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500 font-bold">Trading Ledger</div>
@@ -1128,15 +1386,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
 
 function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
   const isEdit = !!editingInvoice;
-  // Cash Customer / Walk-In: customerType is "Regular" (existing workflow,
-  // unchanged) or "Cash" (no customer account required). The type is fixed
-  // once an invoice is created, so the toggle is only shown for new invoices.
-  const [customerType, setCustomerType] = useState(editingInvoice?.customerType || "Regular");
-  const canChangeCustomerType = !isEdit;
   const [customerId, setCustomerId] = useState(editingInvoice?.customerId || prefill?.customerId || customers[0]?.id || "");
-  const [cashName, setCashName] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerName || "") : "");
-  const [cashPhone, setCashPhone] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerPhone || "") : "");
-  const [cashAddress, setCashAddress] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerAddress || "") : "");
   const [date, setDate] = useState(editingInvoice?.date || todayISO());
   const [items, setItems] = useState(
     editingInvoice
@@ -1159,12 +1409,8 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
 
   const matchedDriver = drivers.find((d) => d.code.toLowerCase() === driverIdInput.trim().toLowerCase());
 
-  const selectedCustomer = customerType === "Regular" ? customers.find((c) => c.id === customerId) : null;
-  // Cash Customer / Walk-In never carries an outstanding balance — it has
-  // no customer account, no opening balance, and no ledger of its own.
-  const previousOutstanding = customerType === "Cash"
-    ? 0
-    : isEdit
+  const selectedCustomer = customers.find((c) => c.id === customerId);
+  const previousOutstanding = isEdit
     ? (editingInvoice.previousOutstanding || 0)
     : selectedCustomer
     ? computeLedgerForCustomer(selectedCustomer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding
@@ -1184,15 +1430,6 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const total = subtotal + (Number(rickshawRent) || 0) + (Number(deliveryCharges) || 0) - (Number(discount) || 0);
   const balanceDue = total - (Number(paymentReceived) || 0);
 
-  // Cash Customer / Walk-In: Invoice Total = Cash Received, always. Keep
-  // the payment field synced to the total so the invoice is always fully
-  // paid with zero outstanding, per the Cash Sale workflow.
-  useEffect(() => {
-    if (customerType === "Cash") {
-      setPaymentReceived(total);
-    }
-  }, [customerType, total]);
-
   function updateItem(id, patch) {
     setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
   }
@@ -1208,39 +1445,20 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   }
 
   function submit() {
-    let customer = null;
-    if (customerType === "Regular") {
-      customer = customers.find((c) => c.id === customerId);
-      if (!customer) { alert("Pehle customer select karein."); return; }
-    }
+    const customer = customers.find((c) => c.id === customerId);
+    if (!customer) { alert("Pehle customer select karein."); return; }
     const cleanItems = items.filter((it) => it.name && Number(it.qty) > 0);
     if (cleanItems.length === 0) { alert("Kam az kam ek item add karein."); return; }
     const issuedTo = issuedToName.trim()
       ? { name: issuedToName.trim(), phone: issuedToPhone.trim(), relation: issuedToRelation, remarks: issuedToRemarks.trim() }
       : null;
 
-    // Cash Customer / Walk-In: no customer account required. Name/phone/
-    // address are optional free-text fields, defaulting to "Cash Customer"
-    // when no name is entered. Invoice Total = Cash Received, so the
-    // invoice is always fully paid with zero outstanding balance.
-    const finalCustomerId = customerType === "Cash" ? (isEdit ? editingInvoice.customerId : uid("cash")) : customerId;
-    const finalCustomerName = customerType === "Cash" ? (cashName.trim() || "Cash Customer") : customer.name;
-    const finalCustomerPhone = customerType === "Cash" ? cashPhone.trim() : (customer.phone || "");
-    const finalCustomerAddress = customerType === "Cash" ? cashAddress.trim() : (customer.address || "");
-    const finalPaymentReceived = customerType === "Cash" ? total : (Number(paymentReceived) || 0);
-    const finalBalanceDue = total - finalPaymentReceived;
-
     const base = {
-      customerId: finalCustomerId,
-      customerName: finalCustomerName,
-      customerPhone: finalCustomerPhone,
-      customerAddress: finalCustomerAddress,
-      customerType,
-      // A Cash Customer / Walk-In invoice belongs to the branch that
-      // created it (there is no customer record to derive the branch
-      // from), so it stays visible in that branch's invoice list.
-      branchId: currentUser?.branchId || "",
-      previousOutstanding: customerType === "Cash" ? 0 : previousOutstanding,
+      customerId,
+      customerName: customer.name,
+      customerPhone: customer.phone || "",
+      customerAddress: customer.address || "",
+      previousOutstanding,
       date,
       // BUGFIX: item qty (which may be a fractional Feet/Meter/KG/Liter/
       // Sq.Ft amount) and total are rounded so the per-unit rate derived
@@ -1256,9 +1474,9 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
       receivedBy,
       subtotal,
       total,
-      paymentReceived: finalPaymentReceived,
-      balanceDue: finalBalanceDue,
-      status: customerType === "Cash" ? "Paid" : (finalBalanceDue <= 0 ? "Paid" : finalPaymentReceived > 0 ? "Partial" : "Unpaid"),
+      paymentReceived: Number(paymentReceived) || 0,
+      balanceDue,
+      status: balanceDue <= 0 ? "Paid" : paymentReceived > 0 ? "Partial" : "Unpaid",
       issuedTo,
     };
 
@@ -1297,49 +1515,16 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
           )}
         </div>
       )}
-      {canChangeCustomerType ? (
-        <Field label="Customer Type">
-          <div className="flex gap-2">
-            <button type="button" onClick={() => setCustomerType("Regular")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${customerType === "Regular" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>Regular Customer</button>
-            <button type="button" onClick={() => setCustomerType("Cash")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${customerType === "Cash" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>Cash Customer / Walk-In</button>
-          </div>
-        </Field>
-      ) : (
-        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-2">
-          {customerType === "Cash" ? "Cash Customer / Walk-In Invoice" : "Regular Customer Invoice"}
-        </div>
-      )}
-
       <div className="grid grid-cols-2 gap-3">
-        {customerType === "Regular" && (
-          <Field label="Customer">
-            <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
-              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-            </select>
-          </Field>
-        )}
+        <Field label="Customer">
+          <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+            {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </Field>
         <Field label="Date">
           <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
         </Field>
       </div>
-
-      {customerType === "Cash" && (
-        <div className="bg-blue-50 border border-blue-200 p-3 mb-3">
-          <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700 mb-2">Cash Customer / Walk-In Details (Optional)</div>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Customer Name (optional)">
-              <input className={inputCls} placeholder="Cash Customer" value={cashName} onChange={(e) => setCashName(e.target.value)} />
-            </Field>
-            <Field label="Phone Number (optional)">
-              <input className={inputCls} value={cashPhone} onChange={(e) => setCashPhone(e.target.value)} />
-            </Field>
-          </div>
-          <Field label="Address (optional)">
-            <input className={inputCls} value={cashAddress} onChange={(e) => setCashAddress(e.target.value)} />
-          </Field>
-          <div className="text-[11px] text-blue-700">Customer account, portal, credit limit ya outstanding ledger nahi banega — sirf cash sale invoice.</div>
-        </div>
-      )}
 
       {selectedCustomer && (
         <div className="bg-slate-50 border border-slate-200 p-3 mb-3 text-sm">
@@ -1422,15 +1607,9 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
         <Field label="Discount (Rs)">
           <input type="number" className={inputCls} value={discount} onChange={(e) => setDiscount(e.target.value)} />
         </Field>
-        {customerType === "Regular" ? (
-          <Field label="Payment Received Now (Rs)">
-            <input type="number" className={inputCls} value={paymentReceived} onChange={(e) => setPaymentReceived(e.target.value)} />
-          </Field>
-        ) : (
-          <Field label="Cash Received (Auto = Total)">
-            <input type="number" className={`${inputCls} bg-slate-100`} value={total} disabled readOnly />
-          </Field>
-        )}
+        <Field label="Payment Received Now (Rs)">
+          <input type="number" className={inputCls} value={paymentReceived} onChange={(e) => setPaymentReceived(e.target.value)} />
+        </Field>
       </div>
 
       <div className="border-t border-slate-200 mt-3 pt-3">
@@ -1538,9 +1717,6 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, onClose, onEdit,
           <div className="text-right">
             <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{invoice.number}</div>
             <div className="text-xs text-slate-500 mt-1">Date: <span className="font-bold text-slate-700">{fmtDate(invoice.date)}</span></div>
-            {invoice.customerType === "Cash" && (
-              <div className="inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</div>
-            )}
             {rs && rs.status !== "Normal" && (
               <div className={`inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 ${RETURN_STATUS_TONE[rs.status]}`}>{rs.status}</div>
             )}
@@ -1747,32 +1923,25 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
     <div>
       <div className="flex items-center justify-between mb-4">
         <h2 className="text-xl font-black uppercase tracking-tight">Invoices</h2>
-        <Btn onClick={() => setShowForm(true)}>+ New Invoice</Btn>
+        <Btn onClick={() => setShowForm(true)} disabled={customers.length === 0}>+ New Invoice</Btn>
       </div>
-      {customers.length === 0 && <div className="text-slate-400 mb-3">Regular customer ke liye pehle Customers tab mein customer add karein — Cash Customer / Walk-In invoice abhi bhi bana sakte hain.</div>}
+      {customers.length === 0 && <div className="text-slate-400 mb-3">Pehle Customers tab mein customer add karein.</div>}
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-              <th className="px-4 py-2">Number</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Type</th><th className="px-4 py-2">Date</th>
+              <th className="px-4 py-2">Number</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Date</th>
               <th className="px-4 py-2 text-right">Total</th><th className="px-4 py-2 text-right">Due</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Return/Exchange</th>
             </tr>
           </thead>
           <tbody>
-            {sorted.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi invoice nahi bana.</td></tr>}
+            {sorted.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-slate-400">Koi invoice nahi bana.</td></tr>}
             {sorted.map((inv) => {
               const rs = computeInvoiceReturnStatus(inv, returns, exchanges);
               return (
                 <tr key={inv.id} className={`border-t border-slate-100 cursor-pointer hover:bg-slate-50 ${inv.docStatus === "Cancelled" ? "opacity-50" : ""}`} onClick={() => setViewing(inv)}>
                   <td className="px-4 py-2 font-bold text-blue-700">{inv.number}</td>
                   <td className="px-4 py-2">{inv.customerName}</td>
-                  <td className="px-4 py-2">
-                    {inv.customerType === "Cash" ? (
-                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</span>
-                    ) : (
-                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-100 text-slate-500">Regular</span>
-                    )}
-                  </td>
                   <td className="px-4 py-2 text-slate-500">{fmtDate(inv.date)}</td>
                   <td className="px-4 py-2 text-right font-bold">{fmtMoney(inv.total)}</td>
                   <td className="px-4 py-2 text-right text-red-600 font-bold">{inv.docStatus !== "Cancelled" && inv.balanceDue > 0 ? fmtMoney(inv.balanceDue) : "-"}</td>
@@ -4027,6 +4196,10 @@ function CustomerPortal({ currentUser, customers, invoices, payments, returns, e
 
   return (
     <div className="min-h-screen bg-slate-100">
+      <div className="flex justify-end p-3 bg-white border-b border-slate-200">
+        <LanguageSwitcher />
+      </div>
+      <div className="flex justify-end p-3 bg-white"><LanguageSwitcher /></div>
       <style>{`
         @media print {
           body * { visibility: hidden; }
@@ -4296,7 +4469,7 @@ function Settings({ settings, saveSettings, users, saveUser, deleteUser, current
 
 /* ---------------- App ---------------- */
 
-export default function App() {
+function AppContent() {
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
   const [page, setPage] = useState("dashboard");
@@ -4544,7 +4717,6 @@ export default function App() {
       persist.payments([...payments, {
         id: uid("pay"), customerId: inv.customerId, customerName: inv.customerName,
         date: inv.date, amount: inv.paymentReceived, method: "Cash", note: `Against ${inv.number}`, invoiceId: inv.id,
-        branchId: inv.branchId || "",
       }]);
     }
   }
@@ -4984,12 +5156,8 @@ export default function App() {
   const myBranchName = branches.find((b) => b.id === myBranchId)?.name || "";
   const visibleCustomers = myBranchId ? customers.filter((c) => c.branchId === myBranchId) : customers;
   const visibleCustomerIds = new Set(visibleCustomers.map((c) => c.id));
-  const visibleInvoices = myBranchId
-    ? invoices.filter((i) => visibleCustomerIds.has(i.customerId) || (i.customerType === "Cash" && i.branchId === myBranchId))
-    : invoices;
-  const visiblePayments = myBranchId
-    ? payments.filter((p) => visibleCustomerIds.has(p.customerId) || p.branchId === myBranchId)
-    : payments;
+  const visibleInvoices = myBranchId ? invoices.filter((i) => visibleCustomerIds.has(i.customerId)) : invoices;
+  const visiblePayments = myBranchId ? payments.filter((p) => visibleCustomerIds.has(p.customerId)) : payments;
   const visibleBookings = myBranchId ? bookings.filter((b) => visibleCustomerIds.has(b.customerId)) : bookings;
   const visibleOrders = myBranchId ? orders.filter((o) => visibleCustomerIds.has(o.customerId)) : orders;
   const visibleLeads = myBranchId ? leads.filter((l) => l.branchId === myBranchId) : leads;
@@ -5090,6 +5258,15 @@ export default function App() {
   return (
     <div className="h-screen flex bg-slate-100 text-slate-900">
       <style>{`
+        .ct-language-switcher{display:inline-flex;align-items:center;gap:2px;border:1px solid #cbd5e1;background:#fff;padding:2px;border-radius:6px;white-space:nowrap}
+        .ct-language-switcher button{border:0;background:transparent;padding:5px 9px;font-size:11px;font-weight:700;cursor:pointer;color:#475569;border-radius:4px}
+        .ct-language-switcher button.active{background:#0f172a;color:#fff}
+        body.ct-urdu,.ct-urdu{font-family:"Noto Naskh Arabic","Noto Nastaliq Urdu",Arial,sans-serif}
+        .ct-urdu input,.ct-urdu textarea,.ct-urdu select,.ct-urdu button{font-family:"Noto Naskh Arabic","Noto Nastaliq Urdu",Arial,sans-serif}
+        .ct-urdu table{text-align:right}
+        .ct-urdu th,.ct-urdu td{text-align:right}
+      `}</style>
+      <style>{`
         @media print {
           body * { visibility: hidden; }
           #print-invoice, #print-invoice * { visibility: visible; }
@@ -5101,6 +5278,7 @@ export default function App() {
       <Sidebar page={page} setPage={setPage} role={currentUser.role} onLogout={() => setCurrentUser(null)} companyName={settings.companyName} logoUrl={settings.logoUrl} />
       <div className="flex-1 overflow-y-auto">
         <div className="flex items-center justify-between px-6 py-3 bg-white border-b border-slate-200 gap-4">
+          <LanguageSwitcher />
           <div className="text-sm text-slate-500 whitespace-nowrap">
             Welcome, <span className="font-bold text-slate-900">{currentUser.name}</span>
             {myBranchName && <span className="ml-2 text-xs text-blue-700 font-bold uppercase">· {myBranchName}</span>}
@@ -5121,4 +5299,8 @@ export default function App() {
       </div>
     </div>
   );
+}
+
+export default function App() {
+  return <CTLanguageProvider><AppContent /></CTLanguageProvider>;
 }
