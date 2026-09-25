@@ -2644,7 +2644,7 @@ function calculateCommissionForInvoice(invoice, rules = [], products = []) {
 
 function CommissionPage({
   agents, rules, transactions, payments, invoices, customers, products, currentUser,
-  saveAgent, saveRule, deactivateAgent, deleteRule, approveCommission, payCommission, cancelCommission
+  saveAgent, saveRule, deactivateAgent, deleteRule, approveCommission, payCommission, cancelCommission, onSync
 }) {
   const [tab, setTab] = useState("dashboard");
   const [showAgent, setShowAgent] = useState(false);
@@ -2685,6 +2685,7 @@ function CommissionPage({
         <div className="flex gap-2">
           {currentUser.role === "admin" && <Btn small onClick={() => { setEditingAgent(null); setShowAgent(true); }}>{t("Add Agent")}</Btn>}
           {currentUser.role === "admin" && <Btn small variant="ghost" onClick={() => { setEditingRule(null); setShowRule(true); }}>{t("Commission Rule")}</Btn>}
+          {currentUser.role === "admin" && <Btn small variant="ghost" onClick={onSync}>Sync Existing Invoices</Btn>}
         </div>
       </div>
       <div className="flex gap-1 mb-4 border-b border-slate-200">
@@ -2745,7 +2746,7 @@ function CommissionPage({
             <input className={inputCls} type="date" value={filters.from} onChange={e=>setFilters({...filters,from:e.target.value})}/>
             <input className={inputCls} type="date" value={filters.to} onChange={e=>setFilters({...filters,to:e.target.value})}/>
           </div>
-          <CommissionTable rows={visibleTx} agents={agents} currentUser={currentUser} onApprove={approveCommission} onPay={setPaying} onCancel={cancelCommission} />
+          <CommissionTable rows={visibleTx} transactions={transactions} agents={agents} currentUser={currentUser} onApprove={approveCommission} onPay={setPaying} onCancel={cancelCommission} />
         </div>
       )}
 
@@ -5618,6 +5619,43 @@ export default function App() {
     };
     persist.commissionTransactions(upsert(commissionTransactions, tx));
   }
+
+  // Rebuild/sync commission transactions from existing invoices. This is
+  // important for invoices that were created before the Commission module
+  // was installed, or before an agent/rule was configured. It never deletes
+  // financial history; it only creates/updates the related commission record.
+  function syncCommissionFromInvoices() {
+    const next = [...commissionTransactions];
+    invoices.forEach((inv) => {
+      const existingIndex = next.findIndex((t) => t.invoiceId === inv.id);
+      if (!inv.commissionAgentId) return;
+      const agent = commissionAgents.find((a) => a.id === inv.commissionAgentId);
+      if (!agent) return;
+      const calc = calculateCommissionForInvoice(inv, commissionRules, products);
+      const existing = existingIndex >= 0 ? next[existingIndex] : null;
+      const bagQty = (inv.items || []).reduce((sum, item) => sum + (String(item.unit || '').toLowerCase() === 'bag' ? (Number(item.qty) || 0) : 0), 0);
+      const minimumBags = Number(agent.minimumBags) > 0 ? Number(agent.minimumBags) : 100;
+      const paidAmount = Number(existing?.paidAmount || 0);
+      const cancelled = inv.docStatus === 'Cancelled' || inv.status === 'Cancelled';
+      const tx = {
+        id: existing?.id || uid('com-tx'),
+        agentId: agent.id, agentName: agent.name, invoiceId: inv.id, invoiceNumber: inv.number,
+        customerId: inv.customerId, customerName: inv.customerName, saleAmount: Number(inv.total) || 0,
+        bagQty, minimumBags,
+        commissionType: calc.breakdown[0]?.ruleType || agent.commissionType || 'percentage',
+        commissionRate: calc.breakdown[0]?.rate || Number(agent.commissionRate) || 0,
+        commissionAmount: calc.amount, paidAmount,
+        remainingAmount: cancelled ? 0 : Math.max(0, calc.amount - paidAmount),
+        status: cancelled ? 'cancelled' : (calc.amount <= paidAmount && calc.amount > 0 ? 'paid' : (existing?.status === 'approved' ? 'approved' : 'pending')),
+        date: inv.date, branchId: inv.branchId || '', breakdown: calc.breakdown,
+        createdAt: existing?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString()
+      };
+      if (existingIndex >= 0) next[existingIndex] = tx; else next.push(tx);
+    });
+    persist.commissionTransactions(next);
+    return next;
+  }
+
   function approveCommission(tx) {
     if (currentUser?.role !== "admin") return;
     persist.commissionTransactions(upsert(commissionTransactions, { ...tx, status: "approved", updatedAt: new Date().toISOString() }));
@@ -6194,7 +6232,7 @@ export default function App() {
     payments: <Payments customers={visibleCustomers} payments={visiblePayments} promises={visiblePromises} savePayment={savePayment} />,
     commission: <CommissionPage agents={commissionAgents} rules={commissionRules} transactions={visibleCommissionTransactions} payments={commissionPayments} invoices={visibleInvoices} customers={visibleCustomers} products={products} currentUser={currentUser}
       saveAgent={saveCommissionAgent} saveRule={saveCommissionRule} deactivateAgent={deactivateCommissionAgent} deleteRule={deleteCommissionRule}
-      approveCommission={approveCommission} payCommission={payCommission} cancelCommission={cancelCommission} />,
+      approveCommission={approveCommission} payCommission={payCommission} cancelCommission={cancelCommission} onSync={syncCommissionFromInvoices} />,
     outstandingTransfer: (
       <OutstandingTransferPage
         customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={visibleReturns}
