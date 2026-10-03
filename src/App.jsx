@@ -2442,7 +2442,7 @@ function invoiceStatusBanner(invoice) {
   return { text: `Unpaid \u2014 Balance Due on Current Purchase${prevDue ? " \u00B7 Previous Outstanding Still Due" : ""}`, tone: "red" };
 }
 
-function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, onClose, onEdit, onCancelInvoice, onGoToReturn, onGoToExchange, onCreateNewFromInvoice }) {
+function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, onClose, onEdit, onCancelInvoice, onGoToReturn, onGoToExchange, onCreateNewFromInvoice, receivingViewer }) {
   const banner = invoiceStatusBanner(invoice);
   const bannerCls = {
     emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
@@ -2570,6 +2570,9 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
           ⚠ {banner.text}
         </div>
       </div>
+
+      {/* Receiving Proof (add-only): shown to ERP admin/staff only, never printed */}
+      {receivingViewer && <ReceivingProofRow invoice={invoice} settings={settings} viewer={receivingViewer} />}
 
       {commissionInfo && (
         <div className="mt-4 text-xs bg-amber-50 border border-amber-200 px-3 py-2 print:hidden flex items-center justify-between">
@@ -2822,6 +2825,7 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
           onGoToReturn={onGoToReturn}
           onGoToExchange={onGoToExchange}
           onCreateNewFromInvoice={(inv) => { setViewing(null); setShowForm(true); }}
+          receivingViewer={currentUser}
         />
       )}
     </div>
@@ -6698,4 +6702,874 @@ function App() {
   );
 }
 
-export default App;
+/* ============================================================
+   RECEIVING PROOF  (ADD-ONLY MODULE)
+   ------------------------------------------------------------
+   Customer receives material -> confirms quantity -> signs ->
+   uploads a proof photo -> admin/staff open the invoice and
+   click "Receiving Proof — View".
+
+   This module never reads or writes invoices, payments, ledger,
+   customers, inventory, returns or exchanges. It only uses its
+   own new storage keys (same kv_store table / same localStorage
+   prefix as the rest of the ERP):
+
+     ct-receiving-links                 { [invoiceId]: { token, sig, createdAt, createdBy } }
+     ct-receiving-slip:<token>          what the customer link is allowed to see (materials only)
+     ct-receiving-records:<token>       [ receiving records for that invoice ]
+     ct-receiving-proof:<receivingId>   { signature, proofImage }  (loaded only on "View")
+
+   The customer link (?receive=<token>) loads ONLY the three
+   token-scoped keys above. It never loads ct-invoices,
+   ct-customers, ct-payments or any other ERP data, and the slip
+   contains no prices, balances or ledger information.
+   ============================================================ */
+
+const RP_LINKS_KEY = "ct-receiving-links";
+const RP_SLIP_PREFIX = "ct-receiving-slip:";
+const RP_RECORDS_PREFIX = "ct-receiving-records:";
+const RP_PROOF_PREFIX = "ct-receiving-proof:";
+const RP_URL_PARAM = "receive";
+
+// Urdu labels for the new screens (only adds keys that do not exist yet).
+(function rpAddTranslations() {
+  const ur = {
+    "Receiving Proof": "وصولی کا ثبوت",
+    "📷 Receiving Proof": "📷 وصولی کا ثبوت",
+    "Material Receiving Slip": "سامان وصولی کی رسید",
+    "Delivered Material": "ڈیلیور شدہ سامان",
+    "Received By": "وصول کنندہ",
+    "Enter Name": "نام درج کریں",
+    "Customer Signature": "گاہک کے دستخط",
+    "Sign Here ✍": "یہاں دستخط کریں ✍",
+    "Clear": "صاف کریں",
+    "Upload Image": "تصویر اپ لوڈ کریں",
+    "Change Image": "تصویر تبدیل کریں",
+    "Remove Image": "تصویر ہٹائیں",
+    "✓ CONFIRM RECEIVED": "✓ وصولی کی تصدیق کریں",
+    "Saving...": "محفوظ ہو رہا ہے...",
+    "Not Uploaded": "اپ لوڈ نہیں ہوا",
+    "✓ Uploaded": "✓ اپ لوڈ ہو گیا",
+    "✓ Received": "✓ وصول ہو گیا",
+    "No Image": "تصویر نہیں",
+    "Get Customer Link": "گاہک کا لنک بنائیں",
+    "Copy Link": "لنک کاپی کریں",
+    "Link Copied": "لنک کاپی ہو گیا",
+    "Open Slip": "رسید کھولیں",
+    "Material Received": "سامان وصول ہو گیا",
+    "Thank you. Your receiving has been recorded.": "شکریہ۔ آپ کی وصولی محفوظ ہو گئی ہے۔",
+    "Record Another Delivery": "ایک اور ڈیلیوری درج کریں",
+    "All material on this invoice has been received.": "اس انوائس کا تمام سامان وصول ہو چکا ہے۔",
+    "This receiving link is not valid.": "یہ وصولی لنک درست نہیں ہے۔",
+    "This receiving link is no longer active.": "یہ وصولی لنک اب فعال نہیں ہے۔",
+    "Earlier Receivings": "پچھلی وصولیاں",
+    "Invoice": "انوائس",
+    "Signature": "دستخط",
+    "Photo of received material, delivery or signed slip (optional)": "وصول شدہ سامان، ڈیلیوری یا دستخط شدہ رسید کی تصویر (اختیاری)",
+    "No proof image was uploaded for this receiving.": "اس وصولی کے لیے کوئی تصویر اپ لوڈ نہیں کی گئی۔",
+    "Delete Receiving": "وصولی حذف کریں",
+  };
+  Object.keys(ur).forEach((k) => {
+    if (translations.ur[k] == null) translations.ur[k] = ur[k];
+  });
+})();
+
+/* ---------- Storage (strict: throws on failure so a customer is never
+   told "received" when nothing was saved) ---------- */
+async function rpGet(key, fallback) {
+  if (supabase) {
+    const { data, error } = await supabase.from("kv_store").select("value").eq("key", key).maybeSingle();
+    if (error) throw error;
+    return data ? data.value : fallback;
+  }
+  const raw = window.localStorage.getItem(LS_PREFIX + key);
+  return raw !== null ? JSON.parse(raw) : fallback;
+}
+async function rpSet(key, value) {
+  if (supabase) {
+    const { error } = await supabase.from("kv_store").upsert({ key, value, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    return;
+  }
+  window.localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
+}
+async function rpRemove(key) {
+  if (supabase) {
+    const { error } = await supabase.from("kv_store").delete().eq("key", key);
+    if (error) throw error;
+    return;
+  }
+  window.localStorage.removeItem(LS_PREFIX + key);
+}
+
+/* ---------- Helpers ---------- */
+function rpNewToken() {
+  try {
+    const bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+  } catch {
+    let s = "";
+    while (s.length < 32) s += Math.floor(Math.random() * 16).toString(16);
+    return s;
+  }
+}
+function rpValidToken(token) {
+  return /^[a-f0-9]{32}$/.test(token || "");
+}
+function rpTokenFromUrl() {
+  if (typeof window === "undefined") return "";
+  try {
+    return (new URLSearchParams(window.location.search).get(RP_URL_PARAM) || "").trim();
+  } catch {
+    return "";
+  }
+}
+function rpLinkUrl(token) {
+  return `${window.location.origin}${window.location.pathname}?${RP_URL_PARAM}=${token}`;
+}
+function rpIsStaffViewer(viewer) {
+  return !!viewer && (viewer.role === "admin" || viewer.role === "staff");
+}
+// What the customer link is allowed to see: materials + quantities only.
+function rpBuildSlip(invoice, settings, token) {
+  return {
+    token,
+    invoiceId: invoice.id,
+    invoiceNumber: invoice.number,
+    invoiceDate: invoice.date,
+    customerId: invoice.customerId || "",
+    customerName: invoice.customerName || "",
+    suggestedReceiver: invoice.issuedTo?.name || "",
+    companyName: settings?.companyName || "",
+    companyPhone: settings?.companyPhone || "",
+    logoUrl: settings?.logoUrl || "",
+    closed: invoice.docStatus === "Cancelled",
+    items: (invoice.items || []).map((it, idx) => ({
+      lineIdx: idx,
+      name: it.name,
+      unit: it.unit || "",
+      qty: Number(it.qty) || 0,
+    })),
+    updatedAt: new Date().toISOString(),
+  };
+}
+function rpSlipSignature(invoice, settings) {
+  const s = rpBuildSlip(invoice, settings, "");
+  return JSON.stringify([s.invoiceNumber, s.invoiceDate, s.customerName, s.suggestedReceiver, s.companyName, s.companyPhone, s.logoUrl.length, s.closed, s.items]);
+}
+function rpReceivedSoFar(records) {
+  const map = {};
+  (records || []).forEach((r) => {
+    (r.materials || []).forEach((m) => {
+      map[m.lineIdx] = roundQty((map[m.lineIdx] || 0) + (Number(m.receivedQty) || 0));
+    });
+  });
+  return map;
+}
+function rpMaterialsLine(record) {
+  return (record.materials || [])
+    .filter((m) => Number(m.receivedQty) > 0)
+    .map((m) => `${fmtQty(m.receivedQty)}${m.unit ? " " + m.unit : ""} ${m.name}`)
+    .join(", ");
+}
+// Phone photos are several MB; store a compact JPEG instead.
+function rpCompressImage(file, maxDim = 1280, quality = 0.72) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("image")); };
+    img.onload = () => {
+      try {
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        URL.revokeObjectURL(url);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      } catch (e) {
+        URL.revokeObjectURL(url);
+        reject(e);
+      }
+    };
+    img.src = url;
+  });
+}
+
+/* ---------- Signature pad (finger, mouse, touchscreen, stylus) ---------- */
+function RpSignaturePad({ onChange }) {
+  const canvasRef = React.useRef(null);
+  const drawing = React.useRef(false);
+  const last = React.useRef(null);
+  const [hasInk, setHasInk] = useState(false);
+
+  const prepare = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.min(3, window.devicePixelRatio || 1);
+    canvas.width = Math.max(1, Math.round((rect.width || 320) * dpr));
+    canvas.height = Math.max(1, Math.round((rect.height || 140) * dpr));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.lineWidth = 2.2 * dpr;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#0f172a";
+    ctx.fillStyle = "#0f172a";
+  }, []);
+
+  useEffect(() => { prepare(); }, [prepare]);
+
+  function point(e) {
+    const canvas = canvasRef.current;
+    const rect = canvas.getBoundingClientRect();
+    return {
+      x: (e.clientX - rect.left) * (canvas.width / rect.width),
+      y: (e.clientY - rect.top) * (canvas.height / rect.height),
+    };
+  }
+  function exportSignature() {
+    const canvas = canvasRef.current;
+    const maxW = 600;
+    if (canvas.width <= maxW) return canvas.toDataURL("image/png");
+    const out = document.createElement("canvas");
+    out.width = maxW;
+    out.height = Math.round(canvas.height * (maxW / canvas.width));
+    out.getContext("2d").drawImage(canvas, 0, 0, out.width, out.height);
+    return out.toDataURL("image/png");
+  }
+  function start(e) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.preventDefault();
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    try { canvas.setPointerCapture(e.pointerId); } catch {}
+    drawing.current = true;
+    const p = point(e);
+    last.current = p;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, ctx.lineWidth / 2, 0, Math.PI * 2);
+    ctx.fill();
+    if (!hasInk) setHasInk(true);
+  }
+  function move(e) {
+    if (!drawing.current) return;
+    e.preventDefault();
+    const ctx = canvasRef.current.getContext("2d");
+    const p = point(e);
+    ctx.beginPath();
+    ctx.moveTo(last.current.x, last.current.y);
+    ctx.lineTo(p.x, p.y);
+    ctx.stroke();
+    last.current = p;
+  }
+  function end(e) {
+    if (!drawing.current) return;
+    drawing.current = false;
+    try { canvasRef.current.releasePointerCapture(e.pointerId); } catch {}
+    onChange(exportSignature());
+  }
+  function clear() {
+    prepare();
+    setHasInk(false);
+    onChange("");
+  }
+
+  return (
+    <div>
+      <div className="relative border-2 border-dashed border-slate-300 bg-white" dir="ltr">
+        <canvas
+          ref={canvasRef}
+          className="block w-full h-36 cursor-crosshair"
+          style={{ touchAction: "none" }}
+          onPointerDown={start}
+          onPointerMove={move}
+          onPointerUp={end}
+          onPointerCancel={end}
+          aria-label="Customer Signature"
+        />
+        {!hasInk && (
+          <div className="absolute inset-0 flex items-center justify-center text-slate-300 font-bold text-sm pointer-events-none select-none">
+            Sign Here ✍
+          </div>
+        )}
+      </div>
+      <div className="mt-1.5">
+        <button type="button" onClick={clear} className="text-xs font-bold uppercase tracking-wide text-slate-500 border border-slate-300 px-3 py-1.5 hover:bg-slate-100">
+          Clear
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Customer page: small digital receiving slip ---------- */
+function CustomerReceivingPage({ token }) {
+  const [phase, setPhase] = useState("loading"); // loading | invalid | error | form | done
+  const [slip, setSlip] = useState(null);
+  const [records, setRecords] = useState([]);
+  const [qty, setQty] = useState({});
+  const [receivedBy, setReceivedBy] = useState("");
+  const [signature, setSignature] = useState("");
+  const [proofImage, setProofImage] = useState("");
+  const [imageBusy, setImageBusy] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [lastRecord, setLastRecord] = useState(null);
+  const [formKey, setFormKey] = useState(0);
+  const fileRef = React.useRef(null);
+
+  const load = useCallback(async () => {
+    if (!rpValidToken(token)) { setPhase("invalid"); return; }
+    try {
+      const [s, recs] = await Promise.all([
+        rpGet(RP_SLIP_PREFIX + token, null),
+        rpGet(RP_RECORDS_PREFIX + token, []),
+      ]);
+      if (!s) { setPhase("invalid"); return; }
+      const list = Array.isArray(recs) ? recs : [];
+      const got = rpReceivedSoFar(list);
+      const initial = {};
+      (s.items || []).forEach((it) => {
+        initial[it.lineIdx] = fmtQty(Math.max(0, roundQty(it.qty - (got[it.lineIdx] || 0))));
+      });
+      setSlip(s);
+      setRecords(list);
+      setQty(initial);
+      setReceivedBy((prev) => prev || s.suggestedReceiver || "");
+      setPhase("form");
+    } catch (e) {
+      console.error("receiving slip load failed", e);
+      setPhase("error");
+    }
+  }, [token]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const got = useMemo(() => rpReceivedSoFar(records), [records]);
+  const lines = useMemo(() => (slip?.items || []).map((it) => {
+    const already = got[it.lineIdx] || 0;
+    return { ...it, already, remaining: Math.max(0, roundQty(it.qty - already)) };
+  }), [slip, got]);
+  const allReceived = lines.length > 0 && lines.every((l) => l.remaining <= 0);
+
+  async function onPickImage(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setError("");
+    setImageBusy(true);
+    try {
+      setProofImage(await rpCompressImage(file));
+    } catch {
+      setError("Ye image nahi khul saki. Dobara photo lein ya doosri image chunein.");
+    }
+    setImageBusy(false);
+  }
+
+  async function submit() {
+    setError("");
+    const materials = lines.map((l) => ({
+      lineIdx: l.lineIdx, name: l.name, unit: l.unit, invoiceQty: l.qty,
+      receivedQty: roundQty(Number(qty[l.lineIdx]) || 0),
+    }));
+    if (materials.some((m) => m.receivedQty < 0)) { setError("Quantity 0 se kam nahi ho sakti."); return; }
+    if (!materials.some((m) => m.receivedQty > 0)) { setError("Kam az kam ek material ki received quantity likhein."); return; }
+    const over = lines.find((l) => roundQty(Number(qty[l.lineIdx]) || 0) > l.remaining);
+    if (over) { setError(`${over.name}: received quantity baqi quantity (${fmtQty(over.remaining)}${over.unit ? " " + over.unit : ""}) se zyada nahi ho sakti.`); return; }
+    if (!receivedBy.trim()) { setError("Received By mein naam likhein."); return; }
+    if (!signature) { setError("Signature box mein sign karein."); return; }
+
+    setSaving(true);
+    try {
+      const receivingId = uid("rcv");
+      const receivedAt = new Date().toISOString();
+      // 1) heavy data (signature + photo) in its own row
+      await rpSet(RP_PROOF_PREFIX + receivingId, {
+        receivingId, invoiceId: slip.invoiceId, signature, proofImage: proofImage || "",
+      });
+      // 2) the receiving record itself
+      const latest = await rpGet(RP_RECORDS_PREFIX + token, []);
+      const list = Array.isArray(latest) ? latest : [];
+      const totalAfter = rpReceivedSoFar([...list, { materials }]);
+      const complete = lines.every((l) => (totalAfter[l.lineIdx] || 0) >= l.qty);
+      const record = {
+        receivingId,
+        invoiceId: slip.invoiceId,
+        invoiceNumber: slip.invoiceNumber,
+        customerId: slip.customerId,
+        materials,
+        receivedBy: receivedBy.trim(),
+        hasSignature: true,
+        hasProof: !!proofImage,
+        receivedAt,
+        status: complete ? "Received" : "Partially Received",
+      };
+      await rpSet(RP_RECORDS_PREFIX + token, [...list, record]);
+      // 3) confirm it really saved before telling the customer
+      const check = await rpGet(RP_RECORDS_PREFIX + token, []);
+      if (!Array.isArray(check) || !check.some((r) => r.receivingId === receivingId)) throw new Error("not saved");
+      setRecords(check);
+      setLastRecord(record);
+      setSignature("");
+      setProofImage("");
+      setPhase("done");
+    } catch (e) {
+      console.error("receiving submit failed", e);
+      setError("Save nahi ho saka. Internet check karein aur dobara CONFIRM RECEIVED dabayein.");
+    }
+    setSaving(false);
+  }
+
+  function startAnother() {
+    setLastRecord(null);
+    setError("");
+    setFormKey((k) => k + 1);
+    setPhase("loading");
+    load();
+  }
+
+  const shell = (children) => (
+    <div className="min-h-screen bg-slate-100 text-slate-900 py-4 px-3">
+      <I18nDomBridge />
+      <div className="max-w-md mx-auto">
+        <div className="flex justify-end mb-2"><LanguageSwitcher compact /></div>
+        <div className="bg-white border border-slate-200 border-t-4 border-t-slate-900 shadow-sm">{children}</div>
+      </div>
+    </div>
+  );
+
+  if (phase === "loading") {
+    return shell(<div className="p-8 text-center text-slate-400 font-bold uppercase tracking-wide text-sm">Loading...</div>);
+  }
+  if (phase === "invalid" || phase === "error") {
+    return shell(
+      <div className="p-8 text-center">
+        <div className="text-3xl mb-2">📷</div>
+        <div className="font-black uppercase tracking-tight text-slate-900">Material Receiving Slip</div>
+        <div className="text-sm text-slate-500 mt-2">
+          {phase === "invalid" ? "This receiving link is not valid." : "Slip load nahi ho saki. Internet check karein aur page dobara kholein."}
+        </div>
+      </div>
+    );
+  }
+
+  const header = (
+    <div className="px-4 pt-4 pb-3 border-b border-dashed border-slate-300">
+      <div className="flex items-center gap-3">
+        {slip.logoUrl ? (
+          <img src={slip.logoUrl} alt="Logo" className="w-10 h-10 object-contain shrink-0" />
+        ) : (
+          <div className="w-10 h-10 bg-slate-900 text-white flex items-center justify-center font-black text-sm shrink-0">CT</div>
+        )}
+        <div className="min-w-0">
+          <div className="font-black uppercase tracking-tight text-slate-900 leading-tight truncate">{slip.companyName}</div>
+          <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">Material Receiving Slip</div>
+        </div>
+      </div>
+      <div className="flex justify-between items-end mt-3 text-sm gap-3">
+        <div className="min-w-0">
+          <div className="text-[10px] uppercase tracking-wide font-bold text-slate-400">Customer</div>
+          <div className="font-bold text-slate-900 truncate">{slip.customerName || "-"}</div>
+        </div>
+        <div className="text-right shrink-0">
+          <div className="inline-block bg-slate-900 text-white font-black px-2 py-0.5 text-xs">{slip.invoiceNumber}</div>
+          <div className="text-[11px] text-slate-500 mt-0.5">{fmtDate(slip.invoiceDate)}</div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const earlier = records.length > 0 && (
+    <div className="px-4 py-3 border-t border-dashed border-slate-300">
+      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Earlier Receivings</div>
+      <div className="space-y-1">
+        {records.map((r, idx) => (
+          <div key={r.receivingId} className="text-xs text-slate-600">
+            <span className="font-bold text-slate-900">#{idx + 1}</span> · {fmtDateTime(r.receivedAt)} · {r.receivedBy}
+            <div className="text-slate-400">{rpMaterialsLine(r)}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  if (phase === "done" && lastRecord) {
+    return shell(
+      <>
+        {header}
+        <div className="px-4 py-6 text-center">
+          <div className="w-14 h-14 mx-auto bg-emerald-100 text-emerald-700 flex items-center justify-center text-3xl font-black rounded-full">✓</div>
+          <div className="mt-3 text-lg font-black uppercase tracking-tight text-slate-900">Material Received</div>
+          <div className="text-sm text-slate-500 mt-1">Thank you. Your receiving has been recorded.</div>
+          <div className="mt-4 text-left bg-slate-50 border border-slate-200 px-3 py-2 text-sm">
+            <div className="text-slate-700">{rpMaterialsLine(lastRecord)}</div>
+            <div className="text-xs text-slate-500 mt-1">
+              <span>Received By</span>: <span className="font-bold text-slate-700">{lastRecord.receivedBy}</span>
+            </div>
+            <div className="text-xs text-slate-500">{fmtDateTime(lastRecord.receivedAt)}</div>
+          </div>
+          {!allReceived && !slip.closed && (
+            <button type="button" onClick={startAnother} className="mt-4 text-xs font-bold uppercase tracking-wide text-slate-600 border border-slate-300 px-4 py-2 hover:bg-slate-100">
+              Record Another Delivery
+            </button>
+          )}
+        </div>
+      </>
+    );
+  }
+
+  if (slip.closed || allReceived) {
+    return shell(
+      <>
+        {header}
+        <div className="px-4 py-6 text-center text-sm font-bold text-slate-600">
+          {slip.closed ? "This receiving link is no longer active." : "All material on this invoice has been received."}
+        </div>
+        {earlier}
+      </>
+    );
+  }
+
+  return shell(
+    <>
+      {header}
+      <div className="px-4 py-3">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2">Delivered Material</div>
+        <div className="divide-y divide-slate-100 border border-slate-200">
+          {lines.map((l) => (
+            <div key={l.lineIdx} className="flex items-center justify-between gap-3 px-3 py-2">
+              <div className="min-w-0">
+                <div className="font-bold text-sm text-slate-900">{l.name}</div>
+                <div className="text-[11px] text-slate-500">
+                  <span>Invoice</span>: {fmtQty(l.qty)}{l.unit ? " " + l.unit : ""}
+                  {l.already > 0 && <span> · ✓ {fmtQty(l.already)}</span>}
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0" dir="ltr">
+                <input
+                  type="number" inputMode="decimal" min="0" step="any"
+                  disabled={l.remaining <= 0}
+                  className="w-20 border border-slate-300 px-2 py-2 text-sm text-right font-bold focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900 disabled:bg-slate-100 disabled:text-slate-400"
+                  value={qty[l.lineIdx] ?? ""}
+                  onChange={(e) => setQty({ ...qty, [l.lineIdx]: e.target.value })}
+                  aria-label={`${l.name} received quantity`}
+                />
+                <span className="text-xs text-slate-500 w-10">{l.unit}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="px-4 pb-3">
+        <label className="block">
+          <span className="block text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Received By</span>
+          <input className={inputCls} placeholder="Enter Name" value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} autoComplete="name" />
+        </label>
+      </div>
+
+      <div className="px-4 pb-3">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Customer Signature</div>
+        <RpSignaturePad key={formKey} onChange={setSignature} />
+      </div>
+
+      <div className="px-4 pb-4">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">📷 Receiving Proof</div>
+        <div className="text-[11px] text-slate-400 mb-1.5">Photo of received material, delivery or signed slip (optional)</div>
+        <input ref={fileRef} type="file" accept="image/*" className="hidden" onChange={onPickImage} />
+        <div className="flex items-center gap-3">
+          {proofImage && <img src={proofImage} alt="Receiving Proof" className="w-20 h-20 object-cover border border-slate-300 shrink-0" />}
+          <div className="flex flex-wrap gap-2">
+            <button type="button" disabled={imageBusy} onClick={() => fileRef.current && fileRef.current.click()} className="text-xs font-bold uppercase tracking-wide text-slate-700 border border-slate-300 px-3 py-2 hover:bg-slate-100 disabled:opacity-40">
+              {imageBusy ? "Loading..." : proofImage ? "Change Image" : "Upload Image"}
+            </button>
+            {proofImage && (
+              <button type="button" onClick={() => setProofImage("")} className="text-xs font-bold uppercase tracking-wide text-slate-500 px-2 py-2 hover:text-red-600">
+                Remove Image
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {error && <div className="mx-4 mb-3 bg-red-50 border border-red-200 text-red-700 text-xs font-bold px-3 py-2">{error}</div>}
+
+      <div className="px-4 pb-4">
+        <button type="button" disabled={saving || imageBusy} onClick={submit} className="w-full bg-emerald-600 text-white font-black uppercase tracking-wide py-3 text-sm hover:bg-emerald-700 disabled:opacity-40">
+          {saving ? "Saving..." : "✓ CONFIRM RECEIVED"}
+        </button>
+      </div>
+      {earlier}
+    </>
+  );
+}
+
+/* ---------- ERP side: proof viewer (admin / staff only) ---------- */
+function ReceivingProofViewer({ record, index, canDelete, onDelete, onClose }) {
+  const [proof, setProof] = useState(null);
+  const [state, setState] = useState("loading"); // loading | ready | error
+
+  useEffect(() => {
+    let cancelled = false;
+    setState("loading");
+    rpGet(RP_PROOF_PREFIX + record.receivingId, null)
+      .then((p) => { if (!cancelled) { setProof(p); setState("ready"); } })
+      .catch(() => { if (!cancelled) setState("error"); });
+    return () => { cancelled = true; };
+  }, [record.receivingId]);
+
+  return (
+    <Modal title="Receiving Proof" onClose={onClose}>
+      <div className="bg-slate-100 border border-slate-200 flex items-center justify-center min-h-[160px]">
+        {state === "loading" && <div className="text-xs font-bold uppercase tracking-wide text-slate-400 py-10">Loading...</div>}
+        {state === "error" && <div className="text-xs font-bold text-red-600 py-10 px-4 text-center">Proof load nahi ho saka. Dobara koshish karein.</div>}
+        {state === "ready" && proof?.proofImage && (
+          <a href={proof.proofImage} target="_blank" rel="noreferrer" title="Receiving Proof">
+            <img src={proof.proofImage} alt="Receiving Proof" className="max-h-[60vh] w-auto max-w-full object-contain" />
+          </a>
+        )}
+        {state === "ready" && !proof?.proofImage && (
+          <div className="text-xs text-slate-400 py-10 px-4 text-center">No proof image was uploaded for this receiving.</div>
+        )}
+      </div>
+      <div className="mt-3 text-sm space-y-0.5">
+        <div><span className="text-slate-500">Received By</span>: <span className="font-bold text-slate-900">{record.receivedBy}</span></div>
+        <div><span className="text-slate-500">Date</span>: <span className="font-bold text-slate-900">{fmtDateTime(record.receivedAt)}</span></div>
+        <div className="text-xs text-slate-500">Receiving #{index + 1} · {rpMaterialsLine(record)}</div>
+      </div>
+      {state === "ready" && proof?.signature && (
+        <div className="mt-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Signature</div>
+          <img src={proof.signature} alt="Signature" className="h-20 border border-slate-200 bg-white" />
+        </div>
+      )}
+      <div className="mt-4 flex justify-between items-center">
+        {canDelete ? (
+          <button type="button" className="text-xs font-bold text-red-600 hover:underline" onClick={() => { if (confirm(`Receiving #${index + 1} delete karein? Ye wapas nahi aayegi.`)) onDelete(record); }}>
+            Delete Receiving
+          </button>
+        ) : <span />}
+        <Btn variant="ghost" small onClick={onClose}>Close</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------- ERP side: the small row inside the existing invoice ---------- */
+function ReceivingProofRow({ invoice, settings, viewer }) {
+  const [link, setLink] = useState(null);
+  const [records, setRecords] = useState([]);
+  const [ready, setReady] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const [viewing, setViewing] = useState(null);
+  const allowed = rpIsStaffViewer(viewer);
+  const isCancelled = invoice.docStatus === "Cancelled";
+  const sig = rpSlipSignature(invoice, settings);
+
+  const reloadRecords = useCallback(async (token) => {
+    try {
+      const recs = await rpGet(RP_RECORDS_PREFIX + token, []);
+      setRecords(Array.isArray(recs) ? recs : []);
+    } catch (e) {
+      console.error("receiving records load failed", e);
+    }
+  }, []);
+
+  // Load this invoice's link + receiving records; keep the customer slip in
+  // step with the invoice if the invoice was edited after the link was made.
+  useEffect(() => {
+    if (!allowed) return;
+    let cancelled = false;
+    setReady(false); setLink(null); setRecords([]); setNote("");
+    (async () => {
+      try {
+        const links = (await rpGet(RP_LINKS_KEY, {})) || {};
+        const mine = links[invoice.id] || null;
+        if (cancelled) return;
+        if (mine && rpValidToken(mine.token)) {
+          setLink(mine);
+          await reloadRecords(mine.token);
+          if (mine.sig !== sig) {
+            await rpSet(RP_SLIP_PREFIX + mine.token, rpBuildSlip(invoice, settings, mine.token));
+            const fresh = (await rpGet(RP_LINKS_KEY, {})) || {};
+            const updated = { ...mine, sig };
+            await rpSet(RP_LINKS_KEY, { ...fresh, [invoice.id]: updated });
+            if (!cancelled) setLink(updated);
+          }
+        }
+      } catch (e) {
+        console.error("receiving proof load failed", e);
+      }
+      if (!cancelled) setReady(true);
+    })();
+    return () => { cancelled = true; };
+  }, [invoice.id, sig, allowed]);
+
+  // Live refresh when the customer submits (other device via Supabase,
+  // other tab via localStorage, or simply coming back to this window).
+  useEffect(() => {
+    if (!allowed || !link?.token) return;
+    const token = link.token;
+    const key = RP_RECORDS_PREFIX + token;
+    let channel = null;
+    if (supabase) {
+      try {
+        channel = supabase
+          .channel("rp_" + token)
+          .on("postgres_changes", { event: "*", schema: "public", table: "kv_store", filter: `key=eq.${key}` }, () => reloadRecords(token))
+          .subscribe();
+      } catch (e) {
+        console.error("receiving realtime failed", e);
+      }
+    }
+    const onStorage = (e) => { if (e.key === LS_PREFIX + key) reloadRecords(token); };
+    const onFocus = () => reloadRecords(token);
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("focus", onFocus);
+      if (channel && supabase) { try { supabase.removeChannel(channel); } catch {} }
+    };
+  }, [link?.token, allowed]);
+
+  if (!allowed) return null;
+
+  async function createLink() {
+    setBusy(true); setNote("");
+    try {
+      const token = rpNewToken();
+      await rpSet(RP_SLIP_PREFIX + token, rpBuildSlip(invoice, settings, token));
+      const links = (await rpGet(RP_LINKS_KEY, {})) || {};
+      const existing = links[invoice.id];
+      if (existing && rpValidToken(existing.token)) {
+        // another device created it a moment ago — use that one
+        await rpRemove(RP_SLIP_PREFIX + token);
+        setLink(existing);
+        await reloadRecords(existing.token);
+      } else {
+        const mine = { token, sig, createdAt: new Date().toISOString(), createdBy: viewer.name || viewer.username || "" };
+        await rpSet(RP_LINKS_KEY, { ...links, [invoice.id]: mine });
+        setLink(mine);
+      }
+    } catch (e) {
+      console.error("receiving link create failed", e);
+      setNote("Link nahi ban saka. Dobara koshish karein.");
+    }
+    setBusy(false);
+  }
+
+  async function copyLink() {
+    const url = rpLinkUrl(link.token);
+    try {
+      await navigator.clipboard.writeText(url);
+      setNote("Link Copied");
+    } catch {
+      window.prompt("Customer receiving link:", url);
+    }
+  }
+
+  async function deleteRecord(record) {
+    try {
+      const latest = await rpGet(RP_RECORDS_PREFIX + link.token, []);
+      const next = (Array.isArray(latest) ? latest : []).filter((r) => r.receivingId !== record.receivingId);
+      await rpSet(RP_RECORDS_PREFIX + link.token, next);
+      await rpRemove(RP_PROOF_PREFIX + record.receivingId);
+      setRecords(next);
+      setViewing(null);
+    } catch (e) {
+      console.error("receiving delete failed", e);
+      alert("Delete nahi ho saka. Dobara koshish karein.");
+    }
+  }
+
+  const hasProof = records.some((r) => r.hasProof);
+  const url = link ? rpLinkUrl(link.token) : "";
+  const waText = link
+    ? `${settings.companyName} — Material Receiving\nInvoice ${invoice.number}\n\nMaterial receive karne ke baad is link par quantity confirm karein, sign karein aur receiving proof ki photo upload karein:\n${url}`
+    : "";
+  const linkCls = "font-bold text-blue-700 hover:underline";
+
+  return (
+    <div className="mt-4 text-xs border border-slate-200 print:hidden">
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 px-3 py-2">
+        <div className="flex items-center gap-2">
+          <span className="font-black uppercase text-slate-700">📷 Receiving Proof</span>
+          {!ready ? (
+            <span className="text-slate-400">…</span>
+          ) : hasProof ? (
+            <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-emerald-100 text-emerald-700">✓ Uploaded</span>
+          ) : records.length > 0 ? (
+            <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-blue-100 text-blue-700">✓ Received</span>
+          ) : (
+            <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-100 text-slate-500">Not Uploaded</span>
+          )}
+          {records.length === 1 && (
+            <button type="button" className={linkCls} onClick={() => setViewing({ record: records[0], index: 0 })}>View</button>
+          )}
+        </div>
+        {ready && (
+          <div className="flex items-center gap-3">
+            {note && <span className="text-emerald-700 font-bold">{note}</span>}
+            {!link && !isCancelled && (
+              <button type="button" className={linkCls} disabled={busy} onClick={createLink}>{busy ? "…" : "Get Customer Link"}</button>
+            )}
+            {link && !isCancelled && (
+              <>
+                <button type="button" className={linkCls} onClick={copyLink}>Copy Link</button>
+                {invoice.customerPhone && <a className={linkCls} href={waLink(invoice.customerPhone, waText)} target="_blank" rel="noreferrer">WhatsApp</a>}
+                <a className={linkCls} href={url} target="_blank" rel="noreferrer">Open Slip</a>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+      {records.length > 1 && (
+        <div className="border-t border-slate-200 divide-y divide-slate-100">
+          {records.map((r, idx) => (
+            <div key={r.receivingId} className="px-3 py-2 flex justify-between items-center gap-3">
+              <div className="min-w-0">
+                <span className="font-black text-slate-900">Receiving #{idx + 1}</span>
+                <span className="text-slate-600"> — {rpMaterialsLine(r)}</span>
+                <div className="text-slate-400">{fmtDateTime(r.receivedAt)} · {r.receivedBy}</div>
+              </div>
+              <button type="button" className={`${linkCls} shrink-0`} onClick={() => setViewing({ record: r, index: idx })}>
+                {r.hasProof ? "📷 View Proof" : "View"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {viewing && (
+        <ReceivingProofViewer
+          record={viewing.record}
+          index={viewing.index}
+          canDelete={viewer.role === "admin"}
+          onDelete={deleteRecord}
+          onClose={() => setViewing(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ---------- Entry point: customer receiving link vs. the normal ERP ---------- */
+// A customer receiving link renders ONLY the receiving slip. The ERP (App)
+// is not mounted for that link, so none of its data is ever loaded there.
+function AppRoot() {
+  const receivingToken = rpTokenFromUrl();
+  if (receivingToken) return <CustomerReceivingPage token={receivingToken} />;
+  return <App />;
+}
+
+export default AppRoot;
