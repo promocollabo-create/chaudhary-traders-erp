@@ -413,17 +413,14 @@ const translations = {
     "None — general payment": "کوئی نہیں — عمومی ادائیگی",
     "Edit Payment": "ادائیگی میں ترمیم",
     "Receiving": "وصولی",
-    "Payment Receiving": "ادائیگی کی وصولی",
+    "Payment Receipt": "ادائیگی کی رسید",
     "Receipt No.": "رسید نمبر",
-    "Customer Information": "گاہک کی معلومات",
-    "Payment Information": "ادائیگی کی معلومات",
+    "Customer Details": "گاہک کی تفصیلات",
+    "Payment Details": "ادائیگی کی تفصیلات",
+    "Balance Summary": "بیلنس کا خلاصہ",
     "Remaining Balance": "باقی بیلنس",
-    "Total Payments": "کل ادائیگیاں",
     "Save as PDF": "پی ڈی ایف کے طور پر محفوظ کریں",
     "Actions": "کارروائیاں",
-    "Customer Signature": "گاہک کے دستخط",
-    "Received By": "وصول کنندہ",
-    "Advance / Credit With Us": "پیشگی / ہمارے پاس جمع",
     "No record found": "کوئی ریکارڈ نہیں ملا۔",
     "Welcome,": "خوش آمدید،",
     "· All Branches": "· تمام برانچز",
@@ -3442,7 +3439,7 @@ function paymentUserNote(payment) {
   return note.replace(/^Payment against Promise ?[^\s—]*(?: — )?/, "");
 }
 
-// Previous Balance / Payment Received / Remaining Balance for ONE payment.
+// Outstanding Balance / Payment Received / Remaining Balance for ONE payment.
 // The payment is located inside the customer's ledger (where it appears
 // exactly once), so Remaining = the running balance right after it and
 // Previous = that balance with this payment's credit added back. Nothing
@@ -3461,111 +3458,66 @@ function computePaymentReceiptBalances(payment, customer, invoices, payments, re
   return { reversed: false, previous, received, remaining: roundMoney(previous - received) };
 }
 
-function PaymentReceiptBody({ payment, customer, settings, balances, history, historyTotal, reference }) {
+function PaymentReceiptBody({ payment, customer, settings, balances }) {
   const receiptNo = paymentReceiptNo(payment);
+  const note = String(payment.note || "").trim();
+  const sectionCls = "mt-1.5 pt-1.5 border-t border-slate-200";
+  const headCls = "text-[10px] uppercase tracking-wide font-bold text-slate-400";
+  const rowCls = "flex justify-between gap-3";
   return (
-    <div className="bg-white text-slate-900" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
-      <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
-        <div className="flex items-center gap-3">
-          {settings?.logoUrl ? (
-            <img src={settings.logoUrl} alt="Logo" className="w-14 h-14 object-contain" />
-          ) : (
-            <div className="w-14 h-14 bg-slate-900 flex items-center justify-center font-black text-xl text-white">CT</div>
-          )}
-          <div>
-            <div className="text-xl font-black uppercase tracking-tight text-slate-900">{settings?.companyName}</div>
-            <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">Construction Materials Supplier</div>
-          </div>
-        </div>
-        <div className="text-right text-xs text-slate-500">
+    <div className="bg-white text-slate-900 text-xs leading-snug max-w-sm mx-auto" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <div className="flex items-center justify-between gap-2 pb-1.5 border-b-2 border-slate-900">
+        <div className="text-sm font-black uppercase tracking-tight text-slate-900">{settings?.companyName}</div>
+        <div className="text-right text-[10px] leading-tight text-slate-500">
           <div>{settings?.companyAddress}</div>
           {settings?.companyPhone && <div>Ph: {settings.companyPhone}</div>}
         </div>
       </div>
-
-      <div className="flex justify-between items-start gap-3 flex-wrap mb-4">
-        <div className="text-lg font-black uppercase tracking-tight text-slate-900">Payment Receiving</div>
-        <div className="text-right">
-          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-0.5">Receipt No.</div>
-          <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{receiptNo}</div>
-        </div>
-      </div>
+      <div className="mt-1.5 bg-slate-900 text-white text-center text-sm font-black uppercase tracking-wide py-1">Payment Receipt</div>
 
       {balances.reversed && (
-        <div className="mb-4 border border-red-200 bg-red-50 text-red-700 text-xs font-bold px-3 py-2">
+        <div className="mt-1.5 border border-red-200 bg-red-50 text-red-700 text-[10px] font-bold px-2 py-1">
           Ye payment reverse ho chuki hai kyun ke is ki invoice cancel ho gayi thi — ye customer ke balance mein shamil nahi hai.
         </div>
       )}
 
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4 text-sm">
-        <div className="border border-slate-200 p-3">
-          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-1.5">Customer Information</div>
-          <div className="flex justify-between gap-3"><span className="text-slate-500">Customer Name</span><span className="font-bold text-right">{customer.name || "-"}</span></div>
-          <div className="flex justify-between gap-3"><span className="text-slate-500">Phone</span><span className="font-bold text-right">{customer.phone || "-"}</span></div>
-          <div className="flex justify-between gap-3"><span className="text-slate-500">Address</span><span className="font-bold text-right">{customer.address || "-"}</span></div>
-        </div>
-        <div className="border border-slate-200 p-3">
-          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-1.5">Payment Information</div>
-          <div className="flex justify-between gap-3"><span className="text-slate-500">Payment Date</span><span className="font-bold text-right">{fmtDate(payment.date)}</span></div>
-          <div className="flex justify-between gap-3"><span className="text-slate-500">Payment Amount</span><span className="font-bold text-right">{fmtMoney(payment.amount)}</span></div>
-          <div className="flex justify-between gap-3"><span className="text-slate-500">Payment Method</span><span className="font-bold text-right">{payment.method || "Cash"}</span></div>
-          <div className="flex justify-between gap-3"><span className="text-slate-500">Reference</span><span className="font-bold text-right">{reference}</span></div>
-          <div className="flex justify-between gap-3"><span className="text-slate-500">Note</span><span className="font-bold text-right">{payment.note || "-"}</span></div>
-        </div>
+      <div className="mt-1.5">
+        <div className={headCls}>Customer Details</div>
+        <div className={rowCls}><span className="text-slate-500">Customer Name</span><span className="font-bold text-right">{customer.name || "-"}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Phone</span><span className="font-bold text-right">{customer.phone || "-"}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Address</span><span className="font-bold text-right">{customer.address || "-"}</span></div>
       </div>
 
-      <div className="flex justify-end mb-4">
-        <div className="w-full sm:w-80 text-sm space-y-1.5 border border-slate-200 p-3">
-          <div className="flex justify-between"><span className="text-slate-500">Previous Balance</span><span className="font-bold">{fmtMoney(balances.previous)}</span></div>
-          <div className="flex justify-between"><span className="text-slate-500">Payment Received</span><span className="font-bold text-emerald-600">{fmtMoney(balances.received)}</span></div>
-          <div className="flex justify-between border-t-2 border-slate-900 pt-2 mt-1">
-            <span className="font-black uppercase text-blue-700">Remaining Balance</span>
-            <span className="font-black text-lg text-blue-700">{fmtMoney(balances.remaining)}</span>
-          </div>
-          {balances.remaining < 0 && (
-            <div className="text-[10px] font-bold uppercase text-emerald-600 text-right">Advance / Credit With Us</div>
-          )}
+      <div className={sectionCls}>
+        <div className={headCls}>Payment Details</div>
+        <div className={rowCls}><span className="text-slate-500">Receipt No.</span><span className="font-bold text-right">{receiptNo}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Payment Date</span><span className="font-bold text-right">{fmtDate(payment.date)}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Payment Method</span><span className="font-bold text-right">{payment.method || "Cash"}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Payment Received</span><span className="font-bold text-right">{fmtMoney(balances.received)}</span></div>
+      </div>
+
+      <div className={sectionCls}>
+        <div className={headCls}>Balance Summary</div>
+        <div className={rowCls}><span className="text-slate-500">Outstanding Balance</span><span className="font-bold">{fmtMoney(balances.previous)}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Payment Received</span><span className="font-bold text-emerald-600">{fmtMoney(balances.received)}</span></div>
+        <div className={`${rowCls} items-baseline border-t-2 border-slate-900 pt-1 mt-1`}>
+          <span className="font-black uppercase text-blue-700">Remaining Balance</span>
+          <span className="font-black text-sm text-blue-700">{fmtMoney(balances.remaining)}{balances.remaining < 0 ? " (Advance)" : ""}</span>
         </div>
       </div>
 
-      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Payment History</div>
-      <table className="w-full text-sm mb-6">
-        <thead>
-          <tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
-            <th className="py-1.5 px-2 text-left">Date</th>
-            <th className="py-1.5 px-2 text-left">Payment Method</th>
-            <th className="py-1.5 px-2 text-right">Amount</th>
-          </tr>
-        </thead>
-        <tbody>
-          {history.length === 0 && (
-            <tr><td colSpan={3} className="py-3 px-2 text-center text-slate-400">Koi payment record nahi.</td></tr>
-          )}
-          {history.map((h) => (
-            <tr key={h.id} className={`border-b border-slate-100 ${h.id === payment.id ? "bg-blue-50 font-bold" : ""}`}>
-              <td className="py-1.5 px-2">{fmtDate(h.date)}</td>
-              <td className="py-1.5 px-2 text-slate-500">{h.method || "Cash"}</td>
-              <td className="py-1.5 px-2 text-right">{fmtMoney(h.amount)}</td>
-            </tr>
-          ))}
-          <tr className="border-t-2 border-slate-900">
-            <td className="py-2 px-2 font-black uppercase" colSpan={2}>Total Payments</td>
-            <td className="py-2 px-2 text-right font-black">{fmtMoney(historyTotal)}</td>
-          </tr>
-        </tbody>
-      </table>
-
-      <div className="flex justify-between gap-6 pt-8 text-xs text-slate-500">
-        <div className="flex-1 border-t border-slate-400 pt-1">Received By</div>
-        <div className="flex-1 border-t border-slate-400 pt-1 text-right">Customer Signature</div>
-      </div>
+      {note && (
+        <div className={sectionCls}>
+          <span className={headCls}>Note</span>
+          <div className="text-slate-700 break-words">{note}</div>
+        </div>
+      )}
     </div>
   );
 }
 
 function PaymentReceipt({ payment, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, settings, onClose }) {
   const linkedInvoice = findInvoiceForPayment(payment, invoices);
-  const linkedPromise = payment.promiseId ? (promises || []).find((pr) => pr.id === payment.promiseId) : null;
   // Cash / walk-in invoice payments have no customer account, so fall back
   // to the details saved on the payment and its invoice.
   const customer = customers.find((c) => c.id === payment.customerId) || {
@@ -3573,16 +3525,8 @@ function PaymentReceipt({ payment, customers, invoices, payments, returns, excha
     phone: linkedInvoice?.customerPhone || "", address: linkedInvoice?.customerAddress || "", openingBalance: 0,
   };
   const balances = computePaymentReceiptBalances(payment, customer, invoices, payments, returns, exchanges, promises || [], transfers, adjustments);
-  // Only this customer's payments, and only the ones that actually count
-  // in the ledger (a payment reversed by a cancelled invoice is left out),
-  // so Total Payments always matches the Ledger.
-  const history = payments
-    .filter((p) => p.customerId === payment.customerId && !isPaymentLinkedToCancelledInvoice(p, invoices))
-    .sort((a, b) => new Date(a.date) - new Date(b.date));
-  const historyTotal = roundMoney(history.reduce((s, p) => s + (Number(p.amount) || 0), 0));
   const receiptNo = paymentReceiptNo(payment);
-  const reference = linkedPromise?.code || linkedInvoice?.number || receiptNo;
-  const bodyProps = { payment, customer, settings, balances, history, historyTotal, reference };
+  const bodyProps = { payment, customer, settings, balances };
 
   // Print and Save as PDF both go through the app's existing window.print()
   // mechanism. For Save as PDF the page title is switched for the duration
@@ -3606,7 +3550,7 @@ function PaymentReceipt({ payment, customers, invoices, payments, returns, excha
 
   return (
     <>
-      <Modal title="Payment Receiving" onClose={onClose} wide>
+      <Modal title="Payment Receipt" onClose={onClose}>
         <PaymentReceiptBody {...bodyProps} />
         <div className="mt-4 flex gap-2 flex-wrap">
           <Btn onClick={() => printReceipt(false)}>Print</Btn>
@@ -3617,8 +3561,7 @@ function PaymentReceipt({ payment, customers, invoices, payments, returns, excha
       {/* Print/PDF-only copy — same pattern as the Ledger's #print-ledger:
           hidden on screen, forced visible by the @media print rule in
           <PrintStyles/> via the "print-area" class, so window.print()
-          outputs ONLY the receipt (and long histories flow onto extra
-          pages instead of being clipped by the on-screen modal). */}
+          outputs ONLY the compact receipt. */}
       <div id="print-receipt" className="print-area" style={{ display: "none" }}>
         <PaymentReceiptBody {...bodyProps} />
       </div>
