@@ -3454,7 +3454,11 @@ function computePaymentReceiptBalances(payment, customer, invoices, payments, re
     // Not in the ledger = reversed because its invoice was cancelled.
     return { reversed: true, previous: outstanding, received: Number(payment.amount) || 0, remaining: outstanding };
   }
-  return { reversed: false, previous: roundMoney(entry.balance + entry.credit), received: entry.credit, remaining: entry.balance };
+  // Previous Balance = the customer's balance just before this payment.
+  // Remaining Balance = Previous Balance − this payment, deducted exactly once.
+  const received = Number(entry.credit) || 0;
+  const previous = roundMoney(entry.balance + received);
+  return { reversed: false, previous, received, remaining: roundMoney(previous - received) };
 }
 
 function PaymentReceiptBody({ payment, customer, settings, balances, history, historyTotal, reference }) {
@@ -3513,7 +3517,7 @@ function PaymentReceiptBody({ payment, customer, settings, balances, history, hi
       <div className="flex justify-end mb-4">
         <div className="w-full sm:w-80 text-sm space-y-1.5 border border-slate-200 p-3">
           <div className="flex justify-between"><span className="text-slate-500">Previous Balance</span><span className="font-bold">{fmtMoney(balances.previous)}</span></div>
-          <div className="flex justify-between"><span className="text-slate-500">Payment Received</span><span className="font-bold text-emerald-600">{balances.reversed ? "" : "-"}{fmtMoney(balances.received)}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">Payment Received</span><span className="font-bold text-emerald-600">{fmtMoney(balances.received)}</span></div>
           <div className="flex justify-between border-t-2 border-slate-900 pt-2 mt-1">
             <span className="font-black uppercase text-blue-700">Remaining Balance</span>
             <span className="font-black text-lg text-blue-700">{fmtMoney(balances.remaining)}</span>
