@@ -946,7 +946,7 @@ function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl }) {
 
 function Stat({ label, value, accent }) {
   return (
-    <div className="bg-white border border-slate-200 p-4 flex-1 min-w-[150px]">
+    <div className="bg-white border border-slate-700 bg-slate-800 p-4 flex-1 min-w-[150px]">
       <div className="text-[11px] uppercase tracking-wide text-slate-500 font-bold">{label}</div>
       <div className={`text-2xl font-black mt-1 ${accent || "text-slate-900"}`}>{value}</div>
     </div>
@@ -959,7 +959,7 @@ function Modal({ title, onClose, children, wide }) {
       <div className={`bg-white w-full ${wide ? "max-w-3xl" : "max-w-lg"} mt-8 mb-8 border-t-4 border-slate-900`}>
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
           <h3 className="font-black uppercase tracking-tight text-slate-900">{t(title)}</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-900 text-xl leading-none">×</button>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">×</button>
         </div>
         <div className="p-5">{children}</div>
       </div>
@@ -2992,7 +2992,7 @@ function SalesReturnPage({ customers, invoices, returns, exchanges, onCreateRetu
         Customer se wapis aane wale items yahan record karein — outstanding balance turant kam ho jayega aur ek Credit Note ban jayegi. Feet / Meter / KG / Liter / Sq.Ft jaise items ke liye fractional (decimal) qty bhi daal sakte hain — rate hamesha (Original Line Amount ÷ Original Sold Qty) se calculate hota hai, piece count se nahi.
       </div>
 
-      <div className="bg-white border border-slate-200 p-4 mb-6 max-w-2xl">
+      <div className="bg-white border border-slate-700 bg-slate-800 p-4 mb-6 max-w-2xl">
         <div className="grid grid-cols-2 gap-3">
           <Field label="Customer">
             <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
@@ -3401,50 +3401,50 @@ function PaymentReceipt({ payment, customer, invoices, payments, returns, exchan
     .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
-      <div className="bg-white w-full max-w-2xl mt-8 mb-8 border-t-4 border-slate-900">
-        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
+    <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-start justify-center z-50 p-4 overflow-y-auto">
+      <div className="bg-slate-900 text-white w-full max-w-2xl mt-8 mb-8 border border-slate-700 shadow-2xl rounded-sm overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-700 bg-slate-950">
           <div>
             <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">Payment Receiving</div>
-            <h3 className="font-black uppercase tracking-tight text-slate-900">Payment Receipt</h3>
+            <h3 className="font-black uppercase tracking-tight text-white">Payment Receipt</h3>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-900 text-xl leading-none">×</button>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">×</button>
         </div>
 
-        <div className="p-6">
-          <div className="flex items-start justify-between gap-4 border-b border-slate-200 pb-5 mb-5">
+        <div className="p-6 bg-slate-900">
+          <div className="flex items-start justify-between gap-4 border-b border-slate-700 pb-5 mb-5">
             <div>
-              <div className="text-lg font-black">{customer.name}</div>
-              <div className="text-xs text-slate-500">{customer.phone || "-"}</div>
-              <div className="text-xs text-slate-500">{customer.address || "-"}</div>
+              <div className="text-lg font-black text-white">{customer.name}</div>
+              <div className="text-xs text-slate-400">{customer.phone || "-"}</div>
+              <div className="text-xs text-slate-400">{customer.address || "-"}</div>
             </div>
             <div className="text-right">
-              <div className="text-[10px] uppercase tracking-wide text-slate-500 font-bold">Payment Date</div>
-              <div className="font-bold">{fmtDate(payment.date)}</div>
+              <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold">Payment Date</div>
+              <div className="font-bold text-white">{fmtDate(payment.date)}</div>
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-3 mb-5">
-            <div className="border border-slate-200 p-4">
-              <div className="text-[10px] uppercase tracking-wide text-slate-500 font-bold">Received Amount</div>
+            <div className="border border-slate-700 bg-slate-800 p-4">
+              <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold">Received Amount</div>
               <div className="text-2xl font-black text-emerald-600 mt-1">{fmtMoney(payment.amount)}</div>
             </div>
-            <div className="border border-slate-200 p-4">
-              <div className="text-[10px] uppercase tracking-wide text-slate-500 font-bold">Remaining Balance</div>
+            <div className="border border-slate-700 bg-slate-800 p-4">
+              <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold">Remaining Balance</div>
               <div className={`text-2xl font-black mt-1 ${balanceAfterPayment > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(balanceAfterPayment)}</div>
             </div>
           </div>
 
           <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm mb-5">
-            <div><span className="text-slate-500">Method:</span> <strong>{payment.method || "-"}</strong></div>
-            <div><span className="text-slate-500">Customer:</span> <strong>{customer.name}</strong></div>
-            <div><span className="text-slate-500">Total Payments:</span> <strong>{fmtMoney(customerPaidTotal)}</strong></div>
-            <div><span className="text-slate-500">Reference:</span> <strong>{payment.id}</strong></div>
+            <div><span className="text-slate-400">Method:</span> <strong>{payment.method || "-"}</strong></div>
+            <div><span className="text-slate-400">Customer:</span> <strong>{customer.name}</strong></div>
+            <div><span className="text-slate-400">Total Payments:</span> <strong>{fmtMoney(customerPaidTotal)}</strong></div>
+            <div><span className="text-slate-400">Reference:</span> <strong>{payment.id}</strong></div>
           </div>
 
           {payment.note && (
-            <div className="border border-slate-200 bg-slate-50 p-3 text-sm mb-5">
-              <div className="text-[10px] uppercase tracking-wide text-slate-500 font-bold mb-1">Note</div>
+            <div className="border border-slate-700 bg-slate-800 p-3 text-sm mb-5">
+              <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Note</div>
               {payment.note}
             </div>
           )}
