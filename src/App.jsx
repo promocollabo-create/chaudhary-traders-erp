@@ -411,6 +411,19 @@ const translations = {
     "Expected Date": "متوقع تاریخ",
     "Apply Against Promise (optional)": "وعدے کے مقابل لاگو کریں (اختیاری)",
     "None — general payment": "کوئی نہیں — عمومی ادائیگی",
+    "Edit Payment": "ادائیگی میں ترمیم",
+    "Receiving": "وصولی",
+    "Payment Receiving": "ادائیگی کی وصولی",
+    "Receipt No.": "رسید نمبر",
+    "Customer Information": "گاہک کی معلومات",
+    "Payment Information": "ادائیگی کی معلومات",
+    "Remaining Balance": "باقی بیلنس",
+    "Total Payments": "کل ادائیگیاں",
+    "Save as PDF": "پی ڈی ایف کے طور پر محفوظ کریں",
+    "Actions": "کارروائیاں",
+    "Customer Signature": "گاہک کے دستخط",
+    "Received By": "وصول کنندہ",
+    "Advance / Credit With Us": "پیشگی / ہمارے پاس جمع",
     "No record found": "کوئی ریکارڈ نہیں ملا۔",
     "Welcome,": "خوش آمدید،",
     "· All Branches": "· تمام برانچز",
@@ -946,7 +959,7 @@ function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl }) {
 
 function Stat({ label, value, accent }) {
   return (
-    <div className="bg-white border border-slate-700 bg-slate-800 p-4 flex-1 min-w-[150px]">
+    <div className="bg-white border border-slate-200 p-4 flex-1 min-w-[150px]">
       <div className="text-[11px] uppercase tracking-wide text-slate-500 font-bold">{label}</div>
       <div className={`text-2xl font-black mt-1 ${accent || "text-slate-900"}`}>{value}</div>
     </div>
@@ -959,7 +972,7 @@ function Modal({ title, onClose, children, wide }) {
       <div className={`bg-white w-full ${wide ? "max-w-3xl" : "max-w-lg"} mt-8 mb-8 border-t-4 border-slate-900`}>
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
           <h3 className="font-black uppercase tracking-tight text-slate-900">{t(title)}</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">×</button>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-900 text-xl leading-none">×</button>
         </div>
         <div className="p-5">{children}</div>
       </div>
@@ -2992,7 +3005,7 @@ function SalesReturnPage({ customers, invoices, returns, exchanges, onCreateRetu
         Customer se wapis aane wale items yahan record karein — outstanding balance turant kam ho jayega aur ek Credit Note ban jayegi. Feet / Meter / KG / Liter / Sq.Ft jaise items ke liye fractional (decimal) qty bhi daal sakte hain — rate hamesha (Original Line Amount ÷ Original Sold Qty) se calculate hota hai, piece count se nahi.
       </div>
 
-      <div className="bg-white border border-slate-700 bg-slate-800 p-4 mb-6 max-w-2xl">
+      <div className="bg-white border border-slate-200 p-4 mb-6 max-w-2xl">
         <div className="grid grid-cols-2 gap-3">
           <Field label="Customer">
             <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
@@ -3390,171 +3403,317 @@ function CreditNotesPage({ creditNotes, onLinkInvoice }) {
 
 /* ---------------- Payments ---------------- */
 
-function PaymentReceipt({ payment, customer, invoices, payments, returns, exchanges, promises, transfers, adjustments, onClose }) {
-  if (!payment || !customer) return null;
-  const { outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
-  const balanceAfterPayment = payment.__balanceAfterPayment != null
-    ? Math.max(0, roundMoney(payment.__balanceAfterPayment))
-    : Math.max(0, roundMoney(outstanding));
-  const customerPaidTotal = payments
-    .filter((p) => p.customerId === customer.id)
-    .reduce((sum, p) => sum + (Number(p.amount) || 0), 0);
+// ---- Payment Edit / Payment Receiving helpers ----------------------------
+// These are additive helpers used only by the Payments page. They never
+// change how the ledger is computed — the receipt reads its balances
+// straight out of computeLedgerForCustomer so it can never disagree with
+// the Ledger page.
 
+// Receipt No. — derived from the payment's own unique id, so every payment
+// (including ones recorded before this feature existed, and the payments
+// auto-created from invoices) has a stable receipt number that can never
+// be duplicated and never changes when the payment is edited.
+function paymentReceiptNo(payment) {
+  const raw = String(payment?.id || "");
+  const core = raw.replace(/^pay_/, "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  return "RCV-" + (core || "0000");
+}
+
+// The invoice a payment was recorded against (explicit invoiceId on new
+// records, legacy "Against <number>" note on old ones) — same matching
+// rule as isPaymentLinkedToCancelledInvoice above.
+function findInvoiceForPayment(payment, invoices) {
+  if (!payment) return null;
+  if (payment.invoiceId) return (invoices || []).find((i) => i.id === payment.invoiceId) || null;
+  if (payment.note && payment.note.startsWith("Against ")) {
+    const num = payment.note.replace("Against ", "").trim();
+    return (invoices || []).find((i) => i.number === num) || null;
+  }
+  return null;
+}
+
+// A promise-linked payment stores its note as
+// "Payment against Promise <code> — <user note>". When editing we show only
+// the user's own note, and rebuild the prefix on save (so changing the
+// promise never leaves a stale promise code in the note).
+function paymentUserNote(payment) {
+  const note = payment?.note || "";
+  if (!payment?.promiseId) return note;
+  return note.replace(/^Payment against Promise ?[^\s—]*(?: — )?/, "");
+}
+
+// Previous Balance / Payment Received / Remaining Balance for ONE payment.
+// The payment is located inside the customer's ledger (where it appears
+// exactly once), so Remaining = the running balance right after it and
+// Previous = that balance with this payment's credit added back. Nothing
+// is subtracted twice.
+function computePaymentReceiptBalances(payment, customer, invoices, payments, returns, exchanges, promises, transfers, adjustments) {
+  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  const entry = entries.find((e) => e.id === payment.id && (e.type === "Payment" || e.type === "Payment Against Promise"));
+  if (!entry) {
+    // Not in the ledger = reversed because its invoice was cancelled.
+    return { reversed: true, previous: outstanding, received: Number(payment.amount) || 0, remaining: outstanding };
+  }
+  return { reversed: false, previous: roundMoney(entry.balance + entry.credit), received: entry.credit, remaining: entry.balance };
+}
+
+function PaymentReceiptBody({ payment, customer, settings, balances, history, historyTotal, reference }) {
+  const receiptNo = paymentReceiptNo(payment);
   return (
-    <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm flex items-start justify-center z-50 p-4 overflow-y-auto">
-      <div className="bg-slate-900 text-white w-full max-w-2xl mt-8 mb-8 border border-slate-700 shadow-2xl rounded-sm overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-700 bg-slate-950">
-          <div>
-            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">Payment Receiving</div>
-            <h3 className="font-black uppercase tracking-tight text-white">Payment Receipt</h3>
-          </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">×</button>
-        </div>
-
-        <div className="p-6 bg-slate-900">
-          <div className="flex items-start justify-between gap-4 border-b border-slate-700 pb-5 mb-5">
-            <div>
-              <div className="text-lg font-black text-white">{customer.name}</div>
-              <div className="text-xs text-slate-400">{customer.phone || "-"}</div>
-              <div className="text-xs text-slate-400">{customer.address || "-"}</div>
-            </div>
-            <div className="text-right">
-              <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold">Payment Date</div>
-              <div className="font-bold text-white">{fmtDate(payment.date)}</div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-3 mb-5">
-            <div className="border border-slate-700 bg-slate-800 p-4">
-              <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold">Received Amount</div>
-              <div className="text-2xl font-black text-emerald-600 mt-1">{fmtMoney(payment.amount)}</div>
-            </div>
-            <div className="border border-slate-700 bg-slate-800 p-4">
-              <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold">Remaining Balance</div>
-              <div className={`text-2xl font-black mt-1 ${balanceAfterPayment > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(balanceAfterPayment)}</div>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 gap-x-6 gap-y-3 text-sm mb-5">
-            <div><span className="text-slate-400">Method:</span> <strong>{payment.method || "-"}</strong></div>
-            <div><span className="text-slate-400">Customer:</span> <strong>{customer.name}</strong></div>
-            <div><span className="text-slate-400">Total Payments:</span> <strong>{fmtMoney(customerPaidTotal)}</strong></div>
-            <div><span className="text-slate-400">Reference:</span> <strong>{payment.id}</strong></div>
-          </div>
-
-          {payment.note && (
-            <div className="border border-slate-700 bg-slate-800 p-3 text-sm mb-5">
-              <div className="text-[10px] uppercase tracking-wide text-slate-400 font-bold mb-1">Note</div>
-              {payment.note}
-            </div>
+    <div className="bg-white text-slate-900" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
+        <div className="flex items-center gap-3">
+          {settings?.logoUrl ? (
+            <img src={settings.logoUrl} alt="Logo" className="w-14 h-14 object-contain" />
+          ) : (
+            <div className="w-14 h-14 bg-slate-900 flex items-center justify-center font-black text-xl text-white">CT</div>
           )}
-
-          <div className="flex justify-end gap-2">
-            <Btn variant="ghost" onClick={onClose}>Close</Btn>
-            <Btn onClick={() => window.print()}>Print / Save as PDF</Btn>
+          <div>
+            <div className="text-xl font-black uppercase tracking-tight text-slate-900">{settings?.companyName}</div>
+            <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">Construction Materials Supplier</div>
           </div>
         </div>
+        <div className="text-right text-xs text-slate-500">
+          <div>{settings?.companyAddress}</div>
+          {settings?.companyPhone && <div>Ph: {settings.companyPhone}</div>}
+        </div>
+      </div>
+
+      <div className="flex justify-between items-start gap-3 flex-wrap mb-4">
+        <div className="text-lg font-black uppercase tracking-tight text-slate-900">Payment Receiving</div>
+        <div className="text-right">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-0.5">Receipt No.</div>
+          <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{receiptNo}</div>
+        </div>
+      </div>
+
+      {balances.reversed && (
+        <div className="mb-4 border border-red-200 bg-red-50 text-red-700 text-xs font-bold px-3 py-2">
+          Ye payment reverse ho chuki hai kyun ke is ki invoice cancel ho gayi thi — ye customer ke balance mein shamil nahi hai.
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4 text-sm">
+        <div className="border border-slate-200 p-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-1.5">Customer Information</div>
+          <div className="flex justify-between gap-3"><span className="text-slate-500">Customer Name</span><span className="font-bold text-right">{customer.name || "-"}</span></div>
+          <div className="flex justify-between gap-3"><span className="text-slate-500">Phone</span><span className="font-bold text-right">{customer.phone || "-"}</span></div>
+          <div className="flex justify-between gap-3"><span className="text-slate-500">Address</span><span className="font-bold text-right">{customer.address || "-"}</span></div>
+        </div>
+        <div className="border border-slate-200 p-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-1.5">Payment Information</div>
+          <div className="flex justify-between gap-3"><span className="text-slate-500">Payment Date</span><span className="font-bold text-right">{fmtDate(payment.date)}</span></div>
+          <div className="flex justify-between gap-3"><span className="text-slate-500">Payment Amount</span><span className="font-bold text-right">{fmtMoney(payment.amount)}</span></div>
+          <div className="flex justify-between gap-3"><span className="text-slate-500">Payment Method</span><span className="font-bold text-right">{payment.method || "Cash"}</span></div>
+          <div className="flex justify-between gap-3"><span className="text-slate-500">Reference</span><span className="font-bold text-right">{reference}</span></div>
+          <div className="flex justify-between gap-3"><span className="text-slate-500">Note</span><span className="font-bold text-right">{payment.note || "-"}</span></div>
+        </div>
+      </div>
+
+      <div className="flex justify-end mb-4">
+        <div className="w-full sm:w-80 text-sm space-y-1.5 border border-slate-200 p-3">
+          <div className="flex justify-between"><span className="text-slate-500">Previous Balance</span><span className="font-bold">{fmtMoney(balances.previous)}</span></div>
+          <div className="flex justify-between"><span className="text-slate-500">Payment Received</span><span className="font-bold text-emerald-600">{balances.reversed ? "" : "-"}{fmtMoney(balances.received)}</span></div>
+          <div className="flex justify-between border-t-2 border-slate-900 pt-2 mt-1">
+            <span className="font-black uppercase text-blue-700">Remaining Balance</span>
+            <span className="font-black text-lg text-blue-700">{fmtMoney(balances.remaining)}</span>
+          </div>
+          {balances.remaining < 0 && (
+            <div className="text-[10px] font-bold uppercase text-emerald-600 text-right">Advance / Credit With Us</div>
+          )}
+        </div>
+      </div>
+
+      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Payment History</div>
+      <table className="w-full text-sm mb-6">
+        <thead>
+          <tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
+            <th className="py-1.5 px-2 text-left">Date</th>
+            <th className="py-1.5 px-2 text-left">Payment Method</th>
+            <th className="py-1.5 px-2 text-right">Amount</th>
+          </tr>
+        </thead>
+        <tbody>
+          {history.length === 0 && (
+            <tr><td colSpan={3} className="py-3 px-2 text-center text-slate-400">Koi payment record nahi.</td></tr>
+          )}
+          {history.map((h) => (
+            <tr key={h.id} className={`border-b border-slate-100 ${h.id === payment.id ? "bg-blue-50 font-bold" : ""}`}>
+              <td className="py-1.5 px-2">{fmtDate(h.date)}</td>
+              <td className="py-1.5 px-2 text-slate-500">{h.method || "Cash"}</td>
+              <td className="py-1.5 px-2 text-right">{fmtMoney(h.amount)}</td>
+            </tr>
+          ))}
+          <tr className="border-t-2 border-slate-900">
+            <td className="py-2 px-2 font-black uppercase" colSpan={2}>Total Payments</td>
+            <td className="py-2 px-2 text-right font-black">{fmtMoney(historyTotal)}</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div className="flex justify-between gap-6 pt-8 text-xs text-slate-500">
+        <div className="flex-1 border-t border-slate-400 pt-1">Received By</div>
+        <div className="flex-1 border-t border-slate-400 pt-1 text-right">Customer Signature</div>
       </div>
     </div>
   );
 }
 
-function Payments({ customers, payments, promises, invoices = [], returns = [], exchanges = [], transfers = [], adjustments = [], savePayment, updatePayment }) {
+function PaymentReceipt({ payment, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, settings, onClose }) {
+  const linkedInvoice = findInvoiceForPayment(payment, invoices);
+  const linkedPromise = payment.promiseId ? (promises || []).find((pr) => pr.id === payment.promiseId) : null;
+  // Cash / walk-in invoice payments have no customer account, so fall back
+  // to the details saved on the payment and its invoice.
+  const customer = customers.find((c) => c.id === payment.customerId) || {
+    id: payment.customerId, name: payment.customerName,
+    phone: linkedInvoice?.customerPhone || "", address: linkedInvoice?.customerAddress || "", openingBalance: 0,
+  };
+  const balances = computePaymentReceiptBalances(payment, customer, invoices, payments, returns, exchanges, promises || [], transfers, adjustments);
+  // Only this customer's payments, and only the ones that actually count
+  // in the ledger (a payment reversed by a cancelled invoice is left out),
+  // so Total Payments always matches the Ledger.
+  const history = payments
+    .filter((p) => p.customerId === payment.customerId && !isPaymentLinkedToCancelledInvoice(p, invoices))
+    .sort((a, b) => new Date(a.date) - new Date(b.date));
+  const historyTotal = roundMoney(history.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const receiptNo = paymentReceiptNo(payment);
+  const reference = linkedPromise?.code || linkedInvoice?.number || receiptNo;
+  const bodyProps = { payment, customer, settings, balances, history, historyTotal, reference };
+
+  // Print and Save as PDF both go through the app's existing window.print()
+  // mechanism. For Save as PDF the page title is switched for the duration
+  // of the print so the browser suggests a sensible PDF file name.
+  const savedTitle = React.useRef(null);
+  function restoreTitle() {
+    if (savedTitle.current !== null) { document.title = savedTitle.current; savedTitle.current = null; }
+    window.removeEventListener("afterprint", restoreTitle);
+  }
+  // Safety net: if the browser never fires "afterprint", the title is put
+  // back when the receipt is closed.
+  useEffect(() => restoreTitle, []);
+  function printReceipt(asPdf) {
+    if (asPdf && typeof document !== "undefined") {
+      if (savedTitle.current === null) savedTitle.current = document.title;
+      window.addEventListener("afterprint", restoreTitle);
+      document.title = `Payment-Receipt-${receiptNo}`;
+    }
+    window.print();
+  }
+
+  return (
+    <>
+      <Modal title="Payment Receiving" onClose={onClose} wide>
+        <PaymentReceiptBody {...bodyProps} />
+        <div className="mt-4 flex gap-2 flex-wrap">
+          <Btn onClick={() => printReceipt(false)}>Print</Btn>
+          <Btn variant="dark" onClick={() => printReceipt(true)}>Save as PDF</Btn>
+          <Btn variant="ghost" onClick={onClose}>Close</Btn>
+        </div>
+      </Modal>
+      {/* Print/PDF-only copy — same pattern as the Ledger's #print-ledger:
+          hidden on screen, forced visible by the @media print rule in
+          <PrintStyles/> via the "print-area" class, so window.print()
+          outputs ONLY the receipt (and long histories flow onto extra
+          pages instead of being clipped by the on-screen modal). */}
+      <div id="print-receipt" className="print-area" style={{ display: "none" }}>
+        <PaymentReceiptBody {...bodyProps} />
+      </div>
+    </>
+  );
+}
+
+function Payments({ customers, payments, promises, savePayment, updatePayment, invoices = [], returns = [], exchanges = [], transfers = [], adjustments = [], settings = {} }) {
   const [form, setForm] = useState({ customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "" });
-  const [editingPayment, setEditingPayment] = useState(null);
-  const [receiptPayment, setReceiptPayment] = useState(null);
+  const [editing, setEditing] = useState(null);
+  const [receiptId, setReceiptId] = useState(null);
+  const formRef = React.useRef(null);
   const sorted = [...payments].sort((a, b) => new Date(b.date) - new Date(a.date));
 
+  // Edit mode — a payment that was recorded on an invoice stays tied to
+  // that invoice: its customer and "Against <invoice>" note are fixed
+  // (that note is how older records are matched to their invoice), and a
+  // Cash / walk-in invoice is always fully paid so its amount is fixed too.
+  const editingInvoice = editing ? findInvoiceForPayment(editing, invoices) : null;
+  const editingLinked = !!editing && (!!editing.invoiceId || !!editingInvoice);
+  const amountLocked = editingLinked && editingInvoice?.customerType === "Cash";
+  const receiptPayment = receiptId ? payments.find((p) => p.id === receiptId) : null;
+
+  // Feature 7 — promises for the selected customer that still have a
+  // remaining amount, so staff can apply this payment against one.
+  // While editing, the promise this payment is already applied to is always
+  // listed (even if this very payment completed it), with this payment's
+  // own amount added back to its remaining figure.
   const customerPromises = (promises || [])
     .filter((p) => p.customerId === form.customerId && p.status !== "Deleted")
     .map(promiseWithComputed)
-    .filter((p) => p.remainingAmount > 0 && p.status !== "Cancelled");
+    .map((p) => (editing && editing.promiseId === p.id
+      ? { ...p, remainingAmount: Math.max(0, roundMoney((Number(p.amount) || 0) - Math.max(0, p.paidAmount - (Number(editing.amount) || 0)))) }
+      : p))
+    .filter((p) => (p.remainingAmount > 0 && p.status !== "Cancelled") || (editing && editing.promiseId === p.id));
 
-  function startEdit(payment) {
-    setEditingPayment(payment);
-    setForm({
-      customerId: payment.customerId || "",
-      date: payment.date || todayISO(),
-      amount: String(payment.amount ?? ""),
-      method: payment.method || "Cash",
-      note: payment.note || "",
-      promiseId: payment.promiseId || "",
-    });
-    window.scrollTo({ top: 0, behavior: "smooth" });
+  function blankForm() {
+    return { customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "" };
   }
 
-  function resetForm() {
-    setEditingPayment(null);
-    setForm({ customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "" });
+  function startEdit(p) {
+    const linked = !!p.invoiceId || !!findInvoiceForPayment(p, invoices);
+    setEditing(p);
+    setForm({
+      customerId: p.customerId || "", date: p.date || todayISO(), amount: String(p.amount ?? ""),
+      method: p.method || "Cash", note: linked ? (p.note || "") : paymentUserNote(p), promiseId: p.promiseId || "",
+    });
+    if (formRef.current && formRef.current.scrollIntoView) formRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function cancelEdit() {
+    setEditing(null);
+    setForm(blankForm());
   }
 
   function submit() {
-    if (!form.customerId || !Number(form.amount) || Number(form.amount) <= 0) {
-      alert("Customer aur valid amount zaroori hai.");
+    if (!form.customerId || !Number(form.amount)) { alert("Customer aur amount zaroori hai."); return; }
+    const customer = customers.find((c) => c.id === form.customerId);
+    if (editing) {
+      if (Number(form.amount) <= 0) { alert("Amount 0 se zyada hona chahiye."); return; }
+      if (!form.date) { alert("Payment date zaroori hai."); return; }
+      const promiseId = editingLinked ? (editing.promiseId || "") : (form.promiseId || "");
+      updatePayment(editing, {
+        customerId: form.customerId,
+        customerName: customer ? customer.name : editing.customerName,
+        date: form.date,
+        amount: Number(form.amount),
+        method: form.method,
+        promiseId,
+        note: editingLinked
+          ? (editing.note || "")
+          : (promiseId ? `Payment against Promise ${customerPromises.find((p) => p.id === promiseId)?.code || ""}${form.note ? " — " + form.note : ""}` : form.note),
+      });
+      setEditing(null);
+      setForm(blankForm());
       return;
     }
-    const customer = customers.find((c) => c.id === form.customerId);
-    if (!customer) return;
-
-    const selectedPromise = customerPromises.find((p) => p.id === form.promiseId);
-    const note = form.promiseId
-      ? `Payment against Promise ${selectedPromise?.code || ""}${form.note ? " — " + form.note : ""}`
-      : form.note;
-
-    const data = {
-      customerId: form.customerId,
-      date: form.date,
-      amount: Number(form.amount),
-      method: form.method,
-      note,
+    savePayment({
+      id: uid("pay"), ...form, amount: Number(form.amount), customerName: customer.name,
       promiseId: form.promiseId || "",
-      customerName: customer.name,
-    };
-
-    const currentOutstanding = computeLedgerForCustomer(
-      customer, invoices, payments, returns, exchanges, promises, transfers, adjustments
-    ).outstanding;
-
-    if (editingPayment) {
-      updatePayment({ ...editingPayment, ...data });
-      setReceiptPayment({
-        ...editingPayment,
-        ...data,
-        __balanceAfterPayment: Math.max(0, roundMoney(currentOutstanding + Number(editingPayment.amount || 0) - Number(data.amount || 0))),
-      });
-    } else {
-      const created = { id: uid("pay"), ...data };
-      savePayment(created);
-      setReceiptPayment({
-        ...created,
-        __balanceAfterPayment: Math.max(0, roundMoney(currentOutstanding - Number(created.amount || 0))),
-      });
-    }
-    resetForm();
+      note: form.promiseId ? `Payment against Promise ${customerPromises.find((p) => p.id === form.promiseId)?.code || ""}${form.note ? " — " + form.note : ""}` : form.note,
+    });
+    setForm({ ...form, amount: "", note: "", promiseId: "" });
   }
-
-  const receiptCustomer = receiptPayment
-    ? customers.find((c) => c.id === receiptPayment.customerId)
-    : null;
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
-        <h2 className="text-xl font-black uppercase tracking-tight">Payments</h2>
-        <div className="text-xs text-slate-500 font-bold uppercase tracking-wide">
-          Customer Payment & Receiving
-        </div>
-      </div>
-
-      <div className="bg-white border border-slate-200 p-4 mb-6 max-w-xl">
-        <div className="flex items-center justify-between mb-3">
-          <div className="text-sm font-black uppercase">{editingPayment ? "Edit Payment" : "Record Payment"}</div>
-          {editingPayment && <Btn variant="ghost" small onClick={resetForm}>Cancel Edit</Btn>}
-        </div>
-
+      <h2 className="text-xl font-black uppercase tracking-tight mb-4">Payments</h2>
+      <div ref={formRef} className={`bg-white border p-4 mb-6 max-w-xl ${editing ? "border-blue-700" : "border-slate-200"}`}>
+        {editing && (
+          <div className="flex items-center justify-between gap-2 flex-wrap mb-3 pb-2 border-b border-slate-200">
+            <div className="font-black uppercase tracking-tight text-slate-900">Edit Payment</div>
+            <div className="text-[11px] font-bold text-blue-700">{paymentReceiptNo(editing)}</div>
+          </div>
+        )}
         <div className="grid grid-cols-2 gap-3">
           <Field label="Customer">
-            <select className={inputCls} value={form.customerId} onChange={(e) => setForm({ ...form, customerId: e.target.value, promiseId: "" })}>
+            <select className={inputCls} value={form.customerId} disabled={editingLinked} onChange={(e) => setForm({ ...form, customerId: e.target.value, promiseId: "" })}>
+              {editing && !customers.some((c) => c.id === editing.customerId) && <option value={editing.customerId}>{editing.customerName}</option>}
               {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
             </select>
           </Field>
@@ -3562,19 +3721,18 @@ function Payments({ customers, payments, promises, invoices = [], returns = [], 
             <input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
           </Field>
         </div>
-
         <div className="grid grid-cols-2 gap-3">
           <Field label="Amount (Rs)">
-            <input type="number" min="0" className={inputCls} value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+            <input type="number" className={inputCls} value={form.amount} disabled={amountLocked} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
           </Field>
           <Field label="Method">
             <select className={inputCls} value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })}>
               <option>Cash</option><option>Bank Transfer</option><option>Cheque</option><option>Easypaisa/JazzCash</option>
+              {editing && !["Cash", "Bank Transfer", "Cheque", "Easypaisa/JazzCash"].includes(form.method) && <option>{form.method}</option>}
             </select>
           </Field>
         </div>
-
-        {customerPromises.length > 0 && (
+        {customerPromises.length > 0 && !editingLinked && (
           <Field label="Apply Against Promise (optional)">
             <select className={inputCls} value={form.promiseId} onChange={(e) => setForm({ ...form, promiseId: e.target.value })}>
               <option value="">None — general payment</option>
@@ -3584,38 +3742,50 @@ function Payments({ customers, payments, promises, invoices = [], returns = [], 
             </select>
           </Field>
         )}
-
         <Field label="Note">
-          <input className={inputCls} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} />
+          <input className={inputCls} value={form.note} disabled={editingLinked} onChange={(e) => setForm({ ...form, note: e.target.value })} />
         </Field>
-
-        <Btn onClick={submit}>{editingPayment ? "Update Payment" : "Record Payment"}</Btn>
+        {editingLinked && (
+          <div className="text-xs text-slate-500 mb-3">
+            Ye payment Invoice {editingInvoice?.number || ""} par record hui thi, is liye customer aur note yahan change nahi ho sakte.
+            {amountLocked
+              ? " Cash sale invoice hamesha fully paid hoti hai, is liye amount bhi fixed hai."
+              : " Amount change karne par invoice ka Payment Received aur Balance Due bhi update ho jayega."}
+          </div>
+        )}
+        {editing ? (
+          <div className="flex gap-2 flex-wrap">
+            <Btn onClick={submit}>Save Changes</Btn>
+            <Btn variant="ghost" onClick={cancelEdit}>Cancel</Btn>
+          </div>
+        ) : (
+          <Btn onClick={submit}>Record Payment</Btn>
+        )}
       </div>
-
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-            <th className="px-4 py-2">Date</th>
-            <th className="px-4 py-2">Customer</th>
-            <th className="px-4 py-2">Method</th>
-            <th className="px-4 py-2 text-right">Amount</th>
-            <th className="px-4 py-2">Note</th>
-            <th className="px-4 py-2 text-right">Actions</th>
+            <th className="px-4 py-2">Date</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Method</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Note</th><th className="px-4 py-2 text-right">Actions</th>
           </tr></thead>
           <tbody>
             {sorted.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-slate-400">Koi payment record nahi.</td></tr>}
             {sorted.map((p) => {
-              const c = customers.find((x) => x.id === p.customerId);
+              const reversed = isPaymentLinkedToCancelledInvoice(p, invoices);
               return (
-                <tr key={p.id} className="border-t border-slate-100">
+                <tr key={p.id} className={`border-t border-slate-100 ${editing && editing.id === p.id ? "bg-blue-50" : ""}`}>
                   <td className="px-4 py-2">{fmtDate(p.date)}</td>
                   <td className="px-4 py-2 font-bold">{p.customerName}</td>
                   <td className="px-4 py-2 text-slate-500">{p.method}</td>
                   <td className="px-4 py-2 text-right font-bold text-emerald-600">{fmtMoney(p.amount)}</td>
                   <td className="px-4 py-2 text-slate-500 text-xs">{p.note || "-"}</td>
                   <td className="px-4 py-2 text-right whitespace-nowrap">
-                    <button className="text-xs font-bold text-blue-700 hover:underline mr-3" onClick={() => setReceiptPayment(p)}>Receiving</button>
-                    <button className="text-xs font-bold text-slate-700 hover:underline" onClick={() => startEdit(p)}>Edit</button>
+                    <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setReceiptId(p.id)}>Receiving</button>
+                    <span className="text-slate-300 mx-2">|</span>
+                    {reversed ? (
+                      <span className="text-xs font-bold text-slate-300" title="Invoice cancelled — payment reversed">Edit</span>
+                    ) : (
+                      <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => startEdit(p)}>Edit</button>
+                    )}
                   </td>
                 </tr>
               );
@@ -3623,25 +3793,16 @@ function Payments({ customers, payments, promises, invoices = [], returns = [], 
           </tbody>
         </table>
       </div>
-
-      {receiptPayment && receiptCustomer && (
+      {receiptPayment && (
         <PaymentReceipt
-          payment={receiptPayment}
-          customer={receiptCustomer}
-          invoices={invoices}
-          payments={payments}
-          returns={returns}
-          exchanges={exchanges}
-          promises={promises}
-          transfers={transfers}
-          adjustments={adjustments}
-          onClose={() => setReceiptPayment(null)}
+          payment={receiptPayment} customers={customers} invoices={invoices} payments={payments}
+          returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
+          settings={settings} onClose={() => setReceiptId(null)}
         />
       )}
     </div>
   );
 }
-
 
 /* ---------------- Outstanding Transfer ---------------- */
 
@@ -6390,36 +6551,74 @@ function App() {
     if (p.promiseId) {
       const promise = promises.find((pr) => pr.id === p.promiseId);
       if (promise) {
-        const nextPaid = roundMoney((Number(promise.paidAmount) || 0) + Number(p.amount || 0));
+        const nextPaid = roundMoney((Number(promise.paidAmount) || 0) + p.amount);
         persist.promises(promises.map((pr) => (pr.id === promise.id ? { ...pr, paidAmount: nextPaid } : pr)));
       }
     }
     logAudit("Payment Recorded", p.customerName, fmtMoney(p.amount));
   }
 
-  function updatePayment(updatedPayment) {
-    const original = payments.find((p) => p.id === updatedPayment.id);
-    if (!original) return;
+  // Payment Edit — updates the existing payment record in place (never
+  // creates a second one). The ledger and customer balance are recomputed
+  // from the payments table on every render, so replacing the record is
+  // what "removes the old amount and applies the new one" there. The two
+  // places that keep their own stored totals are synced here by hand:
+  //   - Promises: the old amount is reversed from the old promise and the
+  //     new amount applied to the selected promise (same or different).
+  //   - The linked invoice (if this payment was recorded on an invoice):
+  //     its Payment Received / Balance Due / status follow the new amount.
+  function updatePayment(original, data) {
+    const current = payments.find((p) => p.id === original.id);
+    if (!current) return;
+    const oldAmount = Number(current.amount) || 0;
+    const newAmount = Number(data.amount) || 0;
+    const oldPromiseId = current.promiseId || "";
+    const newPromiseId = data.promiseId || "";
+    const editEntry = {
+      action: "Edited", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString(),
+      previousValues: { customerName: current.customerName, date: current.date, amount: oldAmount, method: current.method, promiseId: oldPromiseId, note: current.note || "" },
+      newValues: { customerName: data.customerName, date: data.date, amount: newAmount, method: data.method, promiseId: newPromiseId, note: data.note || "" },
+    };
+    const updated = {
+      ...current, ...data, id: current.id, amount: newAmount, promiseId: newPromiseId,
+      editHistory: [...(current.editHistory || []), editEntry],
+    };
+    persist.payments(payments.map((p) => (p.id === current.id ? updated : p)));
 
-    const nextPayments = payments.map((p) => (p.id === updatedPayment.id ? updatedPayment : p));
-    persist.payments(nextPayments);
-
-    const promiseIds = new Set([original.promiseId, updatedPayment.promiseId].filter(Boolean));
-    if (promiseIds.size) {
-      let nextPromises = promises.map((pr) => {
-        if (!promiseIds.has(pr.id)) return pr;
+    if ((oldPromiseId || newPromiseId) && (oldPromiseId !== newPromiseId || oldAmount !== newAmount)) {
+      persist.promises(promises.map((pr) => {
+        if (pr.id !== oldPromiseId && pr.id !== newPromiseId) return pr;
         let paid = Number(pr.paidAmount) || 0;
-        if (original.promiseId === pr.id) paid -= Number(original.amount) || 0;
-        if (updatedPayment.promiseId === pr.id) paid += Number(updatedPayment.amount) || 0;
+        if (pr.id === oldPromiseId) paid -= oldAmount;
+        if (pr.id === newPromiseId) paid += newAmount;
         return { ...pr, paidAmount: Math.max(0, roundMoney(paid)) };
-      });
-      persist.promises(nextPromises);
+      }));
+    }
+
+    if (oldAmount !== newAmount) {
+      const linkedInv = current.invoiceId
+        ? invoices.find((i) => i.id === current.invoiceId)
+        : (current.note && current.note.startsWith("Against ")
+          ? invoices.find((i) => i.number === current.note.replace("Against ", "").trim())
+          : null);
+      if (linkedInv && !isInvoiceCancelled(linkedInv) && linkedInv.customerType !== "Cash") {
+        const balanceDue = roundMoney((Number(linkedInv.total) || 0) - newAmount);
+        const status = balanceDue <= 0 ? "Paid" : newAmount > 0 ? "Partial" : "Unpaid";
+        const invEditEntry = {
+          action: "Payment Edited", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString(),
+          previousValues: { paymentReceived: linkedInv.paymentReceived, status: linkedInv.status },
+          newValues: { paymentReceived: newAmount, status },
+        };
+        persist.invoices(invoices.map((i) => (i.id === linkedInv.id
+          ? { ...i, paymentReceived: newAmount, balanceDue, status, editHistory: [...(i.editHistory || []), invEditEntry] }
+          : i)));
+      }
     }
 
     logAudit(
       "Payment Edited",
-      updatedPayment.customerName,
-      `${fmtMoney(original.amount)} → ${fmtMoney(updatedPayment.amount)}`
+      current.customerName === updated.customerName ? updated.customerName : `${current.customerName} \u2192 ${updated.customerName}`,
+      `${fmtMoney(oldAmount)} \u2192 ${fmtMoney(newAmount)}`
     );
   }
 
@@ -6810,16 +7009,9 @@ function App() {
     ),
     payments: (
       <Payments
-        customers={visibleCustomers}
-        payments={visiblePayments}
-        invoices={visibleInvoices}
-        returns={returns}
-        exchanges={exchanges}
-        promises={promises}
-        transfers={transfers}
-        adjustments={adjustments}
-        savePayment={savePayment}
-        updatePayment={updatePayment}
+        customers={visibleCustomers} payments={visiblePayments} promises={promises} savePayment={savePayment}
+        updatePayment={updatePayment} invoices={visibleInvoices} returns={returns} exchanges={exchanges}
+        transfers={transfers} adjustments={adjustments} settings={settings}
       />
     ),
     outstandingTransfer: (
