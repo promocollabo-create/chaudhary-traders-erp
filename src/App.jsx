@@ -2592,6 +2592,9 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
         </div>
       )}
 
+      {/* Material Receiving (add-only): admin/staff view only, hidden in print */}
+      {onEdit && <MaterialReceivingSection invoice={invoice} settings={settings} />}
+
       {(myReturns.length > 0 || myExchanges.length > 0) && (
         <div className="mt-4 print:hidden">
           <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Sales Return &amp; Exchange History</div>
@@ -7045,4 +7048,1331 @@ function App() {
   );
 }
 
-export default App;
+/* ============================================================
+   MATERIAL RECEIVING & PROOF  —  ADD-ONLY MODULE
+   ------------------------------------------------------------
+   A small digital receiving slip connected to an existing invoice.
+
+   This block only ADDS code. It never writes to invoices, customers,
+   payments, ledger, returns, exchanges, products or settings — it only
+   READS an invoice (number, customer name, item name / unit / qty) to
+   build the slip. Receiving status is completely separate from payment
+   status.
+
+   Storage (same kv store the ERP already uses, its own keys only):
+     ct-recv:<token>        one receiving record per delivery / link
+     ct-recvproof:<token>   the proof photo for that record
+
+   Integration points in the existing file (the only 2 edits):
+     1. InvoiceDetail  -> one line renders <MaterialReceivingSection />
+     2. bottom of file -> `export default AppRoot` (AppRoot renders the
+        unchanged <App /> unless the URL is a customer receiving link)
+   ============================================================ */
+
+const RECV_KEY_PREFIX = "ct-recv:";
+const RECV_PROOF_PREFIX = "ct-recvproof:";
+const RECV_STATUS = {
+  PENDING: "PENDING",
+  PARTIAL: "PARTIALLY_RECEIVED",
+  FULL: "FULLY_RECEIVED",
+  CANCELLED: "CANCELLED",
+};
+const RECV_CONFIG = {
+  // Set to true to tick "Require proof photo" by default on new requests.
+  proofRequiredByDefault: false,
+  allowedImageTypes: ["image/jpeg", "image/png", "image/webp"],
+  maxUploadBytes: 12 * 1024 * 1024, // largest photo a customer may pick
+  proofMaxEdge: 1600,               // photo is resized to this (px, long edge)
+  proofMaxStoredChars: 1200000,     // ~900 KB after compression
+  receiverNameMaxLength: 80,
+  refreshMs: 20000,                 // admin view re-checks while invoice is open
+};
+const RECV_TOKEN_PATTERN = /^REC-[A-Za-z0-9]{1,24}-\d{3,6}-[A-Za-z0-9]{20}$/;
+
+// Urdu labels for the new screens only.
+const RECV_URDU = {
+  "Material Receiving": "مال کی وصولی",
+  "Material Received": "مال وصول ہوا",
+  "Receiving Proof": "وصولی کا ثبوت",
+  "Fully Received": "مکمل وصول",
+  "Partially Received": "جزوی وصول",
+  "Pending": "زیرِ التوا",
+  "Cancelled": "منسوخ",
+  "Uploaded": "اپ لوڈ ہو گیا",
+  "Not Uploaded": "اپ لوڈ نہیں ہوا",
+  "View": "دیکھیں",
+  "View Image": "تصویر دیکھیں",
+  "Details": "تفصیلات",
+  "Refresh": "ریفریش",
+  "Invoice": "انوائس",
+  "Customer": "گاہک",
+  "Materials": "سامان",
+  "Ordered": "آرڈر",
+  "Delivered": "ڈیلیور",
+  "Received": "وصول",
+  "Remaining": "باقی",
+  "Previously Received": "پہلے وصول شدہ",
+  "Not in this delivery": "اس ڈیلیوری میں شامل نہیں",
+  "Received By": "وصول کنندہ",
+  "Enter Name": "نام درج کریں",
+  "Customer Signature": "گاہک کے دستخط",
+  "Sign Here": "یہاں دستخط کریں",
+  "Clear Signature": "دستخط صاف کریں",
+  "Upload Image": "تصویر اپ لوڈ کریں",
+  "Replace": "تبدیل کریں",
+  "Remove": "ہٹائیں",
+  "optional": "اختیاری",
+  "required": "لازمی",
+  "Confirm Received": "وصولی کی تصدیق کریں",
+  "Submitting...": "جمع ہو رہا ہے...",
+  "Success": "کامیاب",
+  "Material received successfully.": "مال کامیابی سے وصول ہو گیا۔",
+  "Date": "تاریخ",
+  "Time": "وقت",
+  "Status": "حیثیت",
+  "Signature": "دستخط",
+  "Proof": "ثبوت",
+  "Receiving History": "وصولی کی ہسٹری",
+  "Total Received": "کل وصول شدہ",
+  "New Receiving Request": "نئی وصولی کی درخواست",
+  "Delivering Now": "ابھی ڈیلیور",
+  "Already Received": "پہلے وصول",
+  "Require proof photo": "ثبوت کی تصویر لازمی",
+  "Create Receiving Link": "وصولی لنک بنائیں",
+  "Customer Receiving Link": "گاہک کا وصولی لنک",
+  "Copy Link": "لنک کاپی کریں",
+  "Link Copied": "لنک کاپی ہو گیا",
+  "Send on WhatsApp": "واٹس ایپ پر بھیجیں",
+  "Cancel Request": "درخواست منسوخ کریں",
+  "Awaiting customer": "گاہک کا انتظار",
+  "Done": "مکمل",
+  "Try Again": "دوبارہ کوشش کریں",
+  "No proof image uploaded.": "ثبوت کی کوئی تصویر اپ لوڈ نہیں ہوئی۔",
+  "No material received yet.": "ابھی کوئی مال وصول نہیں ہوا۔",
+  "Nothing left to deliver on this invoice.": "اس انوائس پر ڈیلیوری کے لیے کچھ باقی نہیں۔",
+  "Enter the quantity being delivered now.": "ابھی ڈیلیور ہونے والی مقدار درج کریں۔",
+  "Quantity cannot be more than the remaining quantity.": "مقدار باقی مقدار سے زیادہ نہیں ہو سکتی۔",
+  "Please enter the receiver's name.": "براہِ کرم وصول کنندہ کا نام درج کریں۔",
+  "Please sign in the signature box.": "براہِ کرم دستخط کے خانے میں دستخط کریں۔",
+  "Please upload a proof image.": "براہِ کرم ثبوت کی تصویر اپ لوڈ کریں۔",
+  "Please check the received quantities.": "براہِ کرم وصول شدہ مقدار چیک کریں۔",
+  "Received quantity cannot be more than delivered.": "وصول شدہ مقدار ڈیلیور شدہ مقدار سے زیادہ نہیں ہو سکتی۔",
+  "This receiving link is not valid.": "یہ وصولی لنک درست نہیں ہے۔",
+  "This receiving request was cancelled.": "یہ وصولی کی درخواست منسوخ کر دی گئی ہے۔",
+  "Please contact the shop for a new link.": "نئے لنک کے لیے دکان سے رابطہ کریں۔",
+  "Could not load. Please check your internet and try again.": "لوڈ نہیں ہو سکا۔ براہِ کرم انٹرنیٹ چیک کر کے دوبارہ کوشش کریں۔",
+  "Could not save. Please check your internet and try again.": "محفوظ نہیں ہو سکا۔ براہِ کرم انٹرنیٹ چیک کر کے دوبارہ کوشش کریں۔",
+  "Only JPG, PNG or WEBP images are allowed.": "صرف JPG، PNG یا WEBP تصاویر کی اجازت ہے۔",
+  "Image is too large.": "تصویر بہت بڑی ہے۔",
+  "Could not read this image.": "یہ تصویر پڑھی نہیں جا سکی۔",
+  "Could not load receiving records.": "وصولی کا ریکارڈ لوڈ نہیں ہو سکا۔",
+  "The customer has already confirmed this request.": "گاہک اس درخواست کی تصدیق کر چکا ہے۔",
+  "Shared database is not configured, so this link only opens in this browser.": "مشترکہ ڈیٹا بیس سیٹ نہیں ہے، اس لیے یہ لنک صرف اسی براؤزر میں کھلے گا۔",
+};
+// Kept in its own dictionary (not merged into the ERP's translations) so the
+// wording of existing screens cannot change in either language.
+function recvT(key) {
+  const source = String(key ?? "");
+  if (languageState !== "ur") return source;
+  return RECV_URDU[source] || t(source);
+}
+
+/* ---------------- Receiving: storage (own keys only) ----------------
+   Unlike storeGet/storeSet these never fall back silently: when the shared
+   database is configured and a call fails, the caller is told, so a customer
+   is never shown "success" for something that was not really saved. */
+
+function recvLocalGet(key) {
+  const raw = window.localStorage.getItem(LS_PREFIX + key);
+  return raw !== null ? JSON.parse(raw) : null;
+}
+
+async function recvGet(key) {
+  if (supabase) {
+    const { data, error } = await supabase.from("kv_store").select("value").eq("key", key).maybeSingle();
+    if (error) throw error;
+    return data ? data.value : null;
+  }
+  return recvLocalGet(key);
+}
+
+// Create only — never overwrites an existing key.
+async function recvCreate(key, value) {
+  if (supabase) {
+    const { error } = await supabase.from("kv_store").insert({ key, value, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    return;
+  }
+  if (window.localStorage.getItem(LS_PREFIX + key) !== null) throw new Error("Receiving key already exists");
+  window.localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
+}
+
+async function recvPut(key, value) {
+  if (supabase) {
+    const { error } = await supabase.from("kv_store").upsert({ key, value, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    return;
+  }
+  window.localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
+}
+
+// Writes `value` only if the stored record is still PENDING. Returns true when
+// written. With the shared database this is a single conditional update done
+// by the database itself, so two submissions can never both be saved.
+async function recvUpdateIfPending(key, value) {
+  if (supabase) {
+    const res = await supabase
+      .from("kv_store")
+      .update({ value, updated_at: new Date().toISOString() })
+      .eq("key", key)
+      .eq("value->>status", RECV_STATUS.PENDING)
+      .select("key");
+    if (!res.error) return (res.data || []).length > 0;
+    // Conditional filter not available on this database: check, then write.
+    const current = await recvGet(key);
+    if (!current || current.status !== RECV_STATUS.PENDING) return false;
+    await recvPut(key, value);
+    return true;
+  }
+  const current = recvLocalGet(key);
+  if (!current || current.status !== RECV_STATUS.PENDING) return false;
+  window.localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
+  return true;
+}
+
+async function recvListForInvoice(invoiceId) {
+  if (supabase) {
+    let res = await supabase
+      .from("kv_store").select("key,value")
+      .like("key", RECV_KEY_PREFIX + "%")
+      .eq("value->>invoiceId", invoiceId);
+    if (res.error) {
+      res = await supabase.from("kv_store").select("key,value").like("key", RECV_KEY_PREFIX + "%");
+    }
+    if (res.error) throw res.error;
+    return (res.data || []).map((row) => row.value).filter((v) => v && v.invoiceId === invoiceId);
+  }
+  const out = [];
+  const prefix = LS_PREFIX + RECV_KEY_PREFIX;
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const k = window.localStorage.key(i);
+    if (!k || !k.startsWith(prefix)) continue;
+    try {
+      const v = JSON.parse(window.localStorage.getItem(k));
+      if (v && v.invoiceId === invoiceId) out.push(v);
+    } catch {}
+  }
+  return out;
+}
+
+/* ---------------- Receiving: pure helpers ---------------- */
+
+function recvIsSubmitted(record) {
+  return !!record && (record.status === RECV_STATUS.PARTIAL || record.status === RECV_STATUS.FULL);
+}
+
+function recvMaterialKey(name, unit) {
+  return "mat:" + String(name || "").trim().toLowerCase() + "|" + String(unit || "").trim().toLowerCase();
+}
+
+// Ordered materials = the invoice's own item lines (same material on two
+// lines is added together). Reads the invoice; changes nothing.
+function recvOrderedMaterials(invoice) {
+  const byKey = new Map();
+  ((invoice && invoice.items) || []).forEach((it) => {
+    const qty = Number(it.qty) || 0;
+    if (!it.name || qty <= 0) return;
+    const key = recvMaterialKey(it.name, it.unit);
+    const prev = byKey.get(key);
+    if (prev) prev.orderedQuantity = roundQty(prev.orderedQuantity + qty);
+    else byKey.set(key, { materialId: key, materialName: it.name, unit: it.unit || "", orderedQuantity: roundQty(qty) });
+  });
+  return [...byKey.values()];
+}
+
+// Live receiving position of one invoice across all of its receiving records.
+function recvSummarize(invoice, records) {
+  const list = records || [];
+  const submitted = list.filter(recvIsSubmitted).sort((a, b) => new Date(a.receivedAt) - new Date(b.receivedAt));
+  const pending = list.filter((r) => r.status === RECV_STATUS.PENDING).sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  const sumFor = (rows, materialId, field) => roundQty(rows.reduce((total, r) => {
+    const m = (r.materials || []).find((x) => x.materialId === materialId);
+    return total + (m ? Number(m[field]) || 0 : 0);
+  }, 0));
+  const materials = recvOrderedMaterials(invoice).map((m) => {
+    const receivedQuantity = sumFor(submitted, m.materialId, "receivedQuantity");
+    const pendingQuantity = sumFor(pending, m.materialId, "deliveredQuantity");
+    return {
+      ...m,
+      receivedQuantity,
+      pendingQuantity,
+      remainingQuantity: roundQty(Math.max(0, m.orderedQuantity - receivedQuantity)),
+      availableQuantity: roundQty(Math.max(0, m.orderedQuantity - receivedQuantity - pendingQuantity)),
+    };
+  });
+  const anyReceived = materials.some((m) => m.receivedQuantity > 0);
+  const allReceived = materials.length > 0 && materials.every((m) => m.receivedQuantity >= m.orderedQuantity);
+  const status = allReceived ? RECV_STATUS.FULL : anyReceived ? RECV_STATUS.PARTIAL : RECV_STATUS.PENDING;
+  const latest = submitted.length ? submitted[submitted.length - 1] : null;
+  const latestWithProof = [...submitted].reverse().find((r) => r.proofImage) || null;
+  return { status, materials, submitted, pending, latest, latestWithProof };
+}
+
+function recvRandomKey(length) {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+  const bytes = new Uint8Array(length);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => alphabet[b % alphabet.length]).join("");
+}
+
+// INV-1025 -> "1025", CT-0012 -> "0012"
+function recvInvoicePart(invoiceNumber) {
+  const cleaned = String(invoiceNumber || "").replace(/^[A-Za-z]+[-\s]*/, "").replace(/[^A-Za-z0-9]/g, "").slice(0, 24);
+  return cleaned || "X";
+}
+
+function recvLinkFor(token) {
+  return window.location.origin + window.location.pathname + "#/receive-material/" + token;
+}
+
+function recvReadRouteToken() {
+  if (typeof window === "undefined") return null;
+  const hashMatch = (window.location.hash || "").match(/^#\/?receive-material\/([^/?#]+)/);
+  const pathMatch = (window.location.pathname || "").match(/\/receive-material\/([^/?#]+)\/?$/);
+  const raw = hashMatch ? hashMatch[1] : pathMatch ? pathMatch[1] : null;
+  if (!raw) return null;
+  try { return decodeURIComponent(raw); } catch { return raw; }
+}
+
+function recvFmtTime(d) {
+  if (!d) return "-";
+  return new Date(d).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+}
+
+function recvQtyUnit(qty, unit) {
+  return fmtQty(qty) + (unit ? " " + unit : "");
+}
+
+async function recvCopyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/* ---------------- Receiving: proof image handling ----------------
+   The stored proof is never the uploaded file itself. The file must be a
+   real JPG / PNG / WEBP (checked by type AND by its first bytes), is decoded
+   by the browser, and only a freshly re-drawn JPEG is saved. */
+
+async function recvSniffImageType(file) {
+  const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "image/jpeg";
+  if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return "image/png";
+  if (head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46 &&
+      head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50) return "image/webp";
+  return "";
+}
+
+function recvLoadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("decode")); };
+    img.src = url;
+  });
+}
+
+// Returns a compressed JPEG data URL, or throws an Error whose message is a
+// translatable sentence for the customer.
+async function recvProcessProofImage(file) {
+  if (!file) throw new Error("Could not read this image.");
+  if (!RECV_CONFIG.allowedImageTypes.includes(file.type)) throw new Error("Only JPG, PNG or WEBP images are allowed.");
+  if (file.size > RECV_CONFIG.maxUploadBytes) throw new Error("Image is too large.");
+  const sniffed = await recvSniffImageType(file);
+  if (!RECV_CONFIG.allowedImageTypes.includes(sniffed)) throw new Error("Only JPG, PNG or WEBP images are allowed.");
+  let img;
+  try { img = await recvLoadImage(file); } catch { throw new Error("Could not read this image."); }
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (!w || !h) throw new Error("Could not read this image.");
+  const canvas = document.createElement("canvas");
+  let edge = RECV_CONFIG.proofMaxEdge;
+  let quality = 0.82;
+  let out = "";
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const scale = Math.min(1, edge / Math.max(w, h));
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    out = canvas.toDataURL("image/jpeg", quality);
+    if (out.length <= RECV_CONFIG.proofMaxStoredChars) break;
+    edge = Math.round(edge * 0.75);
+    quality = Math.max(0.5, quality - 0.08);
+  }
+  if (!out.startsWith("data:image/jpeg") || out.length > RECV_CONFIG.proofMaxStoredChars) throw new Error("Image is too large.");
+  return out;
+}
+
+function recvSafeImageSrc(value) {
+  return typeof value === "string" && /^data:image\/(png|jpeg|webp);base64,/.test(value) ? value : "";
+}
+
+/* ---------------- Receiving: signature pad ----------------
+   Strokes are kept as fractions of the pad size (0..1), so the signature is
+   simply redrawn when the phone rotates or the window is resized — nothing
+   already signed is lost or distorted. */
+
+const RECV_SIGNATURE_RATIO = 5 / 2;
+
+function recvDrawStrokes(ctx, strokes, width, height, lineWidth) {
+  ctx.lineWidth = lineWidth;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  ctx.strokeStyle = "#0f172a";
+  ctx.fillStyle = "#0f172a";
+  (strokes || []).forEach((stroke) => {
+    if (!stroke.length) return;
+    if (stroke.length === 1) {
+      ctx.beginPath();
+      ctx.arc(stroke[0].x * width, stroke[0].y * height, lineWidth / 2, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    ctx.beginPath();
+    ctx.moveTo(stroke[0].x * width, stroke[0].y * height);
+    for (let i = 1; i < stroke.length; i++) ctx.lineTo(stroke[i].x * width, stroke[i].y * height);
+    ctx.stroke();
+  });
+}
+
+function recvSignatureHasInk(strokes) {
+  const points = (strokes || []).reduce((n, s) => n + s.length, 0);
+  return points >= 4;
+}
+
+function recvSignatureToDataUrl(strokes) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 750;
+  canvas.height = Math.round(750 / RECV_SIGNATURE_RATIO);
+  const ctx = canvas.getContext("2d");
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  recvDrawStrokes(ctx, strokes, canvas.width, canvas.height, 4);
+  return canvas.toDataURL("image/png");
+}
+
+function RecvSignaturePad({ strokesRef, onChange, disabled }) {
+  const canvasRef = React.useRef(null);
+  const activeRef = React.useRef(null);
+  const [empty, setEmpty] = useState(true);
+
+  const redraw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.round(rect.width * dpr);
+    const h = Math.round(rect.height * dpr);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, w, h);
+    recvDrawStrokes(ctx, strokesRef.current, w, h, 2.4 * dpr);
+  }, [strokesRef]);
+
+  useEffect(() => {
+    redraw();
+    const canvas = canvasRef.current;
+    let observer = null;
+    if (canvas && typeof ResizeObserver !== "undefined") {
+      observer = new ResizeObserver(() => redraw());
+      observer.observe(canvas);
+    }
+    window.addEventListener("resize", redraw);
+    window.addEventListener("orientationchange", redraw);
+    return () => {
+      if (observer) observer.disconnect();
+      window.removeEventListener("resize", redraw);
+      window.removeEventListener("orientationchange", redraw);
+    };
+  }, [redraw]);
+
+  function pointFromEvent(e) {
+    const rect = canvasRef.current.getBoundingClientRect();
+    return {
+      x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (e.clientY - rect.top) / rect.height)),
+    };
+  }
+
+  function handleDown(e) {
+    if (disabled) return;
+    e.preventDefault();
+    try { canvasRef.current.setPointerCapture(e.pointerId); } catch {}
+    const stroke = [pointFromEvent(e)];
+    activeRef.current = stroke;
+    strokesRef.current = [...strokesRef.current, stroke];
+    setEmpty(false);
+    redraw();
+  }
+  function handleMove(e) {
+    if (!activeRef.current || disabled) return;
+    e.preventDefault();
+    activeRef.current.push(pointFromEvent(e));
+    redraw();
+  }
+  function handleUp(e) {
+    if (!activeRef.current) return;
+    try { canvasRef.current.releasePointerCapture(e.pointerId); } catch {}
+    activeRef.current = null;
+    onChange(recvSignatureHasInk(strokesRef.current));
+  }
+  function clear() {
+    strokesRef.current = [];
+    activeRef.current = null;
+    setEmpty(true);
+    onChange(false);
+    redraw();
+  }
+
+  return (
+    <div>
+      <div className="relative border-2 border-dashed border-slate-300 bg-white" dir="ltr">
+        <canvas
+          ref={canvasRef}
+          data-recv="signature"
+          onPointerDown={handleDown}
+          onPointerMove={handleMove}
+          onPointerUp={handleUp}
+          onPointerCancel={handleUp}
+          style={{ width: "100%", aspectRatio: "5 / 2", display: "block", touchAction: "none", cursor: "crosshair" }}
+        />
+        {empty && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none text-slate-300 text-sm font-bold select-none">
+            {recvT("Sign Here")} ✍
+          </div>
+        )}
+      </div>
+      <button type="button" onClick={clear} disabled={disabled} className="mt-2 px-3 py-1.5 text-xs font-bold uppercase tracking-wide border border-slate-300 text-slate-600 hover:bg-slate-100">
+        {recvT("Clear Signature")}
+      </button>
+    </div>
+  );
+}
+
+/* ---------------- Receiving: small shared pieces ---------------- */
+
+function RecvStatusBadge({ status, large }) {
+  const map = {
+    [RECV_STATUS.FULL]: { icon: "✓", label: "Fully Received", cls: "bg-emerald-100 text-emerald-700" },
+    [RECV_STATUS.PARTIAL]: { icon: "◐", label: "Partially Received", cls: "bg-amber-100 text-amber-700" },
+    [RECV_STATUS.PENDING]: { icon: "○", label: "Pending", cls: "bg-slate-100 text-slate-600" },
+    [RECV_STATUS.CANCELLED]: { icon: "×", label: "Cancelled", cls: "bg-slate-200 text-slate-500" },
+  };
+  const s = map[status] || map[RECV_STATUS.PENDING];
+  return (
+    <span className={`inline-flex items-center gap-1 font-bold uppercase ${large ? "text-xs px-2.5 py-1" : "text-[10px] px-2 py-0.5"} ${s.cls}`}>
+      <span>{s.icon}</span>
+      <span>{recvT(s.label)}</span>
+    </span>
+  );
+}
+
+function RecvModal({ title, onClose, children }) {
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-start justify-center p-3 overflow-y-auto print:hidden" style={{ zIndex: 60 }}>
+      <div className="bg-white w-full max-w-sm mt-10 mb-8 border-t-4 border-slate-900 shadow-xl">
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200">
+          <h3 className="font-black uppercase tracking-tight text-slate-900 text-sm">{recvT(title)}</h3>
+          <button type="button" onClick={onClose} aria-label="Close" data-recv="modal-close" className="text-slate-400 hover:text-slate-900 text-xl leading-none">×</button>
+        </div>
+        <div className="p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function RecvLabel({ children }) {
+  return <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{children}</div>;
+}
+
+/* ---------------- Receiving: CUSTOMER PAGE ----------------
+   Opened from the customer link. It loads ONLY the one receiving record
+   named by the link token — never invoices, customers, payments or ledger. */
+
+function RecvCustomerShell({ children }) {
+  return (
+    <div className="min-h-screen bg-slate-100 text-slate-900 px-3 py-4">
+      <I18nDomBridge />
+      <div className="w-full max-w-sm mx-auto">
+        <div className="flex justify-end mb-2"><LanguageSwitcher compact /></div>
+        <div className="bg-white border border-slate-200 border-t-4 border-t-slate-900">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+function CustomerReceivingPage({ token }) {
+  useLanguage();
+  const [phase, setPhase] = useState("loading"); // loading | form | done | invalid | cancelled | loadError
+  const [record, setRecord] = useState(null);
+  const [qtys, setQtys] = useState({});
+  const [receiverName, setReceiverName] = useState("");
+  const [hasSignature, setHasSignature] = useState(false);
+  const [proof, setProof] = useState("");
+  const [proofBusy, setProofBusy] = useState(false);
+  const [proofError, setProofError] = useState("");
+  const [errors, setErrors] = useState([]);
+  const [submitting, setSubmitting] = useState(false);
+  const strokesRef = React.useRef([]);
+  const submitLock = React.useRef(false);
+  const fileRef = React.useRef(null);
+  const recordKey = RECV_KEY_PREFIX + token;
+
+  function applyRecord(rec) {
+    if (!rec || rec.token !== token || !rec.invoiceId || !Array.isArray(rec.materials)) { setPhase("invalid"); return; }
+    setRecord(rec);
+    if (rec.status === RECV_STATUS.CANCELLED) { setPhase("cancelled"); return; }
+    if (recvIsSubmitted(rec)) { setPhase("done"); return; }
+    if (rec.status !== RECV_STATUS.PENDING) { setPhase("invalid"); return; }
+    const initial = {};
+    rec.materials.forEach((m) => { if (Number(m.deliveredQuantity) > 0) initial[m.materialId] = fmtQty(m.deliveredQuantity); });
+    setQtys(initial);
+    setPhase("form");
+  }
+
+  async function load() {
+    setPhase("loading");
+    if (!RECV_TOKEN_PATTERN.test(token)) { setPhase("invalid"); return; }
+    try {
+      applyRecord(await recvGet(recordKey));
+    } catch (e) {
+      console.error("receiving load failed", e);
+      setPhase("loadError");
+    }
+  }
+
+  useEffect(() => {
+    const previousTitle = document.title;
+    document.title = "Material Receiving";
+    load();
+    return () => { document.title = previousTitle; };
+  }, [token]);
+
+  async function handleFile(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setProofError("");
+    setErrors([]);
+    setProofBusy(true);
+    try {
+      setProof(await recvProcessProofImage(file));
+    } catch (err) {
+      setProofError(err.message || "Could not read this image.");
+    } finally {
+      setProofBusy(false);
+    }
+  }
+
+  // Checks typed quantities against a receiving record. Returns
+  // { materials } with final numbers, or { error }.
+  function buildMaterials(rec) {
+    const materials = [];
+    let total = 0;
+    for (const m of rec.materials) {
+      const delivered = Number(m.deliveredQuantity) || 0;
+      const previously = Number(m.previouslyReceived) || 0;
+      const ordered = Number(m.orderedQuantity) || 0;
+      let received = 0;
+      if (delivered > 0) {
+        const typed = String(qtys[m.materialId] == null ? "" : qtys[m.materialId]).trim();
+        const value = Number(typed);
+        if (typed === "" || !Number.isFinite(value) || value < 0) return { error: "Please check the received quantities." };
+        received = roundQty(value);
+        if (received > delivered) return { error: "Received quantity cannot be more than delivered." };
+      }
+      total += received;
+      materials.push({
+        ...m,
+        receivedQuantity: received,
+        remainingQuantity: roundQty(Math.max(0, ordered - previously - received)),
+      });
+    }
+    if (total <= 0) return { error: "Please check the received quantities." };
+    return { materials };
+  }
+
+  async function handleSubmit() {
+    if (submitLock.current || !record) return;
+    const name = receiverName.trim().slice(0, RECV_CONFIG.receiverNameMaxLength);
+    const problems = [];
+    const built = buildMaterials(record);
+    if (built.error) problems.push(built.error);
+    if (!name) problems.push("Please enter the receiver's name.");
+    if (!recvSignatureHasInk(strokesRef.current)) problems.push("Please sign in the signature box.");
+    if (record.proofRequired && !proof) problems.push("Please upload a proof image.");
+    if (problems.length) { setErrors(problems); return; }
+
+    submitLock.current = true;
+    setSubmitting(true);
+    setErrors([]);
+    try {
+      // Re-read the stored record and validate against IT, not against
+      // whatever is in this browser tab.
+      const fresh = await recvGet(recordKey);
+      if (!fresh || fresh.token !== token || !fresh.invoiceId || !Array.isArray(fresh.materials)) { setPhase("invalid"); return; }
+      if (fresh.status === RECV_STATUS.CANCELLED) { setRecord(fresh); setPhase("cancelled"); return; }
+      if (recvIsSubmitted(fresh)) { setRecord(fresh); setPhase("done"); return; } // already saved once
+      const checked = buildMaterials(fresh);
+      if (checked.error) { setRecord(fresh); setErrors([checked.error]); return; }
+      if (fresh.proofRequired && !proof) { setRecord(fresh); setErrors(["Please upload a proof image."]); return; }
+
+      const receivedAt = new Date().toISOString();
+      let proofKey = null;
+      if (proof) {
+        proofKey = RECV_PROOF_PREFIX + token;
+        await recvPut(proofKey, { token, receivingId: fresh.receivingId, invoiceId: fresh.invoiceId, image: proof, savedAt: receivedAt });
+      }
+      const fully = checked.materials.every((m) => m.remainingQuantity <= 0);
+      const next = {
+        ...fresh,
+        materials: checked.materials,
+        receiverName: name,
+        customerSignature: recvSignatureToDataUrl(strokesRef.current),
+        proofImage: proofKey,
+        receivedAt,
+        status: fully ? RECV_STATUS.FULL : RECV_STATUS.PARTIAL,
+      };
+      const written = await recvUpdateIfPending(recordKey, next);
+      if (written) { setRecord(next); setPhase("done"); return; }
+      const after = await recvGet(recordKey);
+      if (recvIsSubmitted(after)) { setRecord(after); setPhase("done"); return; }
+      if (after && after.status === RECV_STATUS.CANCELLED) { setRecord(after); setPhase("cancelled"); return; }
+      throw new Error("Receiving record was not saved");
+    } catch (e) {
+      console.error("receiving submit failed", e);
+      setErrors(["Could not save. Please check your internet and try again."]);
+    } finally {
+      submitLock.current = false;
+      setSubmitting(false);
+    }
+  }
+
+  if (phase === "loading") {
+    return (
+      <RecvCustomerShell>
+        <div className="px-4 py-10 text-center text-slate-400 font-bold uppercase tracking-wide text-sm">{recvT("Loading...")}</div>
+      </RecvCustomerShell>
+    );
+  }
+
+  if (phase === "loadError") {
+    return (
+      <RecvCustomerShell>
+        <div className="px-4 py-8 text-center">
+          <div className="text-sm text-slate-600 mb-4">{recvT("Could not load. Please check your internet and try again.")}</div>
+          <Btn onClick={load}>{recvT("Try Again")}</Btn>
+        </div>
+      </RecvCustomerShell>
+    );
+  }
+
+  if (phase === "invalid" || phase === "cancelled") {
+    return (
+      <RecvCustomerShell>
+        <div className="px-4 py-8 text-center">
+          <div className="text-3xl text-slate-300 mb-2">⚠</div>
+          <div className="font-bold text-slate-800">
+            {recvT(phase === "cancelled" ? "This receiving request was cancelled." : "This receiving link is not valid.")}
+          </div>
+          <div className="text-sm text-slate-500 mt-1">{recvT("Please contact the shop for a new link.")}</div>
+        </div>
+      </RecvCustomerShell>
+    );
+  }
+
+  if (phase === "done") {
+    return (
+      <RecvCustomerShell>
+        <div className="px-4 py-8 text-center" data-recv="success">
+          <div className="w-14 h-14 mx-auto bg-emerald-600 text-white flex items-center justify-center text-3xl font-black">✓</div>
+          <div className="mt-3 text-lg font-black uppercase tracking-tight text-emerald-700">{recvT("Success")}</div>
+          <div className="mt-1 text-sm text-slate-600">{recvT("Material received successfully.")}</div>
+          <div className="mt-5 border-t border-slate-200 pt-4 text-sm space-y-1.5">
+            <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Invoice")}</span><span className="font-bold" dir="ltr">{record.invoiceNumber}</span></div>
+            <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Received By")}</span><span className="font-bold">{record.receiverName}</span></div>
+            <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Date")}</span><span className="font-bold" dir="ltr">{fmtDate(record.receivedAt)}</span></div>
+          </div>
+        </div>
+      </RecvCustomerShell>
+    );
+  }
+
+  const inDelivery = record.materials.filter((m) => Number(m.deliveredQuantity) > 0);
+  const notInDelivery = record.materials.filter((m) => !(Number(m.deliveredQuantity) > 0));
+
+  return (
+    <RecvCustomerShell>
+      <div className="bg-slate-900 text-white text-center px-4 py-3">
+        <div className="text-base font-black uppercase tracking-wide">{recvT("Material Received")}</div>
+        <div className="text-xs text-slate-300 mt-0.5"><span>{recvT("Invoice")}</span> <span dir="ltr">#{record.invoiceNumber}</span></div>
+      </div>
+
+      <div className="px-4 py-3 border-b border-slate-200">
+        <RecvLabel>{recvT("Customer")}</RecvLabel>
+        <div className="font-bold text-slate-900">{record.customerName}</div>
+      </div>
+
+      <div className="px-4 py-3 border-b border-slate-200">
+        <RecvLabel>{recvT("Materials")}</RecvLabel>
+        <div className="space-y-3">
+          {inDelivery.map((m) => {
+            const typed = Number(qtys[m.materialId]);
+            const received = Number.isFinite(typed) && typed > 0 ? typed : 0;
+            const remaining = roundQty(Math.max(0, m.orderedQuantity - (Number(m.previouslyReceived) || 0) - received));
+            return (
+              <div key={m.materialId} className="border border-slate-200 p-2.5">
+                <div className="font-bold text-slate-900 text-sm">{m.materialName}</div>
+                <div className="grid grid-cols-3 gap-2 mt-1.5 items-end">
+                  <div>
+                    <div className="text-[10px] uppercase font-bold text-slate-400">{recvT("Ordered")}</div>
+                    <div className="text-sm font-bold" dir="ltr">{recvQtyUnit(m.orderedQuantity, m.unit)}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase font-bold text-slate-400">{recvT("Delivered")}</div>
+                    <div className="text-sm font-bold" dir="ltr">{recvQtyUnit(m.deliveredQuantity, m.unit)}</div>
+                  </div>
+                  <label className="block">
+                    <span className="block text-[10px] uppercase font-bold text-slate-400">{recvT("Received")}</span>
+                    <input
+                      type="number" inputMode="decimal" min="0" max={m.deliveredQuantity} step="any" dir="ltr"
+                      data-recv="qty"
+                      className="w-full border border-slate-300 px-2 py-1.5 text-sm font-bold focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900"
+                      value={qtys[m.materialId] == null ? "" : qtys[m.materialId]}
+                      disabled={submitting}
+                      onChange={(e) => { setErrors([]); setQtys((prev) => ({ ...prev, [m.materialId]: e.target.value })); }}
+                    />
+                  </label>
+                </div>
+                <div className="text-[11px] text-slate-500 mt-1.5 flex flex-wrap gap-x-3">
+                  {Number(m.previouslyReceived) > 0 && (
+                    <span><span>{recvT("Previously Received")}</span>: <span dir="ltr">{recvQtyUnit(m.previouslyReceived, m.unit)}</span></span>
+                  )}
+                  <span><span>{recvT("Remaining")}</span>: <span dir="ltr">{recvQtyUnit(remaining, m.unit)}</span></span>
+                </div>
+              </div>
+            );
+          })}
+          {notInDelivery.map((m) => (
+            <div key={m.materialId} className="text-[11px] text-slate-400 flex justify-between gap-3">
+              <span>{m.materialName} — {recvT("Not in this delivery")}</span>
+              <span dir="ltr">{fmtQty(m.previouslyReceived)} / {recvQtyUnit(m.orderedQuantity, m.unit)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="px-4 py-3 border-b border-slate-200">
+        <RecvLabel>{recvT("Received By")}</RecvLabel>
+        <input
+          type="text" data-recv="name" autoComplete="name" maxLength={RECV_CONFIG.receiverNameMaxLength}
+          className={inputCls} placeholder={recvT("Enter Name")} value={receiverName} disabled={submitting}
+          onChange={(e) => { setErrors([]); setReceiverName(e.target.value); }}
+        />
+      </div>
+
+      <div className="px-4 py-3 border-b border-slate-200">
+        <RecvLabel>{recvT("Customer Signature")}</RecvLabel>
+        <RecvSignaturePad strokesRef={strokesRef} onChange={(has) => { setErrors([]); setHasSignature(has); }} disabled={submitting} />
+      </div>
+
+      <div className="px-4 py-3 border-b border-slate-200">
+        <RecvLabel>{recvT("Receiving Proof")} <span className="normal-case font-normal text-slate-400">({recvT(record.proofRequired ? "required" : "optional")})</span></RecvLabel>
+        <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" data-recv="file" onChange={handleFile} />
+        {proof ? (
+          <div className="flex items-center gap-3">
+            <img src={proof} alt="Receiving Proof" data-recv="preview" className="w-20 h-20 object-cover border border-slate-300" />
+            <div className="flex flex-col gap-2">
+              <button type="button" disabled={submitting} onClick={() => fileRef.current && fileRef.current.click()} className="px-3 py-1.5 text-xs font-bold uppercase tracking-wide border border-slate-300 text-slate-600 hover:bg-slate-100">{recvT("Replace")}</button>
+              <button type="button" disabled={submitting} onClick={() => { setProof(""); setProofError(""); }} className="px-3 py-1.5 text-xs font-bold uppercase tracking-wide border border-red-200 text-red-600 hover:bg-red-50">{recvT("Remove")}</button>
+            </div>
+          </div>
+        ) : (
+          <button type="button" disabled={submitting || proofBusy} onClick={() => fileRef.current && fileRef.current.click()} className="w-full px-3 py-2.5 text-sm font-bold uppercase tracking-wide border border-slate-300 text-slate-700 hover:bg-slate-100">
+            📷 {proofBusy ? recvT("Loading...") : recvT("Upload Image")}
+          </button>
+        )}
+        {proofError && <div className="text-xs text-red-600 mt-2">{recvT(proofError)}</div>}
+      </div>
+
+      <div className="px-4 py-4">
+        {errors.length > 0 && (
+          <div className="mb-3 bg-red-50 border border-red-200 text-red-700 text-xs font-bold px-3 py-2 space-y-0.5" data-recv="errors">
+            {errors.map((msg) => <div key={msg}>{recvT(msg)}</div>)}
+          </div>
+        )}
+        <button
+          type="button" data-recv="confirm" onClick={handleSubmit} disabled={submitting}
+          className={`w-full py-3 text-sm font-black uppercase tracking-wide text-white ${submitting ? "bg-slate-400 cursor-not-allowed" : "bg-emerald-600 hover:bg-emerald-700"}`}
+        >
+          {submitting ? recvT("Submitting...") : <>✓ {recvT("Confirm Received")}</>}
+        </button>
+      </div>
+    </RecvCustomerShell>
+  );
+}
+
+/* ---------------- Receiving: ADMIN — proof / signature lightbox ---------------- */
+
+function RecvProofModal({ record, onClose }) {
+  const [image, setImage] = useState(record.proofImage ? null : "");
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!record.proofImage) return undefined;
+    (async () => {
+      try {
+        const stored = await recvGet(record.proofImage);
+        if (!cancelled) setImage(recvSafeImageSrc(stored && stored.image));
+      } catch (e) {
+        console.error("receiving proof load failed", e);
+        if (!cancelled) { setFailed(true); setImage(""); }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [record.proofImage]);
+
+  const signature = recvSafeImageSrc(record.customerSignature);
+
+  return (
+    <RecvModal title="Receiving Proof" onClose={onClose}>
+      <div className="bg-slate-50 border border-slate-200 flex items-center justify-center" style={{ minHeight: 120 }}>
+        {image === null && <div className="text-xs text-slate-400 font-bold uppercase py-8">{recvT("Loading...")}</div>}
+        {image === "" && <div className="text-xs text-slate-400 py-8 px-3 text-center">{recvT(failed ? "Could not load receiving records." : "No proof image uploaded.")}</div>}
+        {image && <img src={image} alt="Receiving Proof" data-recv="proof-image" className="max-w-full" style={{ maxHeight: "55vh" }} />}
+      </div>
+      <div className="mt-3 text-sm space-y-1">
+        <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Received By")}</span><span className="font-bold">{record.receiverName}</span></div>
+        <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Date")}</span><span className="font-bold" dir="ltr">{fmtDate(record.receivedAt)}</span></div>
+        <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Time")}</span><span className="font-bold" dir="ltr">{recvFmtTime(record.receivedAt)}</span></div>
+      </div>
+      <div className="mt-3">
+        <RecvLabel>{recvT("Customer Signature")}</RecvLabel>
+        {signature
+          ? <img src={signature} alt="Customer Signature" data-recv="signature-image" className="w-full border border-slate-200 bg-white" />
+          : <div className="text-xs text-slate-400">-</div>}
+      </div>
+    </RecvModal>
+  );
+}
+
+/* ---------------- Receiving: ADMIN — create a receiving request ---------------- */
+
+function RecvCreateModal({ invoice, settings, onClose, onCreated }) {
+  const [summary, setSummary] = useState(null);
+  const [qtys, setQtys] = useState({});
+  const [proofRequired, setProofRequired] = useState(RECV_CONFIG.proofRequiredByDefault);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [created, setCreated] = useState(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = recvSummarize(invoice, await recvListForInvoice(invoice.id));
+        if (cancelled) return;
+        const initial = {};
+        s.materials.forEach((m) => { initial[m.materialId] = m.availableQuantity > 0 ? fmtQty(m.availableQuantity) : "0"; });
+        setQtys(initial);
+        setSummary(s);
+      } catch (e) {
+        console.error("receiving load failed", e);
+        if (!cancelled) setError("Could not load receiving records.");
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [invoice.id]);
+
+  async function create() {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      // Work from the latest stored records, not from what was on screen.
+      const records = await recvListForInvoice(invoice.id);
+      const fresh = recvSummarize(invoice, records);
+      let total = 0;
+      const materials = [];
+      for (const m of fresh.materials) {
+        const typed = String(qtys[m.materialId] == null ? "" : qtys[m.materialId]).trim();
+        const value = typed === "" ? 0 : Number(typed);
+        if (!Number.isFinite(value) || value < 0) { setError("Enter the quantity being delivered now."); return; }
+        const delivered = roundQty(value);
+        if (delivered > m.availableQuantity) { setSummary(fresh); setError("Quantity cannot be more than the remaining quantity."); return; }
+        total += delivered;
+        materials.push({
+          materialId: m.materialId,
+          materialName: m.materialName,
+          unit: m.unit,
+          orderedQuantity: m.orderedQuantity,
+          previouslyReceived: m.receivedQuantity,
+          deliveredQuantity: delivered,
+          receivedQuantity: null,
+          remainingQuantity: m.remainingQuantity,
+        });
+      }
+      if (total <= 0) { setError("Enter the quantity being delivered now."); return; }
+      const sequence = records.reduce((max, r) => Math.max(max, Number(r.sequence) || 0), 0) + 1;
+      const receivingId = `REC-${recvInvoicePart(invoice.number)}-${String(sequence).padStart(3, "0")}`;
+      const token = `${receivingId}-${recvRandomKey(20)}`;
+      const record = {
+        receivingId,
+        token,
+        sequence,
+        invoiceId: invoice.id,
+        invoiceNumber: invoice.number,
+        customerId: invoice.customerId || "",
+        customerName: invoice.customerName || "",
+        materials,
+        proofRequired: !!proofRequired,
+        receiverName: "",
+        customerSignature: null,
+        proofImage: null,
+        createdAt: new Date().toISOString(),
+        receivedAt: null,
+        status: RECV_STATUS.PENDING,
+      };
+      await recvCreate(RECV_KEY_PREFIX + token, record);
+      setCreated(record);
+      onCreated();
+    } catch (e) {
+      console.error("receiving create failed", e);
+      setError("Could not save. Please check your internet and try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (created) {
+    const link = recvLinkFor(created.token);
+    return (
+      <RecvModal title="Customer Receiving Link" onClose={onClose}>
+        <div className="text-xs text-slate-500 mb-1"><span className="font-black text-slate-900" data-recv="created-id">{created.receivingId}</span> · {invoice.number} · {invoice.customerName}</div>
+        <input readOnly dir="ltr" data-recv="link" value={link} onFocus={(e) => e.target.select()} className={`${inputCls} text-xs`} />
+        {!supabase && (
+          <div className="mt-2 text-[11px] text-amber-700 bg-amber-50 border border-amber-200 px-2 py-1.5">{recvT("Shared database is not configured, so this link only opens in this browser.")}</div>
+        )}
+        <div className="mt-3 flex gap-2 flex-wrap">
+          <Btn small onClick={async () => { if (await recvCopyText(link)) { setCopied(true); setTimeout(() => setCopied(false), 2000); } }}>{recvT(copied ? "Link Copied" : "Copy Link")}</Btn>
+          {invoice.customerPhone && (
+            <a href={waLink(invoice.customerPhone, recvWhatsAppMessage(invoice, settings, link))} target="_blank" rel="noreferrer">
+              <Btn small variant="dark">{recvT("Send on WhatsApp")}</Btn>
+            </a>
+          )}
+          <Btn small variant="ghost" onClick={onClose}>{recvT("Done")}</Btn>
+        </div>
+      </RecvModal>
+    );
+  }
+
+  const nothingLeft = summary && summary.materials.every((m) => m.availableQuantity <= 0);
+
+  return (
+    <RecvModal title="New Receiving Request" onClose={onClose}>
+      <div className="text-xs text-slate-500 mb-3">{invoice.number} · {invoice.customerName}</div>
+      {!summary && !error && <div className="text-xs text-slate-400 font-bold uppercase py-4 text-center">{recvT("Loading...")}</div>}
+      {summary && (
+        <>
+          <div className="space-y-2">
+            {summary.materials.map((m) => (
+              <div key={m.materialId} className="border border-slate-200 p-2">
+                <div className="font-bold text-sm text-slate-900">{m.materialName}</div>
+                <div className="flex items-end justify-between gap-2 mt-1">
+                  <div className="text-[11px] text-slate-500 leading-snug">
+                    <div><span>{recvT("Ordered")}</span>: <span dir="ltr">{recvQtyUnit(m.orderedQuantity, m.unit)}</span></div>
+                    <div><span>{recvT("Already Received")}</span>: <span dir="ltr">{recvQtyUnit(m.receivedQuantity, m.unit)}</span></div>
+                    {m.pendingQuantity > 0 && <div><span>{recvT("Awaiting customer")}</span>: <span dir="ltr">{recvQtyUnit(m.pendingQuantity, m.unit)}</span></div>}
+                  </div>
+                  <label className="block w-28 shrink-0">
+                    <span className="block text-[10px] uppercase font-bold text-slate-400">{recvT("Delivering Now")}</span>
+                    <input
+                      type="number" inputMode="decimal" min="0" max={m.availableQuantity} step="any" dir="ltr" data-recv="deliver-qty"
+                      className="w-full border border-slate-300 px-2 py-1.5 text-sm font-bold focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900"
+                      value={qtys[m.materialId] == null ? "" : qtys[m.materialId]}
+                      disabled={busy || m.availableQuantity <= 0}
+                      onChange={(e) => { setError(""); setQtys((prev) => ({ ...prev, [m.materialId]: e.target.value })); }}
+                    />
+                  </label>
+                </div>
+              </div>
+            ))}
+          </div>
+          {nothingLeft && <div className="mt-3 text-xs text-slate-500">{recvT("Nothing left to deliver on this invoice.")}</div>}
+          <label className="mt-3 flex items-center gap-2 text-xs font-bold text-slate-600">
+            <input type="checkbox" data-recv="proof-required" checked={proofRequired} onChange={(e) => setProofRequired(e.target.checked)} />
+            <span>{recvT("Require proof photo")}</span>
+          </label>
+        </>
+      )}
+      {error && <div className="mt-3 text-xs text-red-600 font-bold" data-recv="create-error">{recvT(error)}</div>}
+      <div className="mt-4 flex gap-2 flex-wrap">
+        <Btn small onClick={create} disabled={busy || !summary || nothingLeft}>{recvT("Create Receiving Link")}</Btn>
+        <Btn small variant="ghost" onClick={onClose}>{recvT("Cancel")}</Btn>
+      </div>
+    </RecvModal>
+  );
+}
+
+function recvWhatsAppMessage(invoice, settings, link) {
+  return [
+    `${(settings && settings.companyName) || ""} — Material Receiving`.trim(),
+    `Invoice: ${invoice.number}`,
+    "",
+    "Please open this link to confirm the material you received:",
+    link,
+  ].join("\n");
+}
+
+/* ---------------- Receiving: ADMIN — details + history ---------------- */
+
+function RecvDetailsModal({ invoice, summary, onClose, onViewProof }) {
+  const latest = summary.latest;
+  return (
+    <RecvModal title="Material Receiving" onClose={onClose}>
+      <div className="text-sm space-y-1">
+        <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Invoice")}</span><span className="font-bold" dir="ltr">{invoice.number}</span></div>
+        <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Customer")}</span><span className="font-bold">{invoice.customerName}</span></div>
+        <div className="flex justify-between gap-3 items-center"><span className="text-slate-500">{recvT("Status")}</span><RecvStatusBadge status={summary.status} /></div>
+      </div>
+
+      <div className="mt-3">
+        <RecvLabel>{recvT("Materials")}</RecvLabel>
+        <div className="border border-slate-200 divide-y divide-slate-100">
+          {summary.materials.map((m) => (
+            <div key={m.materialId} className="px-2.5 py-1.5 text-sm flex justify-between gap-3">
+              <span>{m.materialName}</span>
+              <span className={`font-bold ${m.receivedQuantity >= m.orderedQuantity ? "text-emerald-700" : "text-slate-700"}`} dir="ltr">
+                {fmtQty(m.receivedQuantity)} / {recvQtyUnit(m.orderedQuantity, m.unit)}
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {latest ? (
+        <div className="mt-3 text-sm space-y-1">
+          <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Received By")}</span><span className="font-bold">{latest.receiverName}</span></div>
+          <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Received")}</span><span className="font-bold" dir="ltr">{fmtDate(latest.receivedAt)} — {recvFmtTime(latest.receivedAt)}</span></div>
+          <div className="flex justify-between gap-3"><span className="text-slate-500">{recvT("Customer Signature")}</span><button type="button" className="font-bold text-blue-700 hover:underline" onClick={() => onViewProof(latest)}>{recvT("View")}</button></div>
+          <div className="flex justify-between gap-3">
+            <span className="text-slate-500">{recvT("Receiving Proof")}</span>
+            {summary.latestWithProof
+              ? <button type="button" className="font-bold text-blue-700 hover:underline" onClick={() => onViewProof(summary.latestWithProof)}>{recvT("View Image")}</button>
+              : <span className="text-slate-400">{recvT("Not Uploaded")}</span>}
+          </div>
+        </div>
+      ) : (
+        <div className="mt-3 text-xs text-slate-400">{recvT("No material received yet.")}</div>
+      )}
+
+      {summary.submitted.length > 0 && (
+        <div className="mt-4">
+          <RecvLabel>{recvT("Receiving History")}</RecvLabel>
+          <div className="border border-slate-200 divide-y divide-slate-100" data-recv="history">
+            {summary.submitted.map((r, idx) => (
+              <div key={r.token} className="px-2.5 py-2 text-xs">
+                <div className="flex justify-between gap-2">
+                  <span className="font-black text-slate-900">#{idx + 1} · <span dir="ltr">{r.receivingId}</span></span>
+                  <span className="text-slate-500" dir="ltr">{fmtDate(r.receivedAt)} · {recvFmtTime(r.receivedAt)}</span>
+                </div>
+                {(r.materials || []).filter((m) => Number(m.receivedQuantity) > 0).map((m) => (
+                  <div key={m.materialId} className="text-slate-700">{m.materialName}: <span className="font-bold" dir="ltr">{recvQtyUnit(m.receivedQuantity, m.unit)}</span></div>
+                ))}
+                <div className="text-slate-500"><span>{recvT("Received By")}</span>: <span className="font-bold text-slate-700">{r.receiverName}</span></div>
+                <div className="flex gap-4 mt-0.5">
+                  <span className="text-slate-500">
+                    <span>{recvT("Signature")}</span>:{" "}
+                    {recvSafeImageSrc(r.customerSignature)
+                      ? <button type="button" className="font-bold text-emerald-700 hover:underline" onClick={() => onViewProof(r)}>✓ {recvT("View")}</button>
+                      : "-"}
+                  </span>
+                  <span className="text-slate-500">
+                    <span>{recvT("Proof")}</span>:{" "}
+                    {r.proofImage
+                      ? <button type="button" className="font-bold text-blue-700 hover:underline" onClick={() => onViewProof(r)}>📷 {recvT("View")}</button>
+                      : <span className="text-slate-400">{recvT("Not Uploaded")}</span>}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-2 text-xs">
+            <RecvLabel>{recvT("Total Received")}</RecvLabel>
+            {summary.materials.map((m) => (
+              <div key={m.materialId} className="flex justify-between gap-3">
+                <span className="text-slate-600">{m.materialName}</span>
+                <span className="font-bold" dir="ltr">{fmtQty(m.receivedQuantity)} / {recvQtyUnit(m.orderedQuantity, m.unit)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </RecvModal>
+  );
+}
+
+/* ---------------- Receiving: ADMIN — small section inside the invoice ----------------
+   Rendered by InvoiceDetail for admin / staff. Hidden when printing, so the
+   printed / PDF invoice is exactly as before. */
+
+function MaterialReceivingSection({ invoice, settings }) {
+  useLanguage();
+  const [records, setRecords] = useState(null);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
+  const [showDetails, setShowDetails] = useState(false);
+  const [proofRecord, setProofRecord] = useState(null);
+  const [copiedToken, setCopiedToken] = useState("");
+
+  const reload = useCallback(async () => {
+    try {
+      const list = await recvListForInvoice(invoice.id);
+      setRecords(list);
+      setLoadFailed(false);
+    } catch (e) {
+      console.error("receiving load failed", e);
+      setLoadFailed(true);
+    }
+  }, [invoice.id]);
+
+  useEffect(() => {
+    reload();
+    const onFocus = () => reload();
+    window.addEventListener("focus", onFocus);
+    const timer = setInterval(() => { if (document.visibilityState !== "hidden") reload(); }, RECV_CONFIG.refreshMs);
+    return () => { window.removeEventListener("focus", onFocus); clearInterval(timer); };
+  }, [reload]);
+
+  const summary = useMemo(() => recvSummarize(invoice, records || []), [invoice, records]);
+  const isCancelled = invoice.docStatus === "Cancelled";
+  const canCreate = !isCancelled && summary.materials.some((m) => m.availableQuantity > 0);
+
+  async function copyLink(record) {
+    if (await recvCopyText(recvLinkFor(record.token))) {
+      setCopiedToken(record.token);
+      setTimeout(() => setCopiedToken(""), 2000);
+    }
+  }
+
+  async function cancelRequest(record) {
+    if (!confirm(`${record.receivingId} — ${recvT("Cancel Request")}?`)) return;
+    try {
+      const done = await recvUpdateIfPending(RECV_KEY_PREFIX + record.token, { ...record, status: RECV_STATUS.CANCELLED, cancelledAt: new Date().toISOString() });
+      if (!done) alert(recvT("The customer has already confirmed this request."));
+    } catch (e) {
+      console.error("receiving cancel failed", e);
+      alert(recvT("Could not save. Please check your internet and try again."));
+    }
+    reload();
+  }
+
+  return (
+    <div className="mt-4 print:hidden border border-slate-200 text-xs" data-recv="admin-section">
+      <div className="px-3 py-2 flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-black uppercase text-slate-700">📦 {recvT("Material Receiving")}</span>
+          {records === null && !loadFailed
+            ? <span className="text-slate-400">{recvT("Loading...")}</span>
+            : <RecvStatusBadge status={summary.status} />}
+        </div>
+        <div className="flex items-center gap-3">
+          <button type="button" className="font-bold text-slate-500 hover:underline" onClick={reload}>{recvT("Refresh")}</button>
+          <button type="button" className="font-bold text-blue-700 hover:underline" data-recv="open-details" onClick={() => setShowDetails(true)}>{recvT("Details")}</button>
+          {canCreate && <button type="button" className="font-bold text-blue-700 hover:underline" data-recv="open-create" onClick={() => setShowCreate(true)}>+ {recvT("New Receiving Request")}</button>}
+        </div>
+      </div>
+
+      <div className="px-3 py-2 flex items-center justify-between gap-2 flex-wrap border-t border-slate-100">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-black uppercase text-slate-700">📷 {recvT("Receiving Proof")}</span>
+          {summary.latestWithProof
+            ? <span className="font-bold text-emerald-700">✓ {recvT("Uploaded")}</span>
+            : <span className="text-slate-400">{recvT("Not Uploaded")}</span>}
+        </div>
+        {summary.latestWithProof && (
+          <button type="button" className="font-bold text-blue-700 hover:underline" data-recv="view-proof" onClick={() => setProofRecord(summary.latestWithProof)}>{recvT("View")}</button>
+        )}
+      </div>
+
+      {summary.pending.map((r) => (
+        <div key={r.token} className="px-3 py-2 border-t border-slate-100 flex items-center justify-between gap-2 flex-wrap bg-slate-50" data-recv="pending-row">
+          <div>
+            <span className="font-black text-blue-700" dir="ltr">{r.receivingId}</span>{" "}
+            <span className="text-slate-500">— {recvT("Awaiting customer")}</span>
+            <div className="text-slate-400">
+              {(r.materials || []).filter((m) => Number(m.deliveredQuantity) > 0).map((m) => `${m.materialName} ${recvQtyUnit(m.deliveredQuantity, m.unit)}`).join(" · ")}
+            </div>
+          </div>
+          <div className="flex items-center gap-3">
+            <button type="button" className="font-bold text-blue-700 hover:underline" data-recv="copy-link" onClick={() => copyLink(r)}>{recvT(copiedToken === r.token ? "Link Copied" : "Copy Link")}</button>
+            {invoice.customerPhone && (
+              <a className="font-bold text-emerald-700 hover:underline" href={waLink(invoice.customerPhone, recvWhatsAppMessage(invoice, settings, recvLinkFor(r.token)))} target="_blank" rel="noreferrer">WhatsApp</a>
+            )}
+            <button type="button" className="font-bold text-red-600 hover:underline" data-recv="cancel-request" onClick={() => cancelRequest(r)}>{recvT("Cancel Request")}</button>
+          </div>
+        </div>
+      ))}
+
+      {loadFailed && <div className="px-3 py-2 border-t border-slate-100 text-red-600 font-bold">{recvT("Could not load receiving records.")}</div>}
+
+      {showCreate && <RecvCreateModal invoice={invoice} settings={settings} onClose={() => { setShowCreate(false); reload(); }} onCreated={reload} />}
+      {showDetails && <RecvDetailsModal invoice={invoice} summary={summary} onClose={() => setShowDetails(false)} onViewProof={setProofRecord} />}
+      {proofRecord && <RecvProofModal record={proofRecord} onClose={() => setProofRecord(null)} />}
+    </div>
+  );
+}
+
+/* ---------------- Receiving: root switch ----------------
+   A customer receiving link shows only the small receiving page (the ERP is
+   never mounted, so none of its data is loaded). Every other URL renders the
+   existing <App /> exactly as before. */
+
+function AppRoot() {
+  const [receivingToken, setReceivingToken] = useState(recvReadRouteToken);
+  useEffect(() => {
+    const onChange = () => setReceivingToken(recvReadRouteToken());
+    window.addEventListener("hashchange", onChange);
+    window.addEventListener("popstate", onChange);
+    return () => {
+      window.removeEventListener("hashchange", onChange);
+      window.removeEventListener("popstate", onChange);
+    };
+  }, []);
+  if (receivingToken) return <CustomerReceivingPage key={receivingToken} token={receivingToken} />;
+  return <App />;
+}
+
+export default AppRoot;
