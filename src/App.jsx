@@ -7645,17 +7645,23 @@ function RecvInvoiceSection({ invoice, settings }) {
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-black uppercase text-slate-700">📷 {recvT("Receiving Proof")}</span>
           {loading && <span className="text-slate-400">{recvT("Loading...")}</span>}
-          {!loading && latest && <span className="font-bold text-emerald-700" data-recv="invoice-status">✓ {recvT("Available")}{proofs.length > 1 ? ` (${proofs.length})` : ""}</span>}
+          {!loading && latest && <span className="font-bold text-emerald-700" data-recv="invoice-status">✓ {recvT("Available")}</span>}
           {!loading && !latest && !failed && <span className="text-slate-400" data-recv="invoice-status">{recvT("Not Uploaded")}</span>}
           {!loading && !latest && failed && <span className="font-bold text-red-600">{recvT("Could not load receiving proof.")}</span>}
         </div>
         <div className="flex items-center gap-2">
-          {latest && (
-            <button type="button" data-recv="invoice-view" onClick={() => setViewId(latest.receiving_id)} className="px-2.5 py-1 font-bold uppercase tracking-wide border border-slate-300 text-blue-700 hover:bg-slate-100">{recvT("View")}</button>
-          )}
           <button type="button" data-recv="open-receiving" onClick={() => setShowPage(true)} className="px-2.5 py-1 font-bold uppercase tracking-wide border border-slate-900 text-slate-900 hover:bg-slate-100">📦 {recvT("Receiving")}</button>
         </div>
       </div>
+      {/* One line per proof, each with its own View */}
+      {proofs.map((p, idx) => (
+        <div key={p.receiving_id} className="px-3 py-1.5 border-t border-slate-100 flex items-center justify-between gap-3" data-recv="invoice-proof-row">
+          <span className="text-slate-600">
+            <span className="font-bold text-slate-900">{recvT("Proof")} #{idx + 1}</span> · <span dir="ltr">{fmtDate(p.uploaded_at)}</span>
+          </span>
+          <button type="button" data-recv="invoice-view" onClick={() => setViewId(p.receiving_id)} className="px-2.5 py-1 font-bold uppercase tracking-wide border border-slate-300 text-blue-700 hover:bg-slate-100">{recvT("View")}</button>
+        </div>
+      ))}
     </div>
     {/* Rendered outside the print-hidden box above so the slip can be printed. */}
     {showPage && (
@@ -7670,20 +7676,75 @@ function RecvInvoiceSection({ invoice, settings }) {
 
 /* ---------------- Receiving Proof: printed / PDF invoice ----------------
    Invisible on screen. When an invoice that has proof is printed or saved
-   as PDF it adds one small "Receiving Proof — Available" block at the end.
-   Invoices without proof print exactly as before.
+   as PDF:
+     - the small "Receiving Proof — Available" block is added at the end of
+       the invoice (a View button cannot work on paper / inside a PDF), and
+     - each signed-slip image is added on its own page AFTER the invoice.
+   Page 1 (the invoice itself) is laid out exactly as before, and invoices
+   without proof print exactly as before.
 
-   The image itself is not printed: the existing invoice print is a single
-   clipped page (browser print of the open invoice window), so an extra image
-   page cannot be added without changing how invoices print. The image is
-   opened with View on screen. */
+   How the image pages work: the invoice prints from a fixed window, which
+   the browser repeats on every printed page. So the image pages are added
+   to the end of the document (outside that window) with a solid white
+   background on top, which leaves page 1 alone and gives clean image pages.
+   Set RECV_PRINT_PROOF_IMAGES to false to print only the small block. */
+
+const RECV_PRINT_PROOF_IMAGES = true;
+const RECV_PRINT_PAGES_CSS = `
+  .recv-print-proof-pages { display: none; }
+  @media print {
+    .recv-print-proof-pages { display: block; }
+    body.recv-print-slip .recv-print-proof-pages { display: none !important; }
+    .recv-print-proof-pages, .recv-print-proof-pages * { visibility: visible !important; }
+    .recv-print-proof-page {
+      break-before: page; page-break-before: always; break-inside: avoid; page-break-inside: avoid;
+      position: relative; z-index: 2147483000; background: #fff; box-sizing: border-box;
+      min-height: 200mm; box-shadow: 0 110mm 0 0 #fff; padding: 6mm 8mm 0;
+      font-family: inherit; color: #0f172a;
+    }
+    .recv-print-proof-page .recv-print-proof-title { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4mm; }
+    .recv-print-proof-page img { display: block; max-width: 100%; max-height: 190mm; }
+  }
+`;
 
 function RecvInvoicePrintProof({ invoice }) {
   useLanguage();
   const user = useRecvSessionUser();
   const allowed = recvIsStaff(user);
   const { proofs } = useRecvProofs(invoice.id, allowed);
-  if (!allowed || proofs.length === 0) return null;
+  const show = allowed && proofs.length > 0;
+  const language = languageState;
+
+  // Image pages live at the end of <body> only while this invoice is open.
+  useEffect(() => {
+    if (!show || !RECV_PRINT_PROOF_IMAGES) return undefined;
+    const host = document.createElement("div");
+    host.className = "recv-print-proof-pages";
+    host.setAttribute("data-recv", "print-pages");
+    const style = document.createElement("style");
+    style.textContent = RECV_PRINT_PAGES_CSS;
+    host.appendChild(style);
+    proofs.forEach((p, idx) => {
+      if (p.invoice_id !== invoice.id) return;
+      const src = recvSafeImageSrc(p.proof_image);
+      if (!src) return;
+      const pageEl = document.createElement("div");
+      pageEl.className = "recv-print-proof-page";
+      const title = document.createElement("div");
+      title.className = "recv-print-proof-title";
+      title.textContent = `${recvT("Receiving Proof")} · ${invoice.number} · ${recvT("Proof")} #${idx + 1} · ${fmtDate(p.uploaded_at)}`;
+      const img = document.createElement("img");
+      img.alt = "Receiving Proof";
+      img.src = src;
+      pageEl.appendChild(title);
+      pageEl.appendChild(img);
+      host.appendChild(pageEl);
+    });
+    document.body.appendChild(host);
+    return () => { host.remove(); };
+  }, [show, invoice.id, invoice.number, language, proofs.map((p) => p.receiving_id + "|" + p.uploaded_at).join(",")]);
+
+  if (!show) return null;
   return (
     <div className="hidden print:block mt-4 pt-3 border-t border-slate-300 text-xs" data-recv="print-proof">
       <div className="font-black uppercase tracking-wide text-slate-900">{recvT("Receiving Proof")}</div>
