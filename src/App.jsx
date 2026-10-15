@@ -6418,10 +6418,398 @@ function Bookings({
   );
 }
 
+/* ============================================================
+   DAILY ORDER TARGETS v1  (inside the existing Daily Orders page)
+   ------------------------------------------------------------
+   Storage: new kv key "ct-ordertargets" (same kv_store / localStorage
+   layer as every other module). One target per product per date:
+     { id, date, productId, productName, unit, targetQty, targetOrders,
+       notes, createdBy, createdAt, updatedBy, updatedAt, history[] }
+   Progress is NEVER stored — it is recomputed from saved Daily Orders:
+     eligible order = same date (order date) + same product + status != Cancelled
+   Each order is counted once (by id). Bookings / invoices / payments are
+   never counted — only records in "ct-orders".
+   ============================================================ */
+
+const TARGET_APPROACH_PCT = 80;
+const TARGET_STATUS_TONE = {
+  "Not Started": "bg-slate-200 text-slate-600",
+  "In Progress": "bg-blue-100 text-blue-700",
+  "Target Achieved": "bg-emerald-100 text-emerald-700",
+  "Above Target": "bg-purple-100 text-purple-700",
+  "No Target": "bg-slate-100 text-slate-400",
+};
+const TARGET_BAR_TONE = {
+  "Not Started": "bg-slate-300", "In Progress": "bg-blue-600", "Target Achieved": "bg-emerald-600", "Above Target": "bg-purple-600", "No Target": "bg-slate-200",
+};
+const TARGET_URDU = {
+  "Daily Targets": "روزانہ اہداف",
+  "Orders": "آرڈرز",
+  "New Target": "+ نیا ہدف",
+  "Edit Target": "ہدف میں ترمیم",
+  "Save Target": "ہدف محفوظ کریں",
+  "Target Date": "ہدف کی تاریخ",
+  "Target Quantity": "ہدف مقدار",
+  "Target Orders (optional)": "ہدف آرڈرز کی تعداد (اختیاری)",
+  "Target": "ہدف",
+  "Actual": "اصل",
+  "Achievement %": "کامیابی %",
+  "Order Count": "آرڈرز کی تعداد",
+  "Extra": "اضافی",
+  "Products with Targets": "ہدف والی مصنوعات",
+  "Total Target Quantity": "کل ہدف مقدار",
+  "Total Actual Ordered": "کل اصل آرڈر",
+  "Total Remaining Target": "کل باقی ہدف",
+  "Targets Achieved": "حاصل شدہ اہداف",
+  "Targets in Progress": "جاری اہداف",
+  "Targets Not Started": "غیر شروع شدہ اہداف",
+  "Products Exceeding Targets": "ہدف سے زیادہ مصنوعات",
+  "Not Started": "شروع نہیں ہوا",
+  "In Progress": "جاری",
+  "Target Achieved": "ہدف حاصل",
+  "Above Target": "ہدف سے زیادہ",
+  "No Target": "کوئی ہدف نہیں",
+  "Yesterday": "گزشتہ کل",
+  "Custom Range": "حسبِ ضرورت مدت",
+  "Product-wise Report": "بلحاظ مصنوعہ رپورٹ",
+  "Date-wise Report": "بلحاظ تاریخ رپورٹ",
+  "Target Alerts": "ہدف الرٹس",
+  "Dismiss": "ہٹائیں",
+};
+Object.entries(TARGET_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
+
+function targetMatchesOrder(target, order) {
+  if (!order || order.status === "Cancelled" || order.date !== target.date) return false;
+  if (target.productId) return order.productId === target.productId;
+  return !order.productId && String(order.productName || "").trim().toLowerCase() === String(target.productName || "").trim().toLowerCase();
+}
+
+function computeTargetProgress(target, orders) {
+  const seen = new Set();
+  const eligible = (orders || []).filter((o) => {
+    if (!targetMatchesOrder(target, o) || seen.has(o.id)) return false;
+    seen.add(o.id);
+    return true;
+  });
+  const targetQty = roundQty(Number(target.targetQty) || 0);
+  const actual = roundQty(eligible.reduce((s, o) => s + (Number(o.qty) || 0), 0));
+  const remaining = roundQty(Math.max(0, targetQty - actual));
+  const extra = roundQty(Math.max(0, actual - targetQty));
+  const pct = targetQty > 0 ? Math.round((actual / targetQty) * 1000) / 10 : null;
+  const orderCount = eligible.length;
+  const targetOrders = Number(target.targetOrders) || 0;
+  const remainingOrders = targetOrders > 0 ? Math.max(0, targetOrders - orderCount) : null;
+  let status;
+  if (!(targetQty > 0)) status = "No Target";
+  else if (actual <= 0) status = "Not Started";
+  else if (actual > targetQty) status = "Above Target";
+  else if (actual >= targetQty) status = "Target Achieved";
+  else status = "In Progress";
+  return { target, targetQty, actual, remaining, extra, pct, orderCount, targetOrders, remainingOrders, status, orders: eligible };
+}
+
+function targetRangeFor(preset, from, to) {
+  const today = todayISO();
+  const d = parseDateValue(today);
+  if (preset === "Today") return [today, today];
+  if (preset === "Yesterday") { d.setDate(d.getDate() - 1); const y = dateToLocalISO(d); return [y, y]; }
+  if (preset === "This Week") { d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return [dateToLocalISO(d), today]; }
+  if (preset === "This Month") return [today.slice(0, 8) + "01", today];
+  return [from || today, to || today];
+}
+
+function TargetStatusBadge({ status }) {
+  return <span className={`text-[10px] font-bold uppercase px-2 py-0.5 whitespace-nowrap ${TARGET_STATUS_TONE[status] || ""}`}>{tStatus(status)}</span>;
+}
+
+function TargetProgressBar({ pct, status }) {
+  const w = pct == null ? 0 : Math.min(100, pct);
+  return (
+    <div className="w-28 h-2 bg-slate-100 border border-slate-200" title={pct == null ? "-" : `${pct}%`}>
+      <div className={`h-full ${TARGET_BAR_TONE[status] || "bg-slate-300"}`} style={{ width: `${w}%` }} />
+    </div>
+  );
+}
+
+function OrderTargetForm({ products, targets, initial, onSave, onCancel }) {
+  const [form, setForm] = useState(() => initial
+    ? { date: initial.date, productId: initial.productId, unit: initial.unit, targetQty: String(initial.targetQty ?? ""), targetOrders: initial.targetOrders ? String(initial.targetOrders) : "", notes: initial.notes || "" }
+    : { date: todayISO(), productId: products[0]?.id || "", unit: products[0]?.unit || "", targetQty: "", targetOrders: "", notes: "" });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const product = products.find((p) => p.id === form.productId);
+  const isEdit = !!initial;
+  const duplicate = !isEdit && targets.some((tg) => tg.date === form.date && tg.productId === form.productId);
+
+  function submit() {
+    if (busy) return;
+    const qty = roundQty(Number(form.targetQty) || 0);
+    const ord = Number(form.targetOrders) || 0;
+    if (!form.date) { setError("Target date is required."); return; }
+    if (!product && !isEdit) { setError("Product select karein."); return; }
+    if (!(qty > 0)) { setError("Target quantity must be more than 0."); return; }
+    if (ord < 0 || !Number.isInteger(ord)) { setError("Target orders must be a whole number (or empty)."); return; }
+    if (duplicate) { setError("This product already has a target for this date — edit that one instead."); return; }
+    setError(""); setBusy(true);
+    const ok = onSave({
+      date: form.date, productId: isEdit ? initial.productId : product.id, productName: isEdit ? initial.productName : product.name,
+      unit: String(form.unit || (product ? product.unit : "")).trim(), targetQty: qty, targetOrders: ord, notes: form.notes.trim(),
+    });
+    if (!ok) setBusy(false);
+  }
+
+  return (
+    <div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Target Date">
+          <input type="date" className={inputCls} value={form.date} disabled={isEdit} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+        </Field>
+        <Field label="Product">
+          {isEdit ? (
+            <div className="text-sm font-bold bg-slate-50 border border-slate-200 px-3 py-2">{initial.productName}</div>
+          ) : (
+            <select className={inputCls} value={form.productId} onChange={(e) => { const p = products.find((x) => x.id === e.target.value); setForm({ ...form, productId: e.target.value, unit: p ? p.unit : form.unit }); }}>
+              {products.length === 0 && <option value="">Pehle Products tab mein product add karein</option>}
+              {products.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.unit})</option>)}
+            </select>
+          )}
+        </Field>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="Unit"><input list="unit-suggestions" className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} /></Field>
+        <Field label="Target Quantity"><input type="number" step="any" min="0" className={inputCls} value={form.targetQty} onChange={(e) => setForm({ ...form, targetQty: e.target.value })} autoFocus /></Field>
+        <Field label="Target Orders (optional)"><input type="number" step="1" min="0" className={inputCls} value={form.targetOrders} onChange={(e) => setForm({ ...form, targetOrders: e.target.value })} /></Field>
+      </div>
+      <Field label="Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
+      {isEdit && <div className="text-[11px] text-slate-400 mb-3">Date and product stay fixed — editing only changes this day's target; other days are not affected.</div>}
+      {duplicate && <div className="text-xs font-bold text-amber-700 mb-3">A target for this product already exists on {fmtDate(form.date)}.</div>}
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2">
+        <Btn onClick={submit} disabled={busy}>{busy ? "Saving..." : "Save Target"}</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+const TARGET_SEEN_KEY = "ct-target-alerts-seen";
+function loadSeenTargetAlerts() {
+  try { return new Set(JSON.parse(window.localStorage.getItem(TARGET_SEEN_KEY) || "[]")); } catch { return new Set(); }
+}
+
+function DailyTargetsPanel({ products, orders, targets, currentUser, onSaveTarget, onDeleteTarget }) {
+  const [preset, setPreset] = useState("Today");
+  const [from, setFrom] = useState(todayISO());
+  const [to, setTo] = useState(todayISO());
+  const [q, setQ] = useState("");
+  const [modal, setModal] = useState(null); // "new" | target
+  const [view, setView] = useState("progress"); // progress | product | date
+  const [seen, setSeen] = useState(loadSeenTargetAlerts);
+  const isAdmin = currentUser?.role === "admin";
+  const [rangeFrom, rangeTo] = targetRangeFor(preset, from, to);
+
+  const rows = useMemo(() => (targets || [])
+    .filter((tg) => tg.date >= rangeFrom && tg.date <= rangeTo)
+    .filter((tg) => !q.trim() || String(tg.productName).toLowerCase().includes(q.trim().toLowerCase()))
+    .map((tg) => computeTargetProgress(tg, orders))
+    .sort((a, b) => b.target.date.localeCompare(a.target.date) || a.target.productName.localeCompare(b.target.productName)),
+  [targets, orders, rangeFrom, rangeTo, q]);
+
+  const cards = {
+    products: new Set(rows.map((r) => r.target.productId || r.target.productName)).size,
+    target: bookingQtyByUnit(rows.map((r) => ({ qty: r.targetQty, unit: r.target.unit }))),
+    actual: bookingQtyByUnit(rows.map((r) => ({ qty: r.actual, unit: r.target.unit }))),
+    remaining: bookingQtyByUnit(rows.map((r) => ({ qty: r.remaining, unit: r.target.unit }))),
+    achieved: rows.filter((r) => r.status === "Target Achieved" || r.status === "Above Target").length,
+    progress: rows.filter((r) => r.status === "In Progress").length,
+    notStarted: rows.filter((r) => r.status === "Not Started").length,
+    above: rows.filter((r) => r.status === "Above Target").length,
+  };
+
+  // Alerts for today's and yesterday's targets. One alert per target per
+  // event (key = targetId:event), dismissed alerts are remembered.
+  const alerts = useMemo(() => {
+    const today = todayISO();
+    const list = [];
+    (targets || []).forEach((tg) => {
+      if (tg.date > today) return;
+      const p = computeTargetProgress(tg, orders);
+      const daysOld = bookingDaysUntil(tg.date);
+      if (tg.date === today) {
+        if (p.status === "Above Target") list.push({ key: `${tg.id}:above`, tone: "purple", text: `${tg.productName}: target exceeded — ${fmtQty(p.actual)} / ${fmtQty(p.targetQty)} ${tg.unit} (+${fmtQty(p.extra)})` });
+        else if (p.status === "Target Achieved") list.push({ key: `${tg.id}:achieved`, tone: "emerald", text: `${tg.productName}: target achieved — ${fmtQty(p.actual)} ${tg.unit}` });
+        else if (p.pct != null && p.pct >= TARGET_APPROACH_PCT) list.push({ key: `${tg.id}:near`, tone: "blue", text: `${tg.productName}: ${p.pct}% done — ${fmtQty(p.remaining)} ${tg.unit} left` });
+      } else if (daysOld === -1 && p.remaining > 0) {
+        list.push({ key: `${tg.id}:missed`, tone: "red", text: `${tg.productName} (${fmtDate(tg.date)}): day ended ${fmtQty(p.remaining)} ${tg.unit} short of target (${p.pct ?? 0}%)` });
+      }
+    });
+    return list.filter((a) => !seen.has(a.key));
+  }, [targets, orders, seen]);
+
+  function dismiss(key) {
+    const next = new Set(seen); next.add(key);
+    setSeen(next);
+    try { window.localStorage.setItem(TARGET_SEEN_KEY, JSON.stringify([...next].slice(-500))); } catch {}
+  }
+
+  const productReport = useMemo(() => {
+    const map = {};
+    rows.forEach((r) => {
+      const k = `${r.target.productName}|${r.target.unit}`;
+      const m = map[k] || (map[k] = { product: r.target.productName, unit: r.target.unit, days: 0, target: 0, actual: 0, orders: 0, achievedDays: 0 });
+      m.days += 1; m.target += r.targetQty; m.actual += r.actual; m.orders += r.orderCount;
+      if (r.status === "Target Achieved" || r.status === "Above Target") m.achievedDays += 1;
+    });
+    return Object.values(map).map((m) => ({ ...m, target: roundQty(m.target), actual: roundQty(m.actual), pct: m.target > 0 ? Math.round((m.actual / m.target) * 1000) / 10 : null }));
+  }, [rows]);
+
+  function exportCsv() {
+    if (view === "product") {
+      bookingCsvDownload(`target_product_${rangeFrom}_${rangeTo}.csv`, ["Product", "Unit", "Target Days", "Target", "Actual", "Achievement %", "Orders", "Days Achieved"],
+        productReport.map((m) => [m.product, m.unit, m.days, m.target, m.actual, m.pct ?? "", m.orders, m.achievedDays]));
+    } else {
+      bookingCsvDownload(`target_daily_${rangeFrom}_${rangeTo}.csv`, ["Date", "Product", "Unit", "Target", "Actual", "Remaining", "Extra", "Achievement %", "Orders", "Target Orders", "Status"],
+        rows.map((r) => [r.target.date, r.target.productName, r.target.unit, r.targetQty, r.actual, r.remaining, r.extra, r.pct ?? "", r.orderCount, r.targetOrders || "", r.status]));
+    }
+  }
+
+  const toneCls = { purple: "bg-purple-50 border-purple-200 text-purple-800", emerald: "bg-emerald-50 border-emerald-200 text-emerald-800", blue: "bg-blue-50 border-blue-200 text-blue-800", red: "bg-red-50 border-red-200 text-red-800" };
+
+  return (
+    <div data-targets="panel">
+      {alerts.length > 0 && (
+        <div className="mb-4 space-y-1" data-targets="alerts">
+          <div className="text-[11px] uppercase tracking-wide font-black text-slate-500">{t("Target Alerts")}</div>
+          {alerts.map((a) => (
+            <div key={a.key} className={`border px-3 py-2 text-sm font-bold flex justify-between items-center gap-3 ${toneCls[a.tone]}`}>
+              <span>{a.text}</span>
+              <button type="button" className="text-xs underline shrink-0" onClick={() => dismiss(a.key)}>{t("Dismiss")}</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 items-end mb-3">
+        {["Today", "Yesterday", "This Week", "This Month", "Custom Range"].map((p) => (
+          <Btn key={p} small variant={preset === p ? "primary" : "ghost"} onClick={() => setPreset(p)}>{p}</Btn>
+        ))}
+        {preset === "Custom Range" && (
+          <>
+            <input type="date" className={`${inputCls} max-w-[160px]`} value={from} onChange={(e) => setFrom(e.target.value)} />
+            <input type="date" className={`${inputCls} max-w-[160px]`} value={to} onChange={(e) => setTo(e.target.value)} />
+          </>
+        )}
+        <div className="flex-1" />
+        <Btn onClick={() => setModal("new")} disabled={products.length === 0}>New Target</Btn>
+      </div>
+      <div className="text-xs text-slate-500 mb-3">{fmtDate(rangeFrom)}{rangeFrom !== rangeTo ? ` – ${fmtDate(rangeTo)}` : ""} · Actual = saved Daily Orders (order date) for that product, excluding Cancelled.</div>
+
+      <div className="flex flex-wrap gap-3 mb-3">
+        <Stat label="Products with Targets" value={cards.products} />
+        <Stat label="Total Target Quantity" value={cards.target} />
+        <Stat label="Total Actual Ordered" value={cards.actual} accent="text-blue-700" />
+        <Stat label="Total Remaining Target" value={cards.remaining} accent="text-red-600" />
+      </div>
+      <div className="flex flex-wrap gap-3 mb-5">
+        <Stat label="Targets Achieved" value={cards.achieved} accent="text-emerald-600" />
+        <Stat label="Targets in Progress" value={cards.progress} accent="text-blue-700" />
+        <Stat label="Targets Not Started" value={cards.notStarted} accent="text-slate-500" />
+        <Stat label="Products Exceeding Targets" value={cards.above} accent="text-purple-700" />
+      </div>
+
+      <div className="flex flex-wrap gap-2 mb-3 items-center">
+        <input className={`${inputCls} max-w-xs`} placeholder="Search product..." value={q} onChange={(e) => setQ(e.target.value)} />
+        <Btn small variant={view === "progress" ? "primary" : "ghost"} onClick={() => setView("progress")}>Daily Targets</Btn>
+        <Btn small variant={view === "product" ? "primary" : "ghost"} onClick={() => setView("product")}>Product-wise Report</Btn>
+        <Btn small variant={view === "date" ? "primary" : "ghost"} onClick={() => setView("date")}>Date-wise Report</Btn>
+        <Btn small variant="dark" onClick={exportCsv}>Export Excel (CSV)</Btn>
+      </div>
+
+      {view === "product" ? (
+        <div className="bg-white border border-slate-200 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-3 py-2">Product</th><th className="px-3 py-2">Unit</th><th className="px-3 py-2 text-right">Days</th>
+              <th className="px-3 py-2 text-right">Target</th><th className="px-3 py-2 text-right">Actual</th><th className="px-3 py-2 text-right">Achievement %</th>
+              <th className="px-3 py-2 text-right">Order Count</th><th className="px-3 py-2 text-right">Targets Achieved</th>
+            </tr></thead>
+            <tbody>
+              {productReport.length === 0 && <tr><td colSpan={8} className="px-3 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+              {productReport.map((m) => (
+                <tr key={m.product + m.unit} className="border-t border-slate-100">
+                  <td className="px-3 py-2 font-bold">{m.product}</td><td className="px-3 py-2">{m.unit}</td><td className="px-3 py-2 text-right">{m.days}</td>
+                  <td className="px-3 py-2 text-right">{fmtQty(m.target)}</td><td className="px-3 py-2 text-right font-bold">{fmtQty(m.actual)}</td>
+                  <td className="px-3 py-2 text-right">{m.pct == null ? "-" : `${m.pct}%`}</td><td className="px-3 py-2 text-right">{m.orders}</td><td className="px-3 py-2 text-right">{m.achievedDays}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="bg-white border border-slate-200 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              {(view === "date" || rangeFrom !== rangeTo) && <th className="px-3 py-2">Date</th>}
+              <th className="px-3 py-2">Product</th><th className="px-3 py-2">Unit</th>
+              <th className="px-3 py-2 text-right">Target</th><th className="px-3 py-2 text-right">Actual</th><th className="px-3 py-2 text-right">Remaining</th>
+              <th className="px-3 py-2">Achievement %</th><th className="px-3 py-2 text-right">Order Count</th>
+              <th className="px-3 py-2">Status</th><th className="px-3 py-2">Actions</th>
+            </tr></thead>
+            <tbody>
+              {rows.length === 0 && <tr><td colSpan={10} className="px-3 py-6 text-center text-slate-400">Is mudda mein koi target nahi. "New Target" se add karein.</td></tr>}
+              {rows.map((r) => (
+                <tr key={r.target.id} className="border-t border-slate-100" data-target-row={r.target.productName}>
+                  {(view === "date" || rangeFrom !== rangeTo) && <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{fmtDate(r.target.date)}</td>}
+                  <td className="px-3 py-2 font-bold">{r.target.productName}{r.target.notes ? <div className="text-[10px] font-normal text-slate-400">{r.target.notes}</div> : null}</td>
+                  <td className="px-3 py-2 text-slate-500">{r.target.unit}</td>
+                  <td className="px-3 py-2 text-right">{fmtQty(r.targetQty)}</td>
+                  <td className="px-3 py-2 text-right font-bold">{fmtQty(r.actual)}</td>
+                  <td className="px-3 py-2 text-right text-red-600 font-bold">
+                    {fmtQty(r.remaining)}
+                    {r.extra > 0 && <div className="text-[10px] text-purple-700">+{fmtQty(r.extra)} {t("Extra")}</div>}
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-2"><TargetProgressBar pct={r.pct} status={r.status} /><span className="text-xs font-bold">{r.pct == null ? "-" : `${r.pct}%`}</span></div>
+                  </td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">
+                    {r.orderCount}
+                    {r.targetOrders > 0 && <div className="text-[10px] text-slate-500">of {r.targetOrders} orders · {r.remainingOrders} left</div>}
+                  </td>
+                  <td className="px-3 py-2"><TargetStatusBadge status={r.status} /></td>
+                  <td className="px-3 py-2 whitespace-nowrap space-x-2">
+                    <button type="button" className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setModal(r.target)}>Edit</button>
+                    {isAdmin && <button type="button" className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete target for ${r.target.productName} on ${fmtDate(r.target.date)}? Orders are not affected.`)) onDeleteTarget(r.target.id); }}>Delete</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {modal && (
+        <Modal title={modal === "new" ? "New Target" : "Edit Target"} onClose={() => setModal(null)}>
+          <OrderTargetForm
+            products={products} targets={targets || []} initial={modal === "new" ? null : modal}
+            onCancel={() => setModal(null)}
+            onSave={(data) => { const ok = onSaveTarget(modal === "new" ? null : modal, data); if (ok) setModal(null); return ok; }}
+          />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+
 /* ---------------- Orders (Daily Call Orders) ---------------- */
 
-function Orders({ customers, products, orders, onCreateOrder, saveOrder, onConvertToInvoice }) {
+function Orders({ customers, products, orders, onCreateOrder, saveOrder, onConvertToInvoice, orderTargets, currentUser, onSaveTarget, onDeleteTarget, onUpdateOrder }) {
   const [showForm, setShowForm] = useState(false);
+  const [tab, setTab] = useState("orders"); // orders | targets
+  const [editingOrder, setEditingOrder] = useState(null);
+  const [savingOrder, setSavingOrder] = useState(false);
   const [form, setForm] = useState({
     customerId: customers[0]?.id || "",
     productId: products[0]?.id || "",
@@ -6433,11 +6821,35 @@ function Orders({ customers, products, orders, onCreateOrder, saveOrder, onConve
 
   const selectedCustomer = customers.find((c) => c.id === form.customerId);
 
+  function openEditOrder(o) {
+    setEditingOrder(o);
+    setForm({ customerId: o.customerId, productId: o.productId || "", qty: o.qty, requestedFor: o.requestedFor || "", date: o.date, notes: o.notes || "" });
+    setShowForm(true);
+  }
+  function closeOrderForm() {
+    setShowForm(false); setEditingOrder(null); setSavingOrder(false);
+    setForm({ customerId: customers[0]?.id || "", productId: products[0]?.id || "", qty: 1, requestedFor: "Kal Subah", date: todayISO(), notes: "" });
+  }
+
   function submit() {
+    if (savingOrder) return; // double-click guard (an order must never be counted twice)
     const customer = customers.find((c) => c.id === form.customerId);
     if (!customer) { alert("Customer select karein."); return; }
-    if (!Number(form.qty)) { alert("Qty zaroori hai."); return; }
+    if (!(Number(form.qty) > 0)) { alert("Qty zaroori hai."); return; }
+    if (!form.date) { alert("Order date zaroori hai."); return; }
     const product = products.find((p) => p.id === form.productId);
+    if (editingOrder) {
+      setSavingOrder(true);
+      onUpdateOrder(editingOrder, {
+        customerId: form.customerId, customerName: customer.name, customerPhone: customer.phone || "",
+        productId: form.productId, productName: product ? product.name : (editingOrder.productId === form.productId ? editingOrder.productName : "Custom Item"),
+        unit: product ? product.unit : (editingOrder.productId === form.productId ? editingOrder.unit : ""),
+        qty: Number(form.qty), requestedFor: form.requestedFor, date: form.date, notes: form.notes,
+      });
+      closeOrderForm();
+      return;
+    }
+    setSavingOrder(true);
     onCreateOrder({
       customerId: form.customerId,
       customerName: customer.name,
@@ -6450,8 +6862,7 @@ function Orders({ customers, products, orders, onCreateOrder, saveOrder, onConve
       date: form.date,
       notes: form.notes,
     });
-    setShowForm(false);
-    setForm({ customerId: customers[0]?.id || "", productId: products[0]?.id || "", qty: 1, requestedFor: "Kal Subah", date: todayISO(), notes: "" });
+    closeOrderForm();
   }
 
   function updateStatus(id, status) {
@@ -6470,8 +6881,15 @@ function Orders({ customers, products, orders, onCreateOrder, saveOrder, onConve
     <div>
       <div className="flex items-center justify-between mb-2">
         <h2 className="text-xl font-black uppercase tracking-tight">Daily Orders</h2>
-        <Btn onClick={() => setShowForm(true)} disabled={customers.length === 0}>+ New Order</Btn>
+        <div className="flex gap-2 flex-wrap">
+          <Btn small variant={tab === "orders" ? "primary" : "ghost"} onClick={() => setTab("orders")}>Orders</Btn>
+          <Btn small variant={tab === "targets" ? "primary" : "ghost"} onClick={() => setTab("targets")}>Daily Targets</Btn>
+          {tab === "orders" && <Btn onClick={() => setShowForm(true)} disabled={customers.length === 0}>+ New Order</Btn>}
+        </div>
       </div>
+      {tab === "targets" ? (
+        <DailyTargetsPanel products={products} orders={orders} targets={orderTargets} currentUser={currentUser} onSaveTarget={onSaveTarget} onDeleteTarget={onDeleteTarget} />
+      ) : (<>
       <div className="text-xs text-slate-400 mb-4 max-w-2xl">
         Jab customer call kar ke order de ("mujhe subah cement chahiye"), yahan note kar lein — baad mein isi order se seedha invoice ban jayegi.
       </div>
@@ -6509,15 +6927,19 @@ function Orders({ customers, products, orders, onCreateOrder, saveOrder, onConve
                   {(o.status === "Pending" || o.status === "Processing") && (
                     <button className="text-xs font-bold text-blue-700 hover:underline" onClick={() => onConvertToInvoice(o)}>Convert to Invoice</button>
                   )}
+                  {o.status !== "Completed" && o.status !== "Cancelled" && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-blue-700 ml-3" onClick={() => openEditOrder(o)}>Edit</button>
+                  )}
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
+      </>)}
 
       {showForm && (
-        <Modal title="New Order" onClose={() => setShowForm(false)}>
+        <Modal title={editingOrder ? `Edit Order ${editingOrder.code}` : "New Order"} onClose={closeOrderForm}>
           <Field label="Customer">
             <select className={inputCls} value={form.customerId} onChange={(e) => setForm({ ...form, customerId: e.target.value })}>
               {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -6538,7 +6960,7 @@ function Orders({ customers, products, orders, onCreateOrder, saveOrder, onConve
           </div>
           <Field label="Order Date (call received)"><input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
           <Field label="Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
-          <div className="flex gap-2"><Btn onClick={submit}>Save Order</Btn><Btn variant="ghost" onClick={() => setShowForm(false)}>Cancel</Btn></div>
+          <div className="flex gap-2"><Btn onClick={submit} disabled={savingOrder}>Save Order</Btn><Btn variant="ghost" onClick={closeOrderForm}>Cancel</Btn></div>
         </Modal>
       )}
     </div>
@@ -7664,6 +8086,7 @@ function App() {
   const [offers, setOffers] = useState([]);
   const [bookings, setBookings] = useState([]);
   const [orders, setOrders] = useState([]);
+  const [orderTargets, setOrderTargets] = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [branches, setBranches] = useState(DEFAULT_BRANCHES);
   const [auditLog, setAuditLog] = useState([]);
@@ -7681,7 +8104,7 @@ function App() {
       const [
         u, c, inv, pay, ret, exch, cn, prom, tr, adj,
         ld, prod, drv, off, bk, ord, set, br, aud,
-        cAgents, cRules, cTxns, cPays,
+        cAgents, cRules, cTxns, cPays, oTargets,
       ] = await Promise.all([
         storeGet("ct-users", DEFAULT_USERS),
         storeGet("ct-customers", []),
@@ -7706,6 +8129,7 @@ function App() {
         storeGet("ct-commissionrules", []),
         storeGet("ct-commissiontransactions", []),
         storeGet("ct-commissionpayments", []),
+        storeGet("ct-ordertargets", []),
       ]);
       if (cancelled) return;
       setUsers(u); setCustomers(c); setInvoices(inv); setPayments(pay); setReturns(ret);
@@ -7713,6 +8137,7 @@ function App() {
       setLeads(ld); setProducts(prod); setDrivers(drv); setOffers(off); setBookings(bk); setOrders(ord);
       setSettings({ ...DEFAULT_SETTINGS, ...set }); setBranches(br); setAuditLog(aud);
       setCommissionAgents(cAgents); setCommissionRules(cRules); setCommissionTransactions(cTxns); setCommissionPayments(cPays);
+      setOrderTargets(oTargets || []);
       setLoading(false);
     })();
     return () => { cancelled = true; };
@@ -7730,6 +8155,7 @@ function App() {
       "ct-settings": (v) => setSettings({ ...DEFAULT_SETTINGS, ...v }), "ct-branches": setBranches, "ct-auditlog": setAuditLog,
       "ct-commissionagents": setCommissionAgents, "ct-commissionrules": setCommissionRules,
       "ct-commissiontransactions": setCommissionTransactions, "ct-commissionpayments": setCommissionPayments,
+      "ct-ordertargets": setOrderTargets,
     };
     const channel = supabase
       .channel("kv_store_changes")
@@ -7760,6 +8186,7 @@ function App() {
     offers: (v) => { setOffers(v); storeSet("ct-offers", v); },
     bookings: (v) => { setBookings(v); storeSet("ct-bookings", v); },
     orders: (v) => { setOrders(v); storeSet("ct-orders", v); },
+    orderTargets: (v) => { setOrderTargets(v); storeSet("ct-ordertargets", v); },
     settings: (v) => { setSettings(v); storeSet("ct-settings", v); },
     branches: (v) => { setBranches(v); storeSet("ct-branches", v); },
     auditLog: (v) => { setAuditLog(v); storeSet("ct-auditlog", v); },
@@ -8312,7 +8739,48 @@ function App() {
     persist.settings({ ...settings, orderCounter: settings.orderCounter + 1 });
     logAudit("Order Created", code, "");
   }
-  function saveOrder(o) { persist.orders(orders.map((x) => (x.id === o.id ? o : x))); }
+  function saveOrder(o) {
+    const prev = orders.find((x) => x.id === o.id);
+    persist.orders(orders.map((x) => (x.id === o.id ? o : x)));
+    if (prev && prev.status !== o.status) logAudit("Order Status Changed", o.code, `${prev.status} → ${o.status}`);
+  }
+  // Daily Order edit (Daily Targets recalculate automatically from orders).
+  function onUpdateOrder(original, data) {
+    const cur = orders.find((x) => x.id === original.id);
+    if (!cur) return;
+    const fields = ["productName", "qty", "date", "customerName"];
+    const changes = fields.filter((f) => String(cur[f]) !== String(data[f])).map((f) => `${f}: ${cur[f]} → ${data[f]}`).join(", ");
+    const entry = { action: "Edited", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString(), changes };
+    persist.orders(orders.map((x) => (x.id === cur.id ? { ...cur, ...data, id: cur.id, code: cur.code, status: cur.status, editHistory: [...(cur.editHistory || []), entry] } : x)));
+    logAudit("Order Edited", cur.code, changes || "no change");
+  }
+
+  /* ---------- Daily Order Targets ---------- */
+  function onSaveTarget(original, data) {
+    const actor = currentUser?.name || currentUser?.username || "System";
+    const now = new Date().toISOString();
+    if (!original) {
+      if (orderTargets.some((tg) => tg.date === data.date && tg.productId === data.productId)) { alert("This product already has a target for this date."); return false; }
+      const rec = { id: uid("tgt"), ...data, createdBy: actor, createdAt: now, updatedBy: actor, updatedAt: now, history: [] };
+      persist.orderTargets([...orderTargets, rec]);
+      logAudit("Daily Target Created", `${data.productName} ${data.date}`, `${fmtQty(data.targetQty)} ${data.unit}${data.targetOrders ? ` / ${data.targetOrders} orders` : ""}`);
+      return true;
+    }
+    const cur = orderTargets.find((x) => x.id === original.id);
+    if (!cur) { alert("Target not found."); return false; }
+    const change = { at: now, by: actor, from: { targetQty: cur.targetQty, targetOrders: cur.targetOrders, unit: cur.unit, notes: cur.notes }, to: { targetQty: data.targetQty, targetOrders: data.targetOrders, unit: data.unit, notes: data.notes } };
+    // date + product are never changed on edit, so other days' targets are untouched
+    persist.orderTargets(orderTargets.map((x) => (x.id === cur.id ? { ...cur, targetQty: data.targetQty, targetOrders: data.targetOrders, unit: data.unit, notes: data.notes, updatedBy: actor, updatedAt: now, history: [...(cur.history || []), change] } : x)));
+    logAudit("Daily Target Updated", `${cur.productName} ${cur.date}`, `${fmtQty(cur.targetQty)} → ${fmtQty(data.targetQty)} ${data.unit}`);
+    return true;
+  }
+  function onDeleteTarget(id) {
+    if (currentUser?.role !== "admin") { alert("Only admin can delete a target."); return; }
+    const cur = orderTargets.find((x) => x.id === id);
+    if (!cur) return;
+    persist.orderTargets(orderTargets.filter((x) => x.id !== id));
+    logAudit("Daily Target Deleted", `${cur.productName} ${cur.date}`, `${fmtQty(cur.targetQty)} ${cur.unit}`);
+  }
   function onOrderFulfilled(id) { persist.orders(orders.map((o) => (o.id === id ? { ...o, status: "Completed" } : o))); }
 
   function convertBookingToInvoice(b) {
@@ -8375,7 +8843,7 @@ function App() {
     const data = {
       users, customers, invoices, payments, returns, exchanges, creditNotes, promises, transfers, adjustments,
       leads, products, drivers, offers, bookings, orders, settings, branches, auditLog,
-      commissionAgents, commissionRules, commissionTransactions, commissionPayments,
+      commissionAgents, commissionRules, commissionTransactions, commissionPayments, orderTargets,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -8400,6 +8868,7 @@ function App() {
     if (data.offers) persist.offers(data.offers);
     if (data.bookings) persist.bookings(data.bookings);
     if (data.orders) persist.orders(data.orders);
+    if (data.orderTargets) persist.orderTargets(data.orderTargets);
     if (data.settings) persist.settings({ ...DEFAULT_SETTINGS, ...data.settings });
     if (data.branches) persist.branches(data.branches);
     if (data.auditLog) persist.auditLog(data.auditLog);
@@ -8638,6 +9107,7 @@ function App() {
     ),
     orders: (
       <Orders customers={visibleCustomers} products={products} orders={orders} onCreateOrder={onCreateOrder}
+        orderTargets={orderTargets} currentUser={currentUser} onSaveTarget={onSaveTarget} onDeleteTarget={onDeleteTarget} onUpdateOrder={onUpdateOrder}
         saveOrder={saveOrder} onConvertToInvoice={convertOrderToInvoice} />
     ),
     promises: (
