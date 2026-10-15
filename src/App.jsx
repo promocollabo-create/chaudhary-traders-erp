@@ -926,7 +926,6 @@ function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl }) {
     { id: "adjustments", label: "Adjustments", icon: "±" },
     { id: "commission", label: "Commission", icon: "🎯" },
     { id: "bookings", label: "Advance Booking", icon: "▦" },
-    { id: "cementStock", label: "Cement Stock", icon: "▣" },
     { id: "orders", label: "Daily Orders", icon: "☎" },
     { id: "promises", label: "Promise To Pay", icon: "🤝" },
     { id: "leads", label: "Leads", icon: "◔" },
@@ -1156,9 +1155,19 @@ function computeLedgerForCustomer(customer, invoices, payments, returns = [], ex
     );
   payments
     .filter((p) => p.customerId === customer.id && !isPaymentLinkedToCancelledInvoice(p, invoices))
-    .forEach((p) =>
-      entries.push({ date: p.date, type: p.promiseId ? "Payment Against Promise" : "Payment", ref: p.promiseId ? (promises.find((pr) => pr.id === p.promiseId)?.code || p.method || "Cash") : (p.method || "Cash"), debit: 0, credit: p.amount, id: p.id })
-    );
+    .forEach((p) => {
+      // Advance Booking upgrade: a booking advance is a CREDIT (money in);
+      // a booking refund is a DEBIT (money paid back to the customer).
+      if (p.kind === "Refund") {
+        entries.push({ date: p.date, type: "Booking Refund", ref: p.bookingCode || p.method || "Cash", debit: p.amount, credit: 0, id: p.id, note: p.note });
+        return;
+      }
+      if (p.bookingId) {
+        entries.push({ date: p.date, type: "Booking Advance", ref: p.bookingCode || p.method || "Cash", debit: 0, credit: p.amount, id: p.id });
+        return;
+      }
+      entries.push({ date: p.date, type: p.promiseId ? "Payment Against Promise" : "Payment", ref: p.promiseId ? (promises.find((pr) => pr.id === p.promiseId)?.code || p.method || "Cash") : (p.method || "Cash"), debit: 0, credit: p.amount, id: p.id });
+    });
   returns
     .filter((r) => r.customerId === customer.id && r.status !== "Deleted")
     .forEach((r) =>
@@ -1537,7 +1546,7 @@ function Dashboard({ customers, invoices, payments, returns, exchanges, promises
   }, [invoices]);
 
   const activeLeads = leads.filter((l) => l.status !== "Won" && l.status !== "Lost").length;
-  const openBookings = bookings.filter((b) => b.status === "Booked" || b.status === "Partially Delivered").length;
+  const openBookings = bookings.filter((b) => computeBookingState(b, invoices, payments).isOpen).length;
 
   const recentInvoices = [...invoices].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 6);
 
@@ -2070,13 +2079,26 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
 
 /* ---------------- Invoices ---------------- */
 
-function InvoiceForm({ cementCheckInvoice, customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
+function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
   const isEdit = !!editingInvoice;
+  // ---- Advance Booking delivery (additive) ----
+  // A new invoice opened from "Convert to Invoice", or an existing invoice
+  // that was saved as a booking delivery (has bookingQty).
+  const bookingSourceId = editingInvoice
+    ? (editingInvoice.bookingQty != null ? editingInvoice.fromBookingId : "")
+    : (prefill?.sourceType === "booking" ? prefill.sourceId : "");
+  const linkedBooking = bookingSourceId ? (bookings || []).find((b) => b.id === bookingSourceId) : null;
+  const bookingMode = !!linkedBooking;
+  const bookingState = linkedBooking ? computeBookingState(linkedBooking, invoices, payments, { excludeInvoiceId: editingInvoice?.id }) : null;
+  const [advanceApplied, setAdvanceApplied] = useState(
+    editingInvoice ? (Number(editingInvoice.advanceApplied) || 0) : (prefill?.sourceType === "booking" ? (Number(prefill.suggestedAdvance) || 0) : 0)
+  );
+  const submittingRef = React.useRef(false);
   // Cash Customer / Walk-In: customerType is "Regular" (existing workflow,
   // unchanged) or "Cash" (no customer account required). The type is fixed
   // once an invoice is created, so the toggle is only shown for new invoices.
   const [customerType, setCustomerType] = useState(editingInvoice?.customerType || "Regular");
-  const canChangeCustomerType = !isEdit;
+  const canChangeCustomerType = !isEdit && !bookingMode;
   const [customerId, setCustomerId] = useState(editingInvoice?.customerId || prefill?.customerId || customers[0]?.id || "");
   const [cashName, setCashName] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerName || "") : "");
   const [cashPhone, setCashPhone] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerPhone || "") : "");
@@ -2084,9 +2106,9 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
   const [date, setDate] = useState(editingInvoice?.date || todayISO());
   const [items, setItems] = useState(
     editingInvoice
-      ? editingInvoice.items.map((it) => ({ id: uid("it"), productId: it.productId || "", name: it.name, unit: it.unit || "Bag", qty: it.qty, price: it.price }))
+      ? editingInvoice.items.map((it) => ({ id: uid("it"), productId: "", name: it.name, unit: it.unit || "Bag", qty: it.qty, price: it.price, bookingLine: !!it.bookingLine }))
       : prefill
-      ? [{ id: uid("it"), productId: prefill.productId || "", name: prefill.productName || "", unit: prefill.unit || "Bag", qty: prefill.qty || 1, price: prefill.rate || 0 }]
+      ? [{ id: uid("it"), productId: prefill.productId || "", name: prefill.productName || "", unit: prefill.unit || "Bag", qty: prefill.qty || 1, price: prefill.rate || 0, bookingLine: prefill.sourceType === "booking" }]
       : [{ id: uid("it"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]
   );
   const [rickshawRent, setRickshawRent] = useState(editingInvoice?.rickshawRent || 0);
@@ -2131,7 +2153,16 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
 
   const subtotal = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.price) || 0), 0);
   const total = subtotal + (Number(rickshawRent) || 0) + (Number(deliveryCharges) || 0) - (Number(discount) || 0);
-  const balanceDue = total - (Number(paymentReceived) || 0);
+  const advanceAppliedNum = bookingMode ? roundMoney(Number(advanceApplied) || 0) : 0;
+  const balanceDue = total - (Number(paymentReceived) || 0) - advanceAppliedNum;
+  const bookingLineQty = roundQty(items.filter((it) => it.bookingLine).reduce((s, it) => s + (Number(it.qty) || 0), 0));
+  const bookingMaxAdvance = bookingState
+    ? roundMoney(Math.max(0, Math.min(bookingState.unusedAdvance, total - (Number(paymentReceived) || 0))))
+    : 0;
+  // If the invoice gets smaller (partial qty), never keep more advance applied than allowed.
+  useEffect(() => {
+    if (bookingMode && Number(advanceApplied) > bookingMaxAdvance + 0.005) setAdvanceApplied(bookingMaxAdvance);
+  }, [bookingMode, bookingMaxAdvance]);
 
   // Cash Customer / Walk-In: Invoice Total = Cash Received, always. Keep
   // the payment field synced to the total so the invoice is always fully
@@ -2157,14 +2188,17 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
     setItems((prev) => [...prev, { id: uid("it"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]);
   }
   function removeItem(id) {
-    setItems((prev) => (prev.length > 1 ? prev.filter((it) => it.id !== id) : prev));
+    // The booking delivery line stays (its qty is what is delivered against the booking).
+    setItems((prev) => (prev.length > 1 ? prev.filter((it) => it.id !== id || it.bookingLine) : prev));
   }
   function pickProduct(id, productId) {
+    if (items.some((it) => it.id === id && it.bookingLine)) return; // booking line keeps the booked product
     const p = products.find((p) => p.id === productId);
     updateItem(id, { productId, name: p ? p.name : "", unit: p ? p.unit : "Bag", price: p ? p.price : 0 });
   }
 
   function submit() {
+    if (submittingRef.current) return;
     let customer = null;
     if (customerType === "Regular") {
       customer = customers.find((c) => c.id === customerId);
@@ -2172,6 +2206,27 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
     }
     const cleanItems = items.filter((it) => it.name && Number(it.qty) > 0);
     if (cleanItems.length === 0) { alert("Kam az kam ek item add karein."); return; }
+    let bookingFields = {};
+    if (bookingMode) {
+      if (customerType !== "Regular" || customerId !== linkedBooking.customerId) {
+        alert(`This delivery must be invoiced to the booking's customer (${linkedBooking.customerName}).`); return;
+      }
+      const bookingLine = cleanItems.find((it) => it.bookingLine);
+      const bQty = roundQty(cleanItems.filter((it) => it.bookingLine).reduce((s, it) => s + (Number(it.qty) || 0), 0));
+      if (!bookingLine || bQty <= 0) { alert(`Enter the quantity delivered against booking ${linkedBooking.code}.`); return; }
+      if (!isEdit && !bookingState.isOpen) { alert(`Booking ${linkedBooking.code} is ${bookingState.status} — it cannot be delivered.`); return; }
+      if (bQty > bookingState.remainingQty + BOOKING_EPS) {
+        alert(`Only ${fmtQty(bookingState.remainingQty)} ${linkedBooking.unit || ""} remain undelivered on booking ${linkedBooking.code}.`); return;
+      }
+      if (advanceAppliedNum < 0 || advanceAppliedNum > bookingMaxAdvance + 0.005) {
+        alert(`Advance applied must be between Rs 0 and ${fmtMoney(bookingMaxAdvance)}.`); return;
+      }
+      bookingFields = {
+        fromBookingId: linkedBooking.id, bookingRef: linkedBooking.code,
+        bookingQty: bQty, bookingRate: roundMoney(Number(bookingLine.price) || linkedBooking.rate),
+        advanceApplied: advanceAppliedNum,
+      };
+    }
     const issuedTo = issuedToName.trim()
       ? { name: issuedToName.trim(), phone: issuedToPhone.trim(), relation: issuedToRelation, remarks: issuedToRemarks.trim() }
       : null;
@@ -2185,7 +2240,7 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
     const finalCustomerPhone = customerType === "Cash" ? cashPhone.trim() : (customer.phone || "");
     const finalCustomerAddress = customerType === "Cash" ? cashAddress.trim() : (customer.address || "");
     const finalPaymentReceived = customerType === "Cash" ? total : (Number(paymentReceived) || 0);
-    const finalBalanceDue = total - finalPaymentReceived;
+    const finalBalanceDue = total - finalPaymentReceived - (bookingMode ? advanceAppliedNum : 0);
 
     const base = {
       customerId: finalCustomerId,
@@ -2202,7 +2257,7 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
       // BUGFIX: item qty (which may be a fractional Feet/Meter/KG/Liter/
       // Sq.Ft amount) and total are rounded so the per-unit rate derived
       // later (total ÷ qty) is stable instead of drifting.
-      items: cleanItems.map((it) => ({ ...(it.productId ? { productId: it.productId } : {}), name: it.name, unit: it.unit || "", qty: roundQty(it.qty), price: roundMoney(it.price), total: roundMoney(roundQty(it.qty) * Number(it.price)) })),
+      items: cleanItems.map((it) => ({ name: it.name, unit: it.unit || "", qty: roundQty(it.qty), price: roundMoney(it.price), total: roundMoney(roundQty(it.qty) * Number(it.price)), ...(it.bookingLine ? { bookingLine: true } : {}) })),
       rickshawRent: Number(rickshawRent) || 0,
       deliveryCharges: Number(deliveryCharges) || 0,
       discount: Number(discount) || 0,
@@ -2215,25 +2270,15 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
       total,
       paymentReceived: finalPaymentReceived,
       balanceDue: finalBalanceDue,
-      status: customerType === "Cash" ? "Paid" : (finalBalanceDue <= 0 ? "Paid" : finalPaymentReceived > 0 ? "Partial" : "Unpaid"),
+      status: customerType === "Cash" ? "Paid" : (finalBalanceDue <= 0 ? "Paid" : (finalPaymentReceived > 0 || (bookingMode && advanceAppliedNum > 0)) ? "Partial" : "Unpaid"),
       issuedTo,
       // Commission is a reference only — never affects subtotal/total above.
       commissionAgentId: commissionAgentId || "",
+      // Advance Booking delivery link (empty object for normal invoices).
+      ...bookingFields,
     };
 
-    // Cement stock: a booking delivery can be billed on one invoice only, and a
-    // sale may not take physical cement stock below zero.
-    const bookingDeliveryId = isEdit ? editingInvoice.bookingDeliveryId || "" : prefill?.deliveryId || "";
-    if (!isEdit && bookingDeliveryId && invoices.some((i) => i.bookingDeliveryId === bookingDeliveryId && !isInvoiceCancelled(i))) {
-      alert(t("This delivery already has an invoice."));
-      return;
-    }
-    if (cementCheckInvoice) {
-      const chk = cementCheckInvoice({ ...base, bookingDeliveryId }, isEdit ? editingInvoice : null);
-      if (chk.errors.length) { alert(chk.errors.join("\n")); return; }
-      if (chk.warnings.length && !confirm(chk.warnings.join("\n") + "\n\n" + t("Continue?"))) return;
-    }
-
+    submittingRef.current = true;
     if (isEdit) {
       onSave({
         ...editingInvoice,
@@ -2253,9 +2298,6 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
         bookingRef: prefill?.sourceType === "booking" ? prefill.sourceCode : "",
         fromOrderId: prefill?.sourceType === "order" ? prefill.sourceId : "",
         orderRef: prefill?.sourceType === "order" ? prefill.sourceCode : "",
-        bookingDeliveryId,
-        deliveryRef: prefill?.deliveryCode || "",
-        createdAt: new Date().toISOString(),
       });
     }
   }
@@ -2270,10 +2312,14 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
           {prefill.sourceType === "booking" && (
             <div className="text-blue-700 mt-0.5">Rate lock hai — is item ka daam invoice mein change na karein, warna customer se galat charge hoga.</div>
           )}
-          {prefill.deliveryCode && (
-            <div className="text-blue-700 mt-0.5 font-bold">{t("Delivery")} {prefill.deliveryCode}: {fmtQty(prefill.qty)} {prefill.unit} — {t("stock was already deducted by the delivery.")}</div>
-          )}
         </div>
+      )}
+      {bookingMode && bookingState && (
+        <InvoiceBookingPanel
+          booking={linkedBooking} state={bookingState} products={products}
+          advanceApplied={advanceApplied} setAdvanceApplied={setAdvanceApplied}
+          maxAdvance={bookingMaxAdvance} bookingLineQty={bookingLineQty}
+        />
       )}
       {canChangeCustomerType ? (
         <Field label="Customer Type">
@@ -2342,12 +2388,13 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
               <option value="">Custom item</option>
               {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
-            <input className={`${inputCls} flex-1`} placeholder="Item name" value={it.name}
+            <input className={`${inputCls} flex-1 ${it.bookingLine ? "bg-amber-50" : ""}`} placeholder="Item name" value={it.name} readOnly={!!it.bookingLine}
               onChange={(e) => updateItem(it.id, { name: e.target.value })} />
             <input list="unit-suggestions" className={`${inputCls} w-24`} placeholder="Unit" value={it.unit || ""} onChange={(e) => updateItem(it.id, { unit: e.target.value })} />
             <input type="number" step="any" className={`${inputCls} w-20`} placeholder="Qty" value={it.qty}
               onChange={(e) => updateItem(it.id, { qty: e.target.value })} />
-            <input type="number" step="any" className={`${inputCls} w-24`} placeholder="Price" value={it.price}
+            <input type="number" step="any" className={`${inputCls} w-24 ${it.bookingLine ? "bg-amber-50" : ""}`} placeholder="Price" value={it.price} readOnly={!!it.bookingLine}
+              title={it.bookingLine ? "Locked booking rate — an admin can change it from the booking with a reason" : undefined}
               onChange={(e) => updateItem(it.id, { price: e.target.value })} />
             <div className="w-24 text-right text-sm font-bold">{fmtMoney((it.qty || 0) * (it.price || 0))}</div>
             <button onClick={() => removeItem(it.id)} className="text-slate-400 hover:text-red-600 text-lg leading-none">×</button>
@@ -2467,12 +2514,18 @@ function InvoiceForm({ cementCheckInvoice, customers, products, drivers, booking
       </div>
 
       <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
-        <div className="flex justify-between text-slate-500"><span>Previous Balance</span><span>{fmtMoney(previousOutstanding)}</span></div>
+        <div className="flex justify-between text-slate-500"><span>Previous Balance</span><span>{fmtMoney(previousOutstanding + advanceAppliedNum)}</span></div>
         <div className="flex justify-between"><span>New Purchase</span><span className="font-bold">{fmtMoney(subtotal)}</span></div>
         <div className="flex justify-between"><span>Rickshaw + Delivery</span><span className="font-bold">{fmtMoney((Number(rickshawRent) || 0) + (Number(deliveryCharges) || 0))}</span></div>
         <div className="flex justify-between"><span>Discount</span><span className="font-bold">-{fmtMoney(discount)}</span></div>
         <div className="flex justify-between"><span>Payment Received</span><span className="font-bold">-{fmtMoney(paymentReceived)}</span></div>
-        <div className="flex justify-between text-base border-t border-slate-300 pt-1"><span className="font-bold">Outstanding Balance</span><span className="font-black text-red-600">{fmtMoney(previousOutstanding + balanceDue)}</span></div>
+        {advanceAppliedNum > 0 && (
+          <div className="flex justify-between"><span>Advance Applied ({linkedBooking?.code})</span><span className="font-bold text-emerald-700">-{fmtMoney(advanceAppliedNum)}</span></div>
+        )}
+        {bookingMode && (
+          <div className="flex justify-between text-slate-500"><span>This Invoice Payable</span><span className="font-bold">{fmtMoney(balanceDue)}</span></div>
+        )}
+        <div className="flex justify-between text-base border-t border-slate-300 pt-1"><span className="font-bold">Outstanding Balance</span><span className="font-black text-red-600">{fmtMoney(previousOutstanding + balanceDue + advanceAppliedNum)}</span></div>
       </div>
 
       <div className="flex gap-2 mt-4">
@@ -2489,7 +2542,7 @@ function invoiceStatusBanner(invoice) {
   const prevDue = (invoice.previousOutstanding || 0) > 0;
   if (thisPaid && !prevDue) return { text: "Paid in Full", tone: "emerald" };
   if (thisPaid && prevDue) return { text: "This Invoice Paid \u00B7 Previous Outstanding Still Due", tone: "amber" };
-  if (invoice.paymentReceived > 0) return { text: `Partial Payment Received \u2014 Balance Due on Current Purchase${prevDue ? " \u00B7 Previous Outstanding Still Due" : ""}`, tone: "amber" };
+  if (invoice.paymentReceived > 0 || Number(invoice.advanceApplied) > 0) return { text: `Partial Payment Received \u2014 Balance Due on Current Purchase${prevDue ? " \u00B7 Previous Outstanding Still Due" : ""}`, tone: "amber" };
   return { text: `Unpaid \u2014 Balance Due on Current Purchase${prevDue ? " \u00B7 Previous Outstanding Still Due" : ""}`, tone: "red" };
 }
 
@@ -2501,7 +2554,7 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
     red: "bg-red-50 text-red-700 border-red-200",
     slate: "bg-slate-100 text-slate-600 border-slate-300",
   }[banner.tone];
-  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue;
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
   const hasDelivery = invoice.rickshawRent > 0 || invoice.deliveryCharges > 0 || invoice.driverName || invoice.receivedBy;
   const isCancelled = invoice.docStatus === "Cancelled";
 
@@ -2548,6 +2601,9 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
           <div className="text-right">
             <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{invoice.number}</div>
             <div className="text-xs text-slate-500 mt-1">Date: <span className="font-bold text-slate-700">{fmtDate(invoice.date)}</span></div>
+            {invoice.bookingRef && (
+              <div className="text-[10px] font-bold uppercase text-amber-700 mt-1">Booking: {invoice.bookingRef}{invoice.bookingQty != null ? ` · ${fmtQty(invoice.bookingQty)} delivered` : ""}</div>
+            )}
             {invoice.customerType === "Cash" && (
               <div className="inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</div>
             )}
@@ -2605,11 +2661,14 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
 
         <div className="flex justify-end">
           <div className="w-72 text-sm space-y-1.5">
-            <div className="flex justify-between"><span className="text-slate-500">Previous Balance</span><span className="font-bold">{fmtMoney(invoice.previousOutstanding || 0)}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Previous Balance</span><span className="font-bold">{fmtMoney((invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0))}</span></div>
             <div className="flex justify-between"><span className="text-slate-500">New Purchase</span><span className="font-bold">{fmtMoney(invoice.subtotal)}</span></div>
             <div className="flex justify-between"><span className="text-slate-500">Rickshaw + Delivery</span><span className="font-bold">{fmtMoney((invoice.rickshawRent || 0) + (invoice.deliveryCharges || 0))}</span></div>
             <div className="flex justify-between"><span className="text-slate-500">Discount</span><span className="font-bold">-{fmtMoney(invoice.discount || 0)}</span></div>
             <div className="flex justify-between"><span className="text-slate-500">Payment Received</span><span className="font-bold">-{fmtMoney(invoice.paymentReceived)}</span></div>
+            {Number(invoice.advanceApplied) > 0 && (
+              <div className="flex justify-between"><span className="text-slate-500">Advance Applied ({invoice.bookingRef})</span><span className="font-bold">-{fmtMoney(invoice.advanceApplied)}</span></div>
+            )}
             <div className="flex justify-between border-t-2 border-slate-900 pt-2 mt-1">
               <span className="font-black uppercase text-blue-700">Outstanding Balance</span>
               <span className="font-black text-lg text-blue-700">{fmtMoney(outstandingNow)}</span>
@@ -2714,7 +2773,7 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
 }
 
 function buildInvoiceWaMessage(invoice, settings) {
-  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue;
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
   const lines = [
     `${settings.companyName} — Invoice ${invoice.number}${invoice.docStatus === "Cancelled" ? " (CANCELLED)" : ""}`,
     `Date: ${fmtDate(invoice.date)}`,
@@ -2725,13 +2784,14 @@ function buildInvoiceWaMessage(invoice, settings) {
     "",
     `New Purchase: ${fmtMoney(invoice.subtotal)}`,
     `Received: ${fmtMoney(invoice.paymentReceived)}`,
+    ...(Number(invoice.advanceApplied) > 0 ? [`Booking Advance Applied (${invoice.bookingRef}): ${fmtMoney(invoice.advanceApplied)}`] : []),
     `Balance Due (this invoice): ${fmtMoney(invoice.balanceDue)}`,
     `Total Outstanding Balance: ${fmtMoney(outstandingNow)}`,
   ];
   return lines.join("\n");
 }
 
-function Invoices({ cementCheckInvoice, customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, commissionTransactions, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
+function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, commissionTransactions, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
   const [showForm, setShowForm] = useState(false);
   const [editingInvoice, setEditingInvoice] = useState(null);
   const [viewing, setViewing] = useState(null);
@@ -2830,7 +2890,6 @@ function Invoices({ cementCheckInvoice, customers, products, drivers, invoices, 
       {showForm && (
         <Modal title={editingInvoice ? `Edit Invoice ${editingInvoice.number}` : prefill ? `New Invoice — from ${prefill.sourceCode}` : "New Invoice"} onClose={closeForm} wide>
           <InvoiceForm
-            cementCheckInvoice={cementCheckInvoice}
             customers={customers}
             products={products}
             drivers={drivers}
@@ -2856,8 +2915,7 @@ function Invoices({ cementCheckInvoice, customers, products, drivers, invoices, 
                 saveInvoice(inv);
                 if (prefill) {
                   if (prefill.sourceType === "order") onOrderFulfilled(prefill.sourceId);
-                  // A delivery invoice never closes the booking: its status follows the delivery records.
-                  else if (!prefill.deliveryId) onBookingFulfilled(prefill.sourceId);
+                  else onBookingFulfilled(prefill.sourceId);
                   onClearPrefill();
                 }
               }
@@ -2980,7 +3038,6 @@ function SalesReturnPage({ customers, invoices, returns, exchanges, onCreateRetu
   const [reason, setReason] = useState("");
   const [notes, setNotes] = useState("");
   const [returnDate, setReturnDate] = useState(todayISO());
-  const [stockCondition, setStockCondition] = useState("Resalable");
   const [deletingReturn, setDeletingReturn] = useState(null);
   const [deleteReason, setDeleteReason] = useState("");
 
@@ -3023,9 +3080,9 @@ function SalesReturnPage({ customers, invoices, returns, exchanges, onCreateRetu
     const customer = customers.find((c) => c.id === customerId);
     onCreateReturn({
       customerId, customerName: customer.name, invoiceId: invoice.id, invoiceNumber: invoice.number,
-      date: returnDate, items, reason: reason.trim(), notes: notes.trim(), amount: returnAmount, stockCondition,
+      date: returnDate, items, reason: reason.trim(), notes: notes.trim(), amount: returnAmount,
     });
-    setInvoiceId(""); setReturnQtys({}); setReason(""); setNotes(""); setReturnDate(todayISO()); setStockCondition("Resalable");
+    setInvoiceId(""); setReturnQtys({}); setReason(""); setNotes(""); setReturnDate(todayISO());
   }
 
   function confirmDelete() {
@@ -3108,12 +3165,6 @@ function SalesReturnPage({ customers, invoices, returns, exchanges, onCreateRetu
             <Field label="Notes (optional)">
               <input className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} />
             </Field>
-            <Field label="Returned Cement Condition (stock)">
-              <select className={inputCls} value={stockCondition} onChange={(e) => setStockCondition(e.target.value)} data-cement="return-condition">
-                <option value="Resalable">{t("Resalable — add back to available stock")}</option>
-                <option value="Damaged">{t("Damaged / unusable — keep in damaged stock")}</option>
-              </select>
-            </Field>
             <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm flex justify-between">
               <span className="font-bold">Total Return Amount</span>
               <span className="font-black text-emerald-600">{fmtMoney(returnAmount)}</span>
@@ -3176,13 +3227,12 @@ function SalesReturnPage({ customers, invoices, returns, exchanges, onCreateRetu
 
 /* ---------------- Exchange (Phase 2 + Upgrade) ---------------- */
 
-function ExchangePage({ customers, products, invoices, returns, exchanges, onCreateExchange, onDeleteExchange, currentUser, cementCheckExchange }) {
+function ExchangePage({ customers, products, invoices, returns, exchanges, onCreateExchange, onDeleteExchange, currentUser }) {
   const [customerId, setCustomerId] = useState(customers[0]?.id || "");
   const [invoiceId, setInvoiceId] = useState("");
   const [returnQtys, setReturnQtys] = useState({});
   const [newItems, setNewItems] = useState([{ id: uid("ni"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]);
   const [reason, setReason] = useState("");
-  const [returnedCondition, setReturnedCondition] = useState("Resalable");
   const [deletingExchange, setDeletingExchange] = useState(null);
   const [deleteReason, setDeleteReason] = useState("");
 
@@ -3227,7 +3277,7 @@ function ExchangePage({ customers, products, invoices, returns, exchanges, onCre
         total: roundMoney(roundQty(Number(returnQtys[it.itemIndex]) || 0) * it.perUnitRate),
       }))
       .filter((it) => it.qty > 0);
-    const cleanNewItems = newItems.filter((it) => it.name && Number(it.qty) > 0).map((it) => ({ ...(it.productId ? { productId: it.productId } : {}), name: it.name, unit: it.unit, qty: roundQty(it.qty), price: roundMoney(it.price), total: roundMoney(roundQty(it.qty) * Number(it.price)) }));
+    const cleanNewItems = newItems.filter((it) => it.name && Number(it.qty) > 0).map((it) => ({ name: it.name, unit: it.unit, qty: roundQty(it.qty), price: roundMoney(it.price), total: roundMoney(roundQty(it.qty) * Number(it.price)) }));
     if (returnedItems.length === 0) { alert("Kam az kam ek returned item ki qty daalein."); return; }
     const invalidQty = returnedItems.some((it) => {
       const line = rs.breakdown.find((b) => b.itemIndex === it.itemIndex);
@@ -3236,18 +3286,13 @@ function ExchangePage({ customers, products, invoices, returns, exchanges, onCre
     if (invalidQty) { alert("Returned qty remaining quantity se zyada nahi ho sakti."); return; }
     if (cleanNewItems.length === 0) { alert("Kam az kam ek naya item daalein jo customer ko diya ja raha hai."); return; }
     if (!reason.trim()) { alert("Exchange ki wajah likhein."); return; }
-    if (cementCheckExchange) {
-      const chk = cementCheckExchange({ date: todayISO(), newItems: cleanNewItems });
-      if (chk.errors.length) { alert(chk.errors.join("\n")); return; }
-      if (chk.warnings.length && !confirm(chk.warnings.join("\n") + "\n\n" + t("Continue?"))) return;
-    }
     const customer = customers.find((c) => c.id === customerId);
     onCreateExchange({
       customerId, customerName: customer.name, invoiceId: invoice.id, invoiceNumber: invoice.number,
       date: todayISO(), returnedItems, newItems: cleanNewItems,
-      returnedTotal, newTotal, difference, reason: reason.trim(), returnedCondition,
+      returnedTotal, newTotal, difference, reason: reason.trim(),
     });
-    setInvoiceId(""); setReturnQtys({}); setNewItems([{ id: uid("ni"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]); setReason(""); setReturnedCondition("Resalable");
+    setInvoiceId(""); setReturnQtys({}); setNewItems([{ id: uid("ni"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]); setReason("");
   }
 
   function confirmDelete() {
@@ -3328,12 +3373,6 @@ function ExchangePage({ customers, products, invoices, returns, exchanges, onCre
 
             <Field label="Exchange Reason">
               <input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} />
-            </Field>
-            <Field label="Returned Cement Condition (stock)">
-              <select className={inputCls} value={returnedCondition} onChange={(e) => setReturnedCondition(e.target.value)} data-cement="exchange-condition">
-                <option value="Resalable">{t("Resalable — add back to available stock")}</option>
-                <option value="Damaged">{t("Damaged / unusable — keep in damaged stock")}</option>
-              </select>
             </Field>
 
             <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
@@ -3513,7 +3552,7 @@ function paymentUserNote(payment) {
 // is subtracted twice.
 function computePaymentReceiptBalances(payment, customer, invoices, payments, returns, exchanges, promises, transfers, adjustments) {
   const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
-  const entry = entries.find((e) => e.id === payment.id && (e.type === "Payment" || e.type === "Payment Against Promise"));
+  const entry = entries.find((e) => e.id === payment.id && (e.type === "Payment" || e.type === "Payment Against Promise" || e.type === "Booking Advance"));
   if (!entry) {
     // Not in the ledger = reversed because its invoice was cancelled.
     return { reversed: true, previous: outstanding, received: Number(payment.amount) || 0, remaining: outstanding };
@@ -3558,6 +3597,7 @@ function PaymentReceiptBody({ payment, customer, settings, balances }) {
       <div className={sectionCls}>
         <div className={headCls}>Payment Details</div>
         <div className={rowCls}><span className="text-slate-500">Receipt No.</span><span className="font-bold text-right">{receiptNo}</span></div>
+        {payment.bookingCode && <div className={rowCls}><span className="text-slate-500">Booking Ref</span><span className="font-bold text-right">{payment.bookingCode}</span></div>}
         <div className={rowCls}><span className="text-slate-500">Payment Date</span><span className="font-bold text-right">{fmtDate(payment.date)}</span></div>
         <div className={rowCls}><span className="text-slate-500">Payment Method</span><span className="font-bold text-right">{payment.method || "Cash"}</span></div>
         <div className={rowCls}><span className="text-slate-500">Payment Received</span><span className="font-bold text-right">{fmtMoney(balances.received)}</span></div>
@@ -3790,13 +3830,17 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
                   <td className="px-4 py-2">{fmtDate(p.date)}</td>
                   <td className="px-4 py-2 font-bold">{p.customerName}</td>
                   <td className="px-4 py-2 text-slate-500">{p.method}</td>
-                  <td className="px-4 py-2 text-right font-bold text-emerald-600">{fmtMoney(p.amount)}</td>
+                  <td className={`px-4 py-2 text-right font-bold ${p.kind === "Refund" ? "text-red-600" : "text-emerald-600"}`}>{p.kind === "Refund" ? "-" : ""}{fmtMoney(p.amount)}</td>
                   <td className="px-4 py-2 text-slate-500 text-xs">{p.note || "-"}</td>
                   <td className="px-4 py-2 text-right whitespace-nowrap">
-                    <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setReceiptId(p.id)}>Receiving</button>
+                    {p.kind === "Refund" ? (
+                      <span className="text-xs font-bold text-red-600">Refund</span>
+                    ) : (
+                      <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setReceiptId(p.id)}>Receiving</button>
+                    )}
                     <span className="text-slate-300 mx-2">|</span>
-                    {reversed ? (
-                      <span className="text-xs font-bold text-slate-300" title="Invoice cancelled — payment reversed">Edit</span>
+                    {reversed || p.bookingId || p.kind === "Refund" ? (
+                      <span className="text-xs font-bold text-slate-300" title={reversed ? "Invoice cancelled — payment reversed" : "Booking advance / refund — edit it from Advance Booking"}>Edit</span>
                     ) : (
                       <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => startEdit(p)}>Edit</button>
                     )}
@@ -4927,9 +4971,1452 @@ function CommissionPage({
   );
 }
 
-/* ---------------- Bookings ----------------
-   The Advance Booking page is CementBookingsPage (cement stock module at
-   the end of this file). It keeps the old flow for non-cement items. */
+/* ---------------- Bookings ---------------- */
+
+/* ============================================================
+   ADVANCE BOOKING UPGRADE v2
+   ------------------------------------------------------------
+   Works inside the existing architecture — no new tables, no new
+   kv keys. Everything is stored in the keys the ERP already uses:
+
+   ct-bookings  (booking record — new fields are additive)
+     v: 2                      new-style booking (older ones have no v)
+     qty, rate, unit           booked qty + CURRENT locked rate
+     originalRate              rate agreed on the booking date
+     expiryDate                booking date + 1 month (existing rule)
+     terms, notes
+     rateHistory[]             { oldRate, newRate, reason, by, at }
+     renewals[]                { from, to, reason, by, at }
+     history[]                 { action, details, by, at }
+     status                    stored ONLY as "Booked" or "Cancelled";
+                               Partially Delivered / Completed / Expired
+                               are derived from real invoices + dates.
+     legacyAdvancePosted       older bookings: advance posted to ledger
+
+   ct-payments  (same records the Payments page uses)
+     advance receipt  -> { ...payment, bookingId, bookingCode }
+                         ledger: CREDIT ("Booking Advance")
+     advance refund   -> { ...payment, kind: "Refund", bookingId }
+                         ledger: DEBIT  ("Booking Refund")
+
+   ct-invoices  (delivery = an invoice converted from the booking)
+     fromBookingId, bookingRef (already existed)
+     bookingQty                qty delivered against the booking
+     bookingRate               rate used for that delivery
+     advanceApplied            booking advance settled on this invoice
+
+   Accounting rule (no double counting): an advance is credited to the
+   customer ledger ONCE, when it is received. When it is applied to a
+   delivery invoice, the invoice still debits its full total; the
+   "advance applied" only settles that invoice's own Balance Due /
+   status. It is never posted as a second payment.
+
+   Delivered qty, unused advance and booking status are always
+   recomputed from stored invoices/payments, so cancelling or editing
+   a delivery invoice automatically restores the booking.
+   ============================================================ */
+
+const BOOKING_EXPIRY_WARN_DAYS = 7;
+const BOOKING_EPS = 0.0005;
+const BOOKING_PAYMENT_METHODS = ["Cash", "Bank Transfer", "Cheque", "Easypaisa/JazzCash"];
+const BOOKING_STATUS_LIST = ["Booked", "Partially Delivered", "Completed", "Cancelled", "Expired"];
+const BOOKING_STATUS_TONE = {
+  Booked: "bg-blue-100 text-blue-700",
+  "Partially Delivered": "bg-amber-100 text-amber-700",
+  Completed: "bg-emerald-100 text-emerald-700",
+  Cancelled: "bg-slate-200 text-slate-600",
+  Expired: "bg-red-100 text-red-700",
+};
+const DEFAULT_BOOKING_TERMS = [
+  "1. The locked rate is valid only until the expiry date shown on this receipt.",
+  "2. Quantity not collected by the expiry date is supplied at the market rate unless the booking is renewed.",
+  "3. The advance is adjusted against delivery invoices. Any unused advance can be refunded or adjusted on request.",
+  "4. Please bring this receipt (or its reference number) for every delivery.",
+].join("\n");
+
+// Urdu labels for the new booking screens. Only ADDED to the existing
+// dictionary when a key is not already there, so no existing wording changes.
+const BOOKING_URDU = {
+  "Advance Booking Dashboard": "پیشگی بکنگ ڈیش بورڈ",
+  "Booking Reports": "بکنگ رپورٹس",
+  "Active Bookings": "فعال بکنگز",
+  "Total Booked Value": "کل بکنگ مالیت",
+  "Total Advance Received": "کل موصول شدہ پیشگی",
+  "Unused Advance": "غیر استعمال شدہ پیشگی",
+  "Unused Advance Balance": "غیر استعمال شدہ پیشگی بیلنس",
+  "Outstanding Booking Value": "بقایا بکنگ مالیت",
+  "Pending Delivery Qty": "زیرِ التوا ڈیلیوری مقدار",
+  "Expiring Soon": "جلد میعاد ختم",
+  "Expired Bookings": "میعاد ختم بکنگز",
+  "Completed Bookings": "مکمل بکنگز",
+  "Cancelled Bookings": "منسوخ بکنگز",
+  "Booking Ref": "بکنگ نمبر",
+  "Booked Qty": "بک شدہ مقدار",
+  "Delivered": "ڈیلیور شدہ",
+  "Delivered Qty": "ڈیلیور شدہ مقدار",
+  "Remaining Qty": "باقی مقدار",
+  "Booking Value": "بکنگ مالیت",
+  "Advance Received": "موصول شدہ پیشگی",
+  "Advance Applied": "لاگو شدہ پیشگی",
+  "Advance Applied (Rs)": "لاگو شدہ پیشگی (روپے)",
+  "Refunded": "واپس شدہ رقم",
+  "Remaining Amount": "باقی رقم",
+  "Current Product Rate": "موجودہ ریٹ",
+  "Delivery History": "ڈیلیوری ہسٹری",
+  "Advance Payments": "پیشگی ادائیگیاں",
+  "Refund History": "ریفنڈ ہسٹری",
+  "Rate History": "ریٹ ہسٹری",
+  "Renewal History": "تجدید ہسٹری",
+  "Booking History": "بکنگ ہسٹری",
+  "Receive Advance": "پیشگی وصول کریں",
+  "Edit Advance": "پیشگی میں ترمیم",
+  "Refund Advance": "پیشگی واپس کریں",
+  "Cancel Booking": "بکنگ منسوخ کریں",
+  "Renew Booking": "بکنگ کی تجدید کریں",
+  "Change Rate": "ریٹ تبدیل کریں",
+  "Edit Notes / Terms": "نوٹس / شرائط میں ترمیم",
+  "Print Receipt": "رسید پرنٹ کریں",
+  "Print Delivery History": "ڈیلیوری ہسٹری پرنٹ کریں",
+  "Advance Booking Receipt": "پیشگی بکنگ رسید",
+  "Booking Advance Receipt": "بکنگ پیشگی رسید",
+  "Terms & Conditions": "شرائط و ضوابط",
+  "Authorized Signature": "مجاز دستخط",
+  "Customer Signature": "گاہک کے دستخط",
+  "Save Advance Booking": "پیشگی بکنگ محفوظ کریں",
+  "Delivery Against Booking": "بکنگ کے مقابل ڈیلیوری",
+  "Available To Deliver": "ڈیلیوری کے لیے دستیاب",
+  "Delivering Now": "اب ڈیلیوری",
+  "Apply Max": "زیادہ سے زیادہ لاگو کریں",
+  "Booking Advance": "بکنگ پیشگی",
+  "Booking Refund": "بکنگ ریفنڈ",
+  "Refund": "ریفنڈ",
+  "Refund Amount (Rs)": "ریفنڈ رقم (روپے)",
+  "Refund Method": "ریفنڈ کا طریقہ",
+  "Refundable Balance": "قابلِ واپسی بیلنس",
+  "Cancellation Reason": "منسوخی کی وجہ",
+  "New Rate (Rs/unit)": "نیا ریٹ (روپے/یونٹ)",
+  "New Expiry Date": "نئی میعاد کی تاریخ",
+  "Terms": "شرائط",
+  "Booking Register": "بکنگ رجسٹر",
+  "Customer-wise Bookings": "بلحاظ گاہک بکنگز",
+  "Product-wise Bookings": "بلحاظ مصنوعہ بکنگز",
+  "Advance Collection": "پیشگی وصولی",
+  "Unused Advance Report": "غیر استعمال شدہ پیشگی رپورٹ",
+  "Pending Delivery": "زیرِ التوا ڈیلیوری",
+  "Expiry Report": "میعاد رپورٹ",
+  "Cancellation & Refund": "منسوخی اور ریفنڈ",
+  "Booking Date From": "بکنگ تاریخ سے",
+  "Booking Date To": "بکنگ تاریخ تک",
+  "Expiry From": "میعاد سے",
+  "Expiry To": "میعاد تک",
+  "All Products": "تمام مصنوعات",
+  "All Branches": "تمام برانچز",
+  "Days Left": "باقی دن",
+  "Post Old Advance To Ledger": "پرانی پیشگی لیجر میں درج کریں",
+};
+Object.entries(BOOKING_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
+
+/* ---------------- Booking: pure helpers ---------------- */
+
+function bookingDaysUntil(dateStr) {
+  if (!dateStr) return null;
+  const today = parseDateValue(todayISO());
+  const target = parseDateValue(dateStr);
+  if (isNaN(target)) return null;
+  return Math.round((target - today) / 86400000);
+}
+
+function bookingLinkedInvoices(booking, invoices, excludeInvoiceId) {
+  return (invoices || []).filter((i) =>
+    i.fromBookingId === booking.id && i.bookingQty != null && !isInvoiceCancelled(i) && i.id !== excludeInvoiceId
+  );
+}
+
+function bookingAdvanceEntries(booking, payments) {
+  return (payments || []).filter((p) => p.bookingId === booking.id && p.kind !== "Refund");
+}
+
+function bookingRefundEntries(booking, payments) {
+  return (payments || []).filter((p) => p.bookingId === booking.id && p.kind === "Refund");
+}
+
+// Single source of truth for every booking number shown anywhere.
+// opts.excludeInvoiceId: leave one invoice out (used while editing it).
+function computeBookingState(booking, invoices, payments, opts = {}) {
+  const b = booking || {};
+  const isV2 = b.v === 2;
+  const bookedQty = roundQty(Number(b.qty) || 0);
+  const rate = roundMoney(Number(b.rate) || 0);
+
+  const deliveries = bookingLinkedInvoices(b, invoices, opts.excludeInvoiceId)
+    .map((i) => {
+      const qty = roundQty(Number(i.bookingQty) || 0);
+      const r = roundMoney(i.bookingRate != null ? Number(i.bookingRate) : rate);
+      return {
+        invoiceId: i.id, invoiceNumber: i.number, date: i.date, qty, rate: r,
+        amount: roundMoney(qty * r), advanceApplied: roundMoney(Number(i.advanceApplied) || 0),
+        invoiceTotal: Number(i.total) || 0, paymentReceived: Number(i.paymentReceived) || 0,
+      };
+    })
+    .sort((x, y) => parseDateValue(x.date) - parseDateValue(y.date));
+
+  // Older bookings were marked "Completed" by hand when converted (the old
+  // flow always invoiced the full quantity) — keep them closed.
+  const legacyClosed = !isV2 && b.status === "Completed";
+  let deliveredQty = roundQty(deliveries.reduce((s, d) => s + d.qty, 0));
+  if (legacyClosed) deliveredQty = Math.max(deliveredQty, bookedQty);
+  const remainingQty = roundQty(Math.max(0, bookedQty - deliveredQty));
+  const deliveredAmount = legacyClosed
+    ? roundMoney(bookedQty * rate)
+    : roundMoney(deliveries.reduce((s, d) => s + d.amount, 0));
+  const bookingValue = roundMoney(deliveredAmount + remainingQty * rate);
+
+  const advancePayments = bookingAdvanceEntries(b, payments).sort((x, y) => parseDateValue(x.date) - parseDateValue(y.date));
+  const refunds = bookingRefundEntries(b, payments).sort((x, y) => parseDateValue(x.date) - parseDateValue(y.date));
+  const advancePosted = roundMoney(advancePayments.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const refunded = roundMoney(refunds.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  // Older bookings stored the advance as a plain number that was never
+  // posted to the ledger. It is shown, but cannot be applied/refunded
+  // until an admin posts it (see "Post Old Advance To Ledger").
+  const legacyAdvance = !isV2 && !b.legacyAdvancePosted ? roundMoney(Number(b.advanceAmount) || 0) : 0;
+  const advanceApplied = roundMoney(deliveries.reduce((s, d) => s + d.advanceApplied, 0));
+  const unusedAdvance = roundMoney(advancePosted - advanceApplied - refunded);
+  const netAdvance = roundMoney(advancePosted - refunded);
+  const advanceReceived = roundMoney(advancePosted + legacyAdvance);
+
+  const isCancelled = b.status === "Cancelled";
+  const daysToExpiry = bookingDaysUntil(b.expiryDate);
+  const expired = daysToExpiry != null && daysToExpiry < 0;
+  let status;
+  if (isCancelled) status = "Cancelled";
+  else if (bookedQty > 0 && remainingQty <= BOOKING_EPS) status = "Completed";
+  else if (expired) status = "Expired";
+  else if (deliveredQty > 0) status = "Partially Delivered";
+  else status = "Booked";
+  const isOpen = status === "Booked" || status === "Partially Delivered";
+  const expiringSoon = isOpen && daysToExpiry != null && daysToExpiry <= BOOKING_EXPIRY_WARN_DAYS;
+  const pendingQty = isCancelled ? 0 : remainingQty;
+  const remainingAmount = isCancelled ? 0 : roundMoney(Math.max(0, bookingValue - netAdvance - legacyAdvance));
+  const outstandingValue = isCancelled ? 0 : roundMoney(Math.max(0, pendingQty * rate - Math.max(0, unusedAdvance) - legacyAdvance));
+
+  return {
+    isV2, bookedQty, rate, deliveries, deliveredQty, remainingQty, pendingQty, deliveredAmount, bookingValue,
+    advancePayments, refunds, advancePosted, refunded, legacyAdvance, advanceApplied, unusedAdvance, netAdvance,
+    advanceReceived, remainingAmount, outstandingValue, status, isOpen, isCancelled, expired, expiringSoon,
+    daysToExpiry, legacyClosed,
+  };
+}
+
+// Re-checked by the App right before an invoice linked to a booking is saved,
+// against the latest stored data. Returns "" when valid, else a message.
+function validateBookingInvoice(inv, original, bookings, invoices, payments) {
+  if (!inv || !inv.fromBookingId || inv.bookingQty == null) return "";
+  const booking = (bookings || []).find((b) => b.id === inv.fromBookingId);
+  if (!booking) return "Linked booking was not found. Please refresh and try again.";
+  if (inv.customerId !== booking.customerId) return `This delivery must be invoiced to the booking's customer (${booking.customerName}).`;
+  const st = computeBookingState(booking, invoices, payments, { excludeInvoiceId: inv.id });
+  if (!original) {
+    if (st.status === "Cancelled") return `Booking ${booking.code} is cancelled.`;
+    if (st.status === "Completed") return `Booking ${booking.code} is already fully delivered.`;
+    if (st.status === "Expired") return `Booking ${booking.code} has expired. An admin must renew it before delivery at the locked rate.`;
+  }
+  const qty = roundQty(Number(inv.bookingQty) || 0);
+  if (qty <= 0) return "Delivery quantity against the booking must be more than 0.";
+  if (qty > st.remainingQty + BOOKING_EPS) return `Only ${fmtQty(st.remainingQty)} ${booking.unit || ""} remain undelivered on booking ${booking.code}.`;
+  const applied = roundMoney(Number(inv.advanceApplied) || 0);
+  if (applied < 0) return "Advance applied cannot be negative.";
+  if (applied > Math.max(0, st.unusedAdvance) + 0.005) return `Only ${fmtMoney(Math.max(0, st.unusedAdvance))} unused advance is available on booking ${booking.code}.`;
+  const payable = roundMoney((Number(inv.total) || 0) - (Number(inv.paymentReceived) || 0));
+  if (applied > payable + 0.005) return "Advance applied cannot be more than the invoice amount still payable.";
+  return "";
+}
+
+// "70 Bag · 5 Ton" — quantities are never added across different units.
+function bookingQtyByUnit(list) {
+  const map = {};
+  list.forEach(({ qty, unit }) => {
+    if (!(qty > BOOKING_EPS)) return;
+    const key = unit || "-";
+    map[key] = roundQty((map[key] || 0) + qty);
+  });
+  const parts = Object.entries(map).map(([u, q]) => `${fmtQty(q)} ${u === "-" ? "" : u}`.trim());
+  return parts.length ? parts.join(" · ") : "0";
+}
+
+function bookingCsvDownload(filename, headers, rows) {
+  const all = [headers, ...rows];
+  const csv = all.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+  const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function bookingFormatCell(type, v) {
+  if (type === "money") return fmtMoney(v);
+  if (type === "qty") return fmtQty(v);
+  if (type === "date") return v ? fmtDate(v) : "-";
+  return v == null || v === "" ? "-" : String(v);
+}
+
+/* ---------------- Booking: small UI pieces ---------------- */
+
+function BookingStatusBadge({ status }) {
+  return (
+    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 whitespace-nowrap ${BOOKING_STATUS_TONE[status] || "bg-slate-100 text-slate-500"}`}>{tStatus(status)}</span>
+  );
+}
+
+function BookingPrintHeader({ settings, title }) {
+  return (
+    <div>
+      <div className="flex justify-between items-start pb-3 border-b-4 border-slate-900 mb-3">
+        <div className="flex items-center gap-3">
+          {settings?.logoUrl ? (
+            <img src={settings.logoUrl} alt="Logo" className="w-14 h-14 object-contain" />
+          ) : (
+            <div className="w-14 h-14 bg-slate-900 flex items-center justify-center font-black text-xl text-white">CT</div>
+          )}
+          <div>
+            <div className="text-xl font-black uppercase tracking-tight text-slate-900">{settings?.companyName}</div>
+            <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">Construction Materials Supplier</div>
+          </div>
+        </div>
+        <div className="text-right text-xs text-slate-500">
+          <div>{settings?.companyAddress}</div>
+          {settings?.companyPhone && <div>Ph: {settings.companyPhone}</div>}
+        </div>
+      </div>
+      {title && <div className="bg-slate-900 text-white text-center text-sm font-black uppercase tracking-wide py-1 mb-3">{t(title)}</div>}
+    </div>
+  );
+}
+
+function BookingKV({ label, value, strong, tone }) {
+  return (
+    <div className="flex justify-between gap-3">
+      <span className="text-slate-500">{t(label)}</span>
+      <span className={`${strong ? "font-black" : "font-bold"} text-right ${tone || ""}`}>{value}</span>
+    </div>
+  );
+}
+
+function BookingReceiptBody({ booking, state, settings, customer }) {
+  const terms = (booking.terms || DEFAULT_BOOKING_TERMS).split("\n").filter((l) => l.trim());
+  const balanceLabel = state.remainingAmount > 0.005 ? "Balance Due" : "Fully Paid in Advance";
+  return (
+    <div className="bg-white text-slate-900 text-sm" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <BookingPrintHeader settings={settings} title="Advance Booking Receipt" />
+      <div className="flex justify-between items-start gap-4 mb-3">
+        <div>
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400">Customer</div>
+          <div className="font-bold">{booking.customerName}</div>
+          {(customer?.phone || booking.customerPhone) && <div className="text-slate-500">{customer?.phone || booking.customerPhone}</div>}
+          {customer?.address && <div className="text-slate-500">{customer.address}</div>}
+        </div>
+        <div className="text-right text-xs">
+          <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{booking.code}</div>
+          <div className="mt-1 text-slate-500">Booking Date: <span className="font-bold text-slate-700">{fmtDate(booking.date)}</span></div>
+          <div className="text-slate-500">Valid Till: <span className="font-bold text-slate-700">{fmtDate(booking.expiryDate)}</span></div>
+          <div className="mt-1"><BookingStatusBadge status={state.status} /></div>
+        </div>
+      </div>
+      <table className="w-full text-sm mb-3">
+        <thead>
+          <tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
+            <th className="py-2 px-2 text-left">Product</th>
+            <th className="py-2 px-2 text-right">Booked Qty</th>
+            <th className="py-2 px-2 text-right">Unit</th>
+            <th className="py-2 px-2 text-right">Locked Rate</th>
+            <th className="py-2 px-2 text-right">Booking Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr className="border-b border-slate-200">
+            <td className="py-2 px-2 font-bold">{booking.productName}</td>
+            <td className="py-2 px-2 text-right">{fmtQty(state.bookedQty)}</td>
+            <td className="py-2 px-2 text-right">{booking.unit || "-"}</td>
+            <td className="py-2 px-2 text-right">{fmtMoney(state.rate)}</td>
+            <td className="py-2 px-2 text-right font-bold">{fmtMoney(state.bookingValue)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div className="flex justify-end mb-3">
+        <div className="w-80 space-y-1">
+          <BookingKV label="Booking Value" value={fmtMoney(state.bookingValue)} />
+          <BookingKV label="Advance Received" value={fmtMoney(state.advanceReceived)} tone="text-emerald-700" />
+          {state.refunded > 0 && <BookingKV label="Refunded" value={`-${fmtMoney(state.refunded)}`} />}
+          {state.deliveredQty > 0 && <BookingKV label="Delivered Qty" value={`${fmtQty(state.deliveredQty)} ${booking.unit || ""}`} />}
+          <BookingKV label="Remaining Qty" value={`${fmtQty(state.remainingQty)} ${booking.unit || ""}`} />
+          <div className="flex justify-between border-t-2 border-slate-900 pt-1.5 mt-1">
+            <span className="font-black uppercase text-blue-700">{t(balanceLabel)}</span>
+            <span className="font-black text-lg text-blue-700">{fmtMoney(state.remainingAmount)}</span>
+          </div>
+        </div>
+      </div>
+      {booking.notes && <div className="text-xs text-slate-600 mb-2"><span className="font-bold">Notes:</span> {booking.notes}</div>}
+      <div className="border border-slate-300 p-2 text-[11px] text-slate-600 mb-8">
+        <div className="font-black uppercase text-slate-700 mb-1">{t("Terms & Conditions")}</div>
+        {terms.map((line, idx) => <div key={idx}>{line}</div>)}
+      </div>
+      <div className="flex justify-between gap-8 text-xs pt-6">
+        <div className="flex-1 border-t border-slate-900 pt-1 text-center">{t("Customer Signature")}</div>
+        <div className="flex-1 border-t border-slate-900 pt-1 text-center">{t("Authorized Signature")}</div>
+      </div>
+    </div>
+  );
+}
+
+function BookingAdvanceReceiptBody({ booking, state, payment, settings, customer }) {
+  const isRefund = payment.kind === "Refund";
+  return (
+    <div className="bg-white text-slate-900 text-sm max-w-md mx-auto" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <BookingPrintHeader settings={settings} title={isRefund ? "Booking Refund" : "Booking Advance Receipt"} />
+      <div className="space-y-1">
+        <BookingKV label="Receipt No." value={paymentReceiptNo(payment)} />
+        <BookingKV label="Booking Ref" value={booking.code} />
+        <BookingKV label="Date" value={fmtDate(payment.date)} />
+        <BookingKV label="Customer" value={booking.customerName} />
+        {(customer?.phone || booking.customerPhone) && <BookingKV label="Phone" value={customer?.phone || booking.customerPhone} />}
+        <BookingKV label="Payment Method" value={payment.method || "Cash"} />
+        <div className="border-t-2 border-slate-900 pt-1.5 mt-1">
+          <BookingKV label={isRefund ? "Refund" : "Amount"} value={fmtMoney(payment.amount)} strong tone="text-blue-700" />
+        </div>
+        <div className="border-t border-slate-200 pt-1.5 mt-1 text-xs space-y-1">
+          <BookingKV label="Booking Value" value={fmtMoney(state.bookingValue)} />
+          <BookingKV label="Advance Received" value={fmtMoney(state.advanceReceived)} />
+          <BookingKV label="Unused Advance" value={fmtMoney(Math.max(0, state.unusedAdvance))} />
+          <BookingKV label={state.remainingAmount > 0.005 ? "Balance Due" : "Fully Paid in Advance"} value={fmtMoney(state.remainingAmount)} />
+        </div>
+        {payment.note && <div className="text-xs text-slate-500 pt-1">{payment.note}</div>}
+      </div>
+      <div className="flex justify-between gap-8 text-xs pt-12">
+        <div className="flex-1 border-t border-slate-900 pt-1 text-center">{t("Customer Signature")}</div>
+        <div className="flex-1 border-t border-slate-900 pt-1 text-center">{t("Authorized Signature")}</div>
+      </div>
+    </div>
+  );
+}
+
+function BookingDeliveriesPrintBody({ booking, state, settings }) {
+  return (
+    <div className="bg-white text-slate-900 text-sm">
+      <BookingPrintHeader settings={settings} title="Delivery History" />
+      <div className="flex justify-between text-xs mb-3">
+        <div><span className="font-black">{booking.code}</span> · {booking.customerName} · {booking.productName}</div>
+        <div>Booked {fmtQty(state.bookedQty)} · Delivered {fmtQty(state.deliveredQty)} · Remaining {fmtQty(state.remainingQty)} {booking.unit}</div>
+      </div>
+      <BookingDeliveriesTable deliveries={state.deliveries} unit={booking.unit} />
+    </div>
+  );
+}
+
+function BookingDeliveriesTable({ deliveries, unit, onOpenInvoice }) {
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+          <th className="px-3 py-2">Date</th><th className="px-3 py-2">Invoice #</th>
+          <th className="px-3 py-2 text-right">Qty</th><th className="px-3 py-2 text-right">Rate</th>
+          <th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2 text-right">Advance Applied</th>
+          <th className="px-3 py-2 text-right">Invoice Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {deliveries.length === 0 && <tr><td colSpan={7} className="px-3 py-4 text-center text-slate-400">No deliveries yet.</td></tr>}
+        {deliveries.map((d) => (
+          <tr key={d.invoiceId} className="border-t border-slate-100">
+            <td className="px-3 py-2 text-slate-500">{fmtDate(d.date)}</td>
+            <td className="px-3 py-2 font-bold text-blue-700">
+              {onOpenInvoice ? <button type="button" className="hover:underline" onClick={() => onOpenInvoice(d.invoiceId)}>{d.invoiceNumber}</button> : d.invoiceNumber}
+            </td>
+            <td className="px-3 py-2 text-right">{fmtQty(d.qty)} {unit}</td>
+            <td className="px-3 py-2 text-right">{fmtMoney(d.rate)}</td>
+            <td className="px-3 py-2 text-right font-bold">{fmtMoney(d.amount)}</td>
+            <td className="px-3 py-2 text-right text-emerald-600">{d.advanceApplied ? fmtMoney(d.advanceApplied) : "-"}</td>
+            <td className="px-3 py-2 text-right">{fmtMoney(d.invoiceTotal)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function BookingReportPrintBody({ settings, title, period, columns, rows, totals }) {
+  return (
+    <div className="bg-white text-slate-900 text-xs">
+      <BookingPrintHeader settings={settings} title={title} />
+      {period && <div className="mb-2 text-slate-500">{period}</div>}
+      <BookingReportTable columns={columns} rows={rows} totals={totals} />
+    </div>
+  );
+}
+
+function BookingReportTable({ columns, rows, totals }) {
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+          {columns.map((c) => (
+            <th key={c.label} className={`px-3 py-2 ${c.type === "money" || c.type === "qty" || c.type === "num" ? "text-right" : ""}`}>{t(c.label)}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.length === 0 && <tr><td colSpan={columns.length} className="px-3 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+        {rows.map((r, idx) => (
+          <tr key={idx} className="border-t border-slate-100">
+            {columns.map((c, ci) => (
+              <td key={ci} className={`px-3 py-2 ${c.type === "money" || c.type === "qty" || c.type === "num" ? "text-right" : ""} ${ci === 0 ? "font-bold" : ""}`}>
+                {c.type === "status" ? <BookingStatusBadge status={r[ci]} /> : bookingFormatCell(c.type, r[ci])}
+              </td>
+            ))}
+          </tr>
+        ))}
+        {rows.length > 0 && totals && (
+          <tr className="border-t-2 border-slate-900 font-black">
+            {columns.map((c, ci) => (
+              <td key={ci} className={`px-3 py-2 ${c.type === "money" ? "text-right" : ""}`}>
+                {ci === 0 ? t("Total") : c.type === "money" ? fmtMoney(totals[ci] || 0) : ""}
+              </td>
+            ))}
+          </tr>
+        )}
+      </tbody>
+    </table>
+  );
+}
+
+/* ---------------- Booking panel inside the existing Invoice form ---------------- */
+
+function InvoiceBookingPanel({ booking, state, products, advanceApplied, setAdvanceApplied, maxAdvance, bookingLineQty }) {
+  const product = (products || []).find((p) => p.id === booking.productId);
+  const over = bookingLineQty > state.remainingQty + BOOKING_EPS;
+  const applied = roundMoney(Number(advanceApplied) || 0);
+  const cell = (label, value, tone) => (
+    <div><span className="text-slate-500">{t(label)}:</span> <span className={`font-bold ${tone || ""}`}>{value}</span></div>
+  );
+  return (
+    <div className="bg-amber-50 border border-amber-200 p-3 mb-3 text-sm" data-booking="invoice-panel">
+      <div className="text-[11px] uppercase tracking-wide font-black text-amber-700 mb-2">{t("Delivery Against Booking")} · {booking.code}</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
+        {cell("Booked Qty", `${fmtQty(state.bookedQty)} ${booking.unit || ""}`)}
+        {cell("Delivered", `${fmtQty(state.deliveredQty)} ${booking.unit || ""}`)}
+        {cell("Available To Deliver", `${fmtQty(state.remainingQty)} ${booking.unit || ""}`)}
+        {cell("Delivering Now", `${fmtQty(bookingLineQty)} ${booking.unit || ""}`, over ? "text-red-600" : "")}
+        {cell("Locked Rate", fmtMoney(state.rate))}
+        {cell("Current Product Rate", product ? fmtMoney(product.price) : "-")}
+        {cell("Unused Advance", fmtMoney(Math.max(0, state.unusedAdvance)), "text-emerald-700")}
+        {cell("Valid Till", fmtDate(booking.expiryDate), state.expired ? "text-red-600" : "")}
+      </div>
+      {over && (
+        <div className="text-xs font-bold text-red-600 mt-2">
+          Only {fmtQty(state.remainingQty)} {booking.unit} remain on this booking. Reduce the booking line quantity (or add the extra as a separate item at the current rate).
+        </div>
+      )}
+      {state.legacyAdvance > 0 && (
+        <div className="text-xs font-bold text-amber-700 mt-2">
+          This older booking has {fmtMoney(state.legacyAdvance)} advance that was never posted to the ledger. An admin can post it from the booking screen; until then it cannot be applied here.
+        </div>
+      )}
+      <div className="flex items-end gap-2 mt-3 flex-wrap">
+        <label className="block">
+          <span className="block text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Advance Applied (Rs)")}</span>
+          <input type="number" step="any" min="0" max={maxAdvance} className={`${inputCls} w-40`} value={advanceApplied} onChange={(e) => setAdvanceApplied(e.target.value)} />
+        </label>
+        <Btn small variant="ghost" onClick={() => setAdvanceApplied(maxAdvance)}>Apply Max</Btn>
+        <div className="text-xs text-slate-500">Max: <span className="font-bold">{fmtMoney(maxAdvance)}</span></div>
+      </div>
+      {applied > maxAdvance + 0.005 && <div className="text-xs font-bold text-red-600 mt-1">Advance applied is more than the allowed maximum ({fmtMoney(maxAdvance)}).</div>}
+      <div className="text-[11px] text-slate-500 mt-2">
+        The advance was already credited to the customer's ledger when it was received. Applying it here only settles this invoice — it is not counted a second time.
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Booking: create form ---------------- */
+
+function BookingCreateForm({ customers, products, onSave, onCancel }) {
+  const firstProduct = products[0];
+  const [paymentId] = useState(() => uid("pay"));
+  const [custSearch, setCustSearch] = useState("");
+  const [form, setForm] = useState({
+    customerId: customers[0]?.id || "",
+    productId: firstProduct?.id || "",
+    customName: "",
+    unit: firstProduct?.unit || "Bag",
+    qty: "",
+    rate: firstProduct ? String(firstProduct.price ?? "") : "",
+    date: todayISO(),
+    advanceAmount: "",
+    advanceMethod: "Cash",
+    notes: "",
+    terms: DEFAULT_BOOKING_TERMS,
+  });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const product = products.find((p) => p.id === form.productId);
+  const selectedCustomer = customers.find((c) => c.id === form.customerId);
+  const qs = custSearch.trim().toLowerCase();
+  const filteredCustomers = customers.filter((c) => !qs || c.name.toLowerCase().includes(qs) || (c.phone || "").includes(qs) || c.id === form.customerId);
+  const qty = roundQty(Number(form.qty) || 0);
+  const rate = roundMoney(Number(form.rate) || 0);
+  const advance = roundMoney(Number(form.advanceAmount) || 0);
+  const value = roundMoney(qty * rate);
+  const remaining = roundMoney(value - advance);
+
+  function pickProduct(productId) {
+    const p = products.find((x) => x.id === productId);
+    setForm((f) => ({ ...f, productId, unit: p ? p.unit : f.unit, rate: p ? String(p.price ?? "") : f.rate }));
+  }
+
+  function submit() {
+    if (busy) return;
+    if (!selectedCustomer) { setError("Customer select karein."); return; }
+    const productName = product ? product.name : form.customName.trim();
+    if (!productName) { setError("Select a product or enter the custom item name."); return; }
+    if (!(qty > 0)) { setError("Booked quantity must be more than 0."); return; }
+    if (!(rate > 0)) { setError("Locked rate must be more than 0."); return; }
+    if (advance < 0) { setError("Advance cannot be negative."); return; }
+    if (advance > value + 0.005) { setError("Advance cannot be more than the booking value."); return; }
+    if (!form.date) { setError("Booking date is required."); return; }
+    setError("");
+    setBusy(true);
+    const ok = onSave({
+      customerId: selectedCustomer.id, productId: product ? product.id : "", productName,
+      unit: String(form.unit || "").trim(), qty, rate, date: form.date,
+      advanceAmount: advance, advanceMethod: form.advanceMethod, advancePaymentId: paymentId,
+      notes: form.notes.trim(), terms: form.terms.trim(),
+    });
+    if (!ok) setBusy(false);
+  }
+
+  return (
+    <div>
+      <Field label="Customer">
+        <input className={`${inputCls} mb-1`} placeholder="Search customer..." value={custSearch} onChange={(e) => setCustSearch(e.target.value)} />
+        <select className={inputCls} value={form.customerId} onChange={(e) => setForm({ ...form, customerId: e.target.value })}>
+          <option value="">Select Customer</option>
+          {filteredCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}{c.phone ? ` — ${c.phone}` : ""}</option>)}
+        </select>
+      </Field>
+      {selectedCustomer && (
+        <div className="text-xs text-slate-500 mb-3">
+          {selectedCustomer.phone ? `Mobile: ${selectedCustomer.phone}` : "No phone saved"}{selectedCustomer.address ? ` · ${selectedCustomer.address}` : ""}
+        </div>
+      )}
+      <Field label="Product">
+        <select className={inputCls} value={form.productId} onChange={(e) => pickProduct(e.target.value)}>
+          <option value="">Custom Item</option>
+          {products.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.unit}) — {fmtMoney(p.price)}</option>)}
+        </select>
+      </Field>
+      {!product && (
+        <Field label="Item name">
+          <input className={inputCls} value={form.customName} onChange={(e) => setForm({ ...form, customName: e.target.value })} />
+        </Field>
+      )}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="Unit">
+          <input list="unit-suggestions" className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
+        </Field>
+        <Field label="Booked Qty">
+          <input type="number" step="any" min="0" className={inputCls} value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} />
+        </Field>
+        <Field label="Locked Rate (Rs/unit)">
+          <input type="number" step="any" min="0" className={inputCls} value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} />
+        </Field>
+      </div>
+      {product && Number(form.rate) !== Number(product.price) && (
+        <div className="text-xs text-amber-700 font-bold -mt-2 mb-3">Current product rate is {fmtMoney(product.price)}; this booking will lock {fmtMoney(rate)}.</div>
+      )}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="Booking Date">
+          <input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+        </Field>
+        <Field label="Advance Received Now (Rs)">
+          <input type="number" step="any" min="0" className={inputCls} value={form.advanceAmount} onChange={(e) => setForm({ ...form, advanceAmount: e.target.value })} />
+        </Field>
+        <Field label="Payment Method">
+          <select className={inputCls} value={form.advanceMethod} onChange={(e) => setForm({ ...form, advanceMethod: e.target.value })}>
+            {BOOKING_PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="Notes">
+        <input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+      </Field>
+      <Field label="Terms">
+        <textarea className={`${inputCls} h-24`} value={form.terms} onChange={(e) => setForm({ ...form, terms: e.target.value })} />
+      </Field>
+
+      <div className="bg-slate-50 border border-slate-200 p-3 text-sm space-y-1 mb-3">
+        <div className="flex justify-between"><span>Total Value (Qty × Rate)</span><span className="font-bold">{fmtMoney(value)}</span></div>
+        <div className="flex justify-between"><span>Advance Received</span><span className="font-bold text-emerald-600">{fmtMoney(advance)}</span></div>
+        <div className="flex justify-between border-t border-slate-300 pt-1"><span className="font-bold">{t("Remaining Amount")}</span><span className="font-black text-red-600">{fmtMoney(remaining)}</span></div>
+        <div className="text-[11px] text-slate-400 pt-1">Valid till: {fmtDate(addOneMonth(form.date || todayISO()))} — the locked rate applies until this date.</div>
+        {advance > 0 && <div className="text-[11px] text-slate-400">The advance is posted to the customer ledger as a credit and a receipt is created.</div>}
+      </div>
+
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2">
+        <Btn onClick={submit} disabled={busy}>{busy ? "Saving..." : "Save Advance Booking"}</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Booking: action dialogs ---------------- */
+
+// type: receive | editAdvance | refund | cancel | renew | rate | details
+function BookingActionForm({ type, booking, state, payment, onSubmit, onCancel }) {
+  const [opId] = useState(() => uid("pay"));
+  const [amount, setAmount] = useState(type === "editAdvance" ? String(payment?.amount ?? "") : "");
+  const [date, setDate] = useState(type === "editAdvance" ? (payment?.date || todayISO()) : todayISO());
+  const [method, setMethod] = useState(type === "editAdvance" ? (payment?.method || "Cash") : "Cash");
+  const [text, setText] = useState("");
+  const [rate, setRate] = useState(String(booking.rate ?? ""));
+  const [notes, setNotes] = useState(booking.notes || "");
+  const [terms, setTerms] = useState(booking.terms || DEFAULT_BOOKING_TERMS);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const unused = Math.max(0, state.unusedAdvance);
+  const oldAmount = Number(payment?.amount) || 0;
+  const limits = {
+    receive: { min: 0, max: state.remainingAmount },
+    editAdvance: { min: roundMoney(Math.max(0, oldAmount - unused)), max: roundMoney(oldAmount + state.remainingAmount) },
+    refund: { min: 0, max: unused },
+    cancel: { min: 0, max: unused },
+  }[type];
+  const amt = roundMoney(Number(amount) || 0);
+  const newRate = roundMoney(Number(rate) || 0);
+  const newExpiry = addOneMonth(todayISO() > (booking.expiryDate || "") ? todayISO() : booking.expiryDate);
+  const newValue = roundMoney(state.deliveredAmount + state.remainingQty * newRate);
+
+  function submit() {
+    if (busy) return;
+    let payload;
+    if (type === "receive" || type === "editAdvance" || type === "refund") {
+      if (!(amt > 0)) { setError("Amount 0 se zyada hona chahiye."); return; }
+      if (amt < limits.min - 0.005 || amt > limits.max + 0.005) { setError(`Amount must be between ${fmtMoney(limits.min)} and ${fmtMoney(limits.max)}.`); return; }
+      if (!date) { setError("Date is required."); return; }
+      if ((type === "refund" || type === "editAdvance") && !text.trim()) { setError("Reason likhna zaroori hai."); return; }
+      payload = { id: opId, amount: amt, date, method, note: text.trim(), reason: text.trim() };
+    } else if (type === "cancel") {
+      if (!text.trim()) { setError("Reason likhna zaroori hai."); return; }
+      if (amt < 0 || amt > limits.max + 0.005) { setError(`Refund cannot be more than ${fmtMoney(limits.max)}.`); return; }
+      payload = { reason: text.trim(), refundAmount: amt, refundMethod: method, refundDate: date || todayISO(), refundId: opId };
+    } else if (type === "renew") {
+      if (!text.trim()) { setError("Reason likhna zaroori hai."); return; }
+      payload = { reason: text.trim() };
+    } else if (type === "rate") {
+      if (!(newRate > 0)) { setError("Rate must be more than 0."); return; }
+      if (newRate === roundMoney(booking.rate)) { setError("New rate is the same as the current locked rate."); return; }
+      if (!text.trim()) { setError("Reason likhna zaroori hai."); return; }
+      payload = { newRate, reason: text.trim() };
+    } else if (type === "details") {
+      payload = { notes: notes.trim(), terms: terms.trim() };
+    }
+    setError("");
+    setBusy(true);
+    const ok = onSubmit(payload);
+    if (ok) onCancel(); else setBusy(false);
+  }
+
+  const showMoney = type === "receive" || type === "editAdvance" || type === "refund" || type === "cancel";
+  return (
+    <div>
+      <div className="bg-slate-50 border border-slate-200 p-3 mb-3 text-sm space-y-1">
+        <BookingKV label="Booking Ref" value={booking.code} />
+        <BookingKV label="Customer" value={booking.customerName} />
+        <BookingKV label="Booking Value" value={fmtMoney(state.bookingValue)} />
+        <BookingKV label="Advance Received" value={fmtMoney(state.advanceReceived)} />
+        <BookingKV label="Advance Applied" value={fmtMoney(state.advanceApplied)} />
+        {state.refunded > 0 && <BookingKV label="Refunded" value={fmtMoney(state.refunded)} />}
+        <BookingKV label={type === "refund" || type === "cancel" ? "Refundable Balance" : "Unused Advance"} value={fmtMoney(unused)} tone="text-emerald-700" />
+        {(type === "receive" || type === "editAdvance") && <BookingKV label="Remaining Amount" value={fmtMoney(state.remainingAmount)} tone="text-red-600" />}
+      </div>
+
+      {type === "cancel" && (
+        <div className="text-xs text-slate-600 mb-3">
+          Delivered quantity ({fmtQty(state.deliveredQty)} {booking.unit}) and its invoices stay exactly as they are. Only the undelivered {fmtQty(state.remainingQty)} {booking.unit} is cancelled.
+          {unused > 0 && " Any unused advance not refunded now stays as a credit in the customer's ledger and can be refunded later."}
+        </div>
+      )}
+      {type === "renew" && (
+        <div className="text-xs text-slate-600 mb-3">
+          Current expiry: <span className="font-bold">{fmtDate(booking.expiryDate)}</span> → {t("New Expiry Date")}: <span className="font-bold text-emerald-700">{fmtDate(newExpiry)}</span>. The locked rate ({fmtMoney(booking.rate)}) stays the same.
+        </div>
+      )}
+      {type === "rate" && (
+        <>
+          <Field label="New Rate (Rs/unit)">
+            <input type="number" step="any" min="0" className={inputCls} value={rate} onChange={(e) => setRate(e.target.value)} autoFocus />
+          </Field>
+          <div className="text-xs text-slate-600 mb-3">
+            Applies only to the undelivered {fmtQty(state.remainingQty)} {booking.unit}. Delivered invoices keep their own rate. Booking value: {fmtMoney(state.bookingValue)} → <span className="font-bold">{fmtMoney(newValue)}</span>. The original rate stays in the rate history.
+          </div>
+        </>
+      )}
+      {type === "details" && (
+        <>
+          <Field label="Notes"><input className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
+          <Field label="Terms"><textarea className={`${inputCls} h-28`} value={terms} onChange={(e) => setTerms(e.target.value)} /></Field>
+        </>
+      )}
+
+      {showMoney && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <Field label={type === "cancel" ? "Refund Amount (Rs)" : "Amount (Rs)"}>
+            <input type="number" step="any" min="0" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus={type !== "cancel"} placeholder={type === "cancel" ? "0" : ""} />
+          </Field>
+          <Field label="Date">
+            <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
+          </Field>
+          <Field label={type === "refund" || type === "cancel" ? "Refund Method" : "Payment Method"}>
+            <select className={inputCls} value={method} onChange={(e) => setMethod(e.target.value)}>
+              {BOOKING_PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
+              {!BOOKING_PAYMENT_METHODS.includes(method) && <option>{method}</option>}
+            </select>
+          </Field>
+        </div>
+      )}
+      {limits && type !== "cancel" && (
+        <div className="text-[11px] text-slate-400 -mt-2 mb-3">Allowed: {fmtMoney(limits.min)} – {fmtMoney(limits.max)}</div>
+      )}
+
+      {type !== "details" && (
+        <Field label={type === "receive" ? "Note (optional)" : type === "cancel" ? "Cancellation Reason" : "Reason"}>
+          <input className={inputCls} value={text} onChange={(e) => setText(e.target.value)} autoFocus={type === "cancel" || type === "renew"} />
+        </Field>
+      )}
+
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2">
+        <Btn variant={type === "cancel" || type === "refund" ? "danger" : "primary"} onClick={submit} disabled={busy}>
+          {busy ? "Saving..." : { receive: "Receive Advance", editAdvance: "Save Changes", refund: "Refund Advance", cancel: "Cancel Booking", renew: "Renew Booking", rate: "Change Rate", details: "Save" }[type]}
+        </Btn>
+        <Btn variant="ghost" onClick={onCancel}>Close</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Booking: detail view ---------------- */
+
+function BookingDetail({ booking, state, customer, settings, products, currentUser, onClose, onConvertToInvoice, onOpenInvoice, onPrint, handlers }) {
+  const [action, setAction] = useState(null); // { type, payment? }
+  const isAdmin = currentUser?.role === "admin";
+  const product = (products || []).find((p) => p.id === booking.productId);
+  const notClosed = state.status !== "Cancelled" && state.status !== "Completed";
+  const history = [...(booking.history || [])].reverse();
+
+  function printReceipt() {
+    onPrint({ title: `Booking-Receipt-${booking.code}`, node: <BookingReceiptBody booking={booking} state={state} settings={settings} customer={customer} /> });
+  }
+  function printPaymentReceipt(p) {
+    onPrint({ title: `Booking-${p.kind === "Refund" ? "Refund" : "Advance"}-${paymentReceiptNo(p)}`, node: <BookingAdvanceReceiptBody booking={booking} state={state} payment={p} settings={settings} customer={customer} /> });
+  }
+  function printDeliveries() {
+    onPrint({ title: `Booking-Deliveries-${booking.code}`, node: <BookingDeliveriesPrintBody booking={booking} state={state} settings={settings} /> });
+  }
+
+  function runAction(payload) {
+    const a = action;
+    if (!a) return false;
+    if (a.type === "receive") return handlers.onReceiveAdvance(booking.id, payload);
+    if (a.type === "editAdvance") return handlers.onEditAdvance(booking.id, a.payment.id, payload);
+    if (a.type === "refund") return handlers.onRefundAdvance(booking.id, payload);
+    if (a.type === "cancel") return handlers.onCancelBooking(booking.id, payload);
+    if (a.type === "renew") return handlers.onRenewBooking(booking.id, payload);
+    if (a.type === "rate") return handlers.onChangeBookingRate(booking.id, payload);
+    if (a.type === "details") return handlers.onUpdateBookingDetails(booking.id, payload);
+    return false;
+  }
+
+  const actionTitles = {
+    receive: "Receive Advance", editAdvance: "Edit Advance", refund: "Refund Advance", cancel: "Cancel Booking",
+    renew: "Renew Booking", rate: "Change Rate", details: "Edit Notes / Terms",
+  };
+
+  return (
+    <Modal title={`Advance Booking ${booking.code}`} onClose={onClose} wide>
+      <div className="flex justify-between items-start gap-3 flex-wrap mb-3">
+        <div>
+          <div className="font-black text-lg text-slate-900">{booking.customerName}</div>
+          <div className="text-xs text-slate-500">{booking.productName}{booking.unit ? ` (${booking.unit})` : ""} · Booked {fmtDate(booking.date)}{booking.createdBy ? ` · by ${booking.createdBy}` : ""}</div>
+        </div>
+        <BookingStatusBadge status={state.status} />
+      </div>
+
+      {state.expired && notClosed && (
+        <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-bold px-3 py-2 mb-3">
+          This booking expired on {fmtDate(booking.expiryDate)}. The locked rate can no longer be used for delivery until an admin renews it. For a market-rate sale, make a normal invoice.
+        </div>
+      )}
+      {state.expiringSoon && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold px-3 py-2 mb-3">
+          Expires {state.daysToExpiry === 0 ? "today" : `in ${state.daysToExpiry} day(s)`} ({fmtDate(booking.expiryDate)}) — {fmtQty(state.remainingQty)} {booking.unit} still undelivered.
+        </div>
+      )}
+      {state.legacyAdvance > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs px-3 py-2 mb-3">
+          <span className="font-bold">Older booking:</span> its advance of {fmtMoney(state.legacyAdvance)} was saved before advances were linked to the ledger, so it is not in the customer's balance yet.
+          Post it only if it was NOT already recorded on the Payments page.
+          {isAdmin && (
+            <button type="button" className="ml-2 font-bold underline" onClick={() => { if (confirm(`Post ${fmtMoney(state.legacyAdvance)} to ${booking.customerName}'s ledger as a booking advance dated ${fmtDate(booking.date)}?`)) handlers.onPostLegacyAdvance(booking.id); }}>{t("Post Old Advance To Ledger")}</button>
+          )}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+        <Stat label="Booked Qty" value={`${fmtQty(state.bookedQty)} ${booking.unit || ""}`} />
+        <Stat label="Delivered" value={`${fmtQty(state.deliveredQty)} ${booking.unit || ""}`} accent="text-emerald-600" />
+        <Stat label="Remaining Qty" value={`${fmtQty(state.remainingQty)} ${booking.unit || ""}`} accent="text-red-600" />
+        <Stat label="Locked Rate" value={fmtMoney(state.rate)} />
+        <Stat label="Booking Value" value={fmtMoney(state.bookingValue)} />
+        <Stat label="Advance Received" value={fmtMoney(state.advanceReceived)} accent="text-emerald-600" />
+        <Stat label="Unused Advance" value={fmtMoney(Math.max(0, state.unusedAdvance))} accent="text-blue-700" />
+        <Stat label="Remaining Amount" value={fmtMoney(state.remainingAmount)} accent="text-red-600" />
+      </div>
+      <div className="text-xs text-slate-500 mb-4 flex flex-wrap gap-x-4 gap-y-1">
+        <span>Valid Till: <span className={`font-bold ${state.expired ? "text-red-600" : "text-slate-700"}`}>{fmtDate(booking.expiryDate)}</span></span>
+        <span>Current Product Rate: <span className="font-bold text-slate-700">{product ? fmtMoney(product.price) : "-"}</span></span>
+        {booking.originalRate != null && Number(booking.originalRate) !== Number(booking.rate) && <span>Original Rate: <span className="font-bold text-slate-700">{fmtMoney(booking.originalRate)}</span></span>}
+        <span>Advance Applied: <span className="font-bold text-slate-700">{fmtMoney(state.advanceApplied)}</span></span>
+        {state.refunded > 0 && <span>Refunded: <span className="font-bold text-slate-700">{fmtMoney(state.refunded)}</span></span>}
+        {booking.cancelReason && <span>Cancelled: <span className="font-bold text-slate-700">{booking.cancelReason}</span>{booking.cancelledBy ? ` (${booking.cancelledBy}, ${fmtDateTime(booking.cancelledAt)})` : ""}</span>}
+      </div>
+
+      <div className="flex gap-2 flex-wrap mb-2">
+        <Btn small onClick={printReceipt}>Print Receipt</Btn>
+        {state.isOpen && <Btn small variant="dark" onClick={() => onConvertToInvoice(booking)}>Convert to Invoice</Btn>}
+        {notClosed && <Btn small variant="ghost" onClick={() => setAction({ type: "receive" })}>Receive Advance</Btn>}
+        <Btn small variant="ghost" onClick={() => setAction({ type: "details" })}>Edit Notes / Terms</Btn>
+        {isAdmin && notClosed && <Btn small variant="ghost" onClick={() => setAction({ type: "renew" })}>Renew Booking</Btn>}
+        {isAdmin && notClosed && state.remainingQty > 0 && <Btn small variant="ghost" onClick={() => setAction({ type: "rate" })}>Change Rate</Btn>}
+        {isAdmin && state.unusedAdvance > 0.005 && <Btn small variant="ghost" onClick={() => setAction({ type: "refund" })}>Refund Advance</Btn>}
+        {isAdmin && notClosed && <Btn small variant="danger" onClick={() => setAction({ type: "cancel" })}>Cancel Booking</Btn>}
+      </div>
+      {!isAdmin && <div className="text-[11px] text-slate-400 mb-4">Renewal, rate change, refund, cancellation and advance edits need an Admin login.</div>}
+
+      <div className="mt-4 border border-slate-200 overflow-x-auto">
+        <div className="px-3 py-2 border-b border-slate-200 flex items-center justify-between">
+          <span className="font-black uppercase text-xs tracking-wide text-slate-500">{t("Delivery History")}</span>
+          {state.deliveries.length > 0 && <button type="button" className="text-xs font-bold text-blue-700 hover:underline" onClick={printDeliveries}>{t("Print Delivery History")}</button>}
+        </div>
+        <BookingDeliveriesTable deliveries={state.deliveries} unit={booking.unit} onOpenInvoice={onOpenInvoice} />
+        {state.legacyClosed && <div className="px-3 py-2 text-[11px] text-slate-400">Older booking — it was marked Completed before delivery tracking existed.</div>}
+      </div>
+
+      <div className="mt-4 border border-slate-200 overflow-x-auto">
+        <div className="px-3 py-2 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">{t("Advance Payments")}</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-3 py-2">Date</th><th className="px-3 py-2">Receipt No.</th><th className="px-3 py-2">Method</th>
+              <th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2">Note</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {state.advancePayments.length === 0 && (
+              <tr><td colSpan={6} className="px-3 py-4 text-center text-slate-400">{state.legacyAdvance > 0 ? `Older advance ${fmtMoney(state.legacyAdvance)} — not posted to ledger.` : "Koi payment record nahi."}</td></tr>
+            )}
+            {state.advancePayments.map((p) => (
+              <tr key={p.id} className="border-t border-slate-100">
+                <td className="px-3 py-2 text-slate-500">{fmtDate(p.date)}</td>
+                <td className="px-3 py-2 font-bold">{paymentReceiptNo(p)}</td>
+                <td className="px-3 py-2 text-slate-500">{p.method}</td>
+                <td className="px-3 py-2 text-right font-bold text-emerald-600">{fmtMoney(p.amount)}</td>
+                <td className="px-3 py-2 text-xs text-slate-500">{p.note || "-"}</td>
+                <td className="px-3 py-2 text-right whitespace-nowrap space-x-2">
+                  <button type="button" className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => printPaymentReceipt(p)}>Receiving</button>
+                  {isAdmin && <button type="button" className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setAction({ type: "editAdvance", payment: p })}>Edit</button>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {state.refunds.length > 0 && (
+        <div className="mt-4 border border-slate-200 overflow-x-auto">
+          <div className="px-3 py-2 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">{t("Refund History")}</div>
+          <table className="w-full text-sm">
+            <tbody>
+              {state.refunds.map((p) => (
+                <tr key={p.id} className="border-t border-slate-100">
+                  <td className="px-3 py-2 text-slate-500">{fmtDate(p.date)}</td>
+                  <td className="px-3 py-2 font-bold">{paymentReceiptNo(p)}</td>
+                  <td className="px-3 py-2 text-slate-500">{p.method}</td>
+                  <td className="px-3 py-2 text-right font-bold text-red-600">-{fmtMoney(p.amount)}</td>
+                  <td className="px-3 py-2 text-xs text-slate-500">{p.note}</td>
+                  <td className="px-3 py-2 text-right"><button type="button" className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => printPaymentReceipt(p)}>Print</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {((booking.rateHistory || []).length > 0 || (booking.renewals || []).length > 0) && (
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          {(booking.rateHistory || []).length > 0 && (
+            <div className="border border-slate-200">
+              <div className="px-3 py-2 border-b border-slate-200 font-black uppercase tracking-wide text-slate-500">{t("Rate History")}</div>
+              {booking.rateHistory.map((r, idx) => (
+                <div key={idx} className="px-3 py-1.5 border-t border-slate-100">
+                  <span className="font-bold">{fmtMoney(r.oldRate)} → {fmtMoney(r.newRate)}</span> · {r.reason}
+                  <div className="text-slate-400">{r.by} · {fmtDateTime(r.at)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {(booking.renewals || []).length > 0 && (
+            <div className="border border-slate-200">
+              <div className="px-3 py-2 border-b border-slate-200 font-black uppercase tracking-wide text-slate-500">{t("Renewal History")}</div>
+              {booking.renewals.map((r, idx) => (
+                <div key={idx} className="px-3 py-1.5 border-t border-slate-100">
+                  <span className="font-bold">{fmtDate(r.from)} → {fmtDate(r.to)}</span> · {r.reason}
+                  <div className="text-slate-400">{r.by} · {fmtDateTime(r.at)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {(booking.notes || booking.terms) && (
+        <div className="mt-4 text-xs text-slate-600 border border-slate-200 p-3 space-y-1">
+          {booking.notes && <div><span className="font-bold">Notes:</span> {booking.notes}</div>}
+          {booking.terms && <div className="whitespace-pre-line"><span className="font-bold">{t("Terms")}:</span>{"\n"}{booking.terms}</div>}
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div className="mt-4">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Booking History")}</div>
+          <div className="border border-slate-200 divide-y divide-slate-100 max-h-48 overflow-y-auto">
+            {history.map((h, idx) => (
+              <div key={idx} className="px-3 py-2 text-xs">
+                <div className="font-bold text-slate-700">{h.action}{h.details ? ` — ${h.details}` : ""}</div>
+                <div className="text-slate-400">{h.by} · {fmtDateTime(h.at)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4 flex justify-end">
+        <Btn variant="ghost" onClick={onClose}>Close</Btn>
+      </div>
+
+      {action && (
+        <Modal title={actionTitles[action.type]} onClose={() => setAction(null)}>
+          <BookingActionForm type={action.type} booking={booking} state={state} payment={action.payment} onSubmit={runAction} onCancel={() => setAction(null)} />
+        </Modal>
+      )}
+    </Modal>
+  );
+}
+
+/* ---------------- Booking: reports ---------------- */
+
+const BOOKING_REPORTS = [
+  ["register", "Booking Register"],
+  ["customer", "Customer-wise Bookings"],
+  ["product", "Product-wise Bookings"],
+  ["advance", "Advance Collection"],
+  ["unused", "Unused Advance Report"],
+  ["pending", "Pending Delivery"],
+  ["expiry", "Expiry Report"],
+  ["cancel", "Cancellation & Refund"],
+];
+
+function buildBookingReport(key, rows, payments, from, to) {
+  const inRange = (d) => (!from || d >= from) && (!to || d <= to);
+  const bookingIds = new Set(rows.map((r) => r.booking.id));
+  const byId = Object.fromEntries(rows.map((r) => [r.booking.id, r]));
+  const ranged = rows.filter((r) => inRange(r.booking.date || ""));
+  const asOf = `As of ${fmtDate(todayISO())}`;
+  const period = `${from ? fmtDate(from) : "Start"} – ${to ? fmtDate(to) : "Today"}`;
+
+  if (key === "register") {
+    return {
+      period: `Booking date: ${period}`,
+      columns: [
+        { label: "Booking Ref" }, { label: "Date", type: "date" }, { label: "Customer" }, { label: "Product" }, { label: "Unit" },
+        { label: "Booked Qty", type: "qty" }, { label: "Delivered", type: "qty" }, { label: "Remaining Qty", type: "qty" },
+        { label: "Locked Rate", type: "money" }, { label: "Booking Value", type: "money" }, { label: "Advance Received", type: "money" },
+        { label: "Unused Advance", type: "money" }, { label: "Valid Till", type: "date" }, { label: "Status", type: "status" },
+      ],
+      rows: ranged.map(({ booking: b, state: s }) => [b.code, b.date, b.customerName, b.productName, b.unit, s.bookedQty, s.deliveredQty, s.remainingQty, s.rate, s.status === "Cancelled" ? 0 : s.bookingValue, s.advanceReceived, Math.max(0, s.unusedAdvance), b.expiryDate, s.status]),
+    };
+  }
+  if (key === "customer") {
+    const map = {};
+    ranged.forEach(({ booking: b, state: s }) => {
+      const m = map[b.customerId] || (map[b.customerId] = { name: b.customerName, count: 0, value: 0, adv: 0, applied: 0, unused: 0, outstanding: 0 });
+      m.count += 1;
+      m.value += s.status === "Cancelled" ? 0 : s.bookingValue;
+      m.adv += s.advanceReceived; m.applied += s.advanceApplied; m.unused += Math.max(0, s.unusedAdvance); m.outstanding += s.outstandingValue;
+    });
+    return {
+      period: `Booking date: ${period}`,
+      columns: [{ label: "Customer" }, { label: "Bookings", type: "num" }, { label: "Booking Value", type: "money" }, { label: "Advance Received", type: "money" }, { label: "Advance Applied", type: "money" }, { label: "Unused Advance", type: "money" }, { label: "Outstanding Booking Value", type: "money" }],
+      rows: Object.values(map).sort((a, b) => b.value - a.value).map((m) => [m.name, m.count, roundMoney(m.value), roundMoney(m.adv), roundMoney(m.applied), roundMoney(m.unused), roundMoney(m.outstanding)]),
+    };
+  }
+  if (key === "product") {
+    const map = {};
+    ranged.forEach(({ booking: b, state: s }) => {
+      const k = `${b.productName}|${b.unit}`;
+      const m = map[k] || (map[k] = { name: b.productName, unit: b.unit, count: 0, qty: 0, delivered: 0, pending: 0, value: 0 });
+      m.count += 1; m.qty += s.bookedQty; m.delivered += s.deliveredQty; m.pending += s.pendingQty;
+      m.value += s.status === "Cancelled" ? 0 : s.bookingValue;
+    });
+    return {
+      period: `Booking date: ${period}`,
+      columns: [{ label: "Product" }, { label: "Unit" }, { label: "Bookings", type: "num" }, { label: "Booked Qty", type: "qty" }, { label: "Delivered", type: "qty" }, { label: "Pending Delivery Qty", type: "qty" }, { label: "Booking Value", type: "money" }],
+      rows: Object.values(map).sort((a, b) => b.value - a.value).map((m) => [m.name, m.unit, m.count, roundQty(m.qty), roundQty(m.delivered), roundQty(m.pending), roundMoney(m.value)]),
+    };
+  }
+  if (key === "advance") {
+    const list = (payments || []).filter((p) => p.bookingId && p.kind !== "Refund" && bookingIds.has(p.bookingId) && inRange(p.date)).sort((a, b) => parseDateValue(a.date) - parseDateValue(b.date));
+    return {
+      period: `Receipt date: ${period}`,
+      columns: [{ label: "Date", type: "date" }, { label: "Receipt No." }, { label: "Booking Ref" }, { label: "Customer" }, { label: "Method" }, { label: "Amount", type: "money" }],
+      rows: list.map((p) => [p.date, paymentReceiptNo(p), p.bookingCode || byId[p.bookingId]?.booking.code, p.customerName, p.method, p.amount]),
+    };
+  }
+  if (key === "unused") {
+    return {
+      period: asOf,
+      columns: [{ label: "Booking Ref" }, { label: "Customer" }, { label: "Advance Received", type: "money" }, { label: "Advance Applied", type: "money" }, { label: "Refunded", type: "money" }, { label: "Unused Advance", type: "money" }, { label: "Status", type: "status" }],
+      rows: rows.filter((r) => r.state.unusedAdvance > 0.005).map(({ booking: b, state: s }) => [b.code, b.customerName, s.advancePosted, s.advanceApplied, s.refunded, s.unusedAdvance, s.status]),
+    };
+  }
+  if (key === "pending") {
+    return {
+      period: asOf,
+      columns: [{ label: "Booking Ref" }, { label: "Customer" }, { label: "Product" }, { label: "Unit" }, { label: "Remaining Qty", type: "qty" }, { label: "Locked Rate", type: "money" }, { label: "Booking Value", type: "money" }, { label: "Unused Advance", type: "money" }, { label: "Valid Till", type: "date" }, { label: "Status", type: "status" }],
+      rows: rows.filter((r) => r.state.pendingQty > BOOKING_EPS).map(({ booking: b, state: s }) => [b.code, b.customerName, b.productName, b.unit, s.pendingQty, s.rate, roundMoney(s.pendingQty * s.rate), Math.max(0, s.unusedAdvance), b.expiryDate, s.status]),
+    };
+  }
+  if (key === "expiry") {
+    return {
+      period: asOf,
+      columns: [{ label: "Booking Ref" }, { label: "Customer" }, { label: "Product" }, { label: "Remaining Qty", type: "qty" }, { label: "Unit" }, { label: "Valid Till", type: "date" }, { label: "Days Left", type: "num" }, { label: "Status", type: "status" }],
+      rows: rows
+        .filter((r) => r.state.pendingQty > BOOKING_EPS && (r.state.isOpen || r.state.status === "Expired"))
+        .sort((a, b) => (a.booking.expiryDate || "").localeCompare(b.booking.expiryDate || ""))
+        .map(({ booking: b, state: s }) => [b.code, b.customerName, b.productName, s.pendingQty, b.unit, b.expiryDate, s.daysToExpiry, s.status]),
+    };
+  }
+  // cancellation & refund events
+  const events = [];
+  rows.forEach(({ booking: b, state: s }) => {
+    if (b.status === "Cancelled") {
+      const d = (b.cancelledAt || "").slice(0, 10) || b.date;
+      if (inRange(d)) events.push([d, "Cancelled", b.code, b.customerName, 0, b.cancelReason || "", b.cancelledBy || ""]);
+    }
+    s.refunds.forEach((p) => {
+      if (inRange(p.date)) events.push([p.date, "Refund", b.code, b.customerName, p.amount, p.note || "", p.createdBy || ""]);
+    });
+  });
+  events.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  return {
+    period,
+    columns: [{ label: "Date", type: "date" }, { label: "Type" }, { label: "Booking Ref" }, { label: "Customer" }, { label: "Amount", type: "money" }, { label: "Reason" }, { label: "By" }],
+    rows: events,
+  };
+}
+
+function BookingReports({ rows, payments, settings, onPrint }) {
+  const [key, setKey] = useState("register");
+  const [from, setFrom] = useState(todayISO().slice(0, 8) + "01");
+  const [to, setTo] = useState(todayISO());
+  const report = buildBookingReport(key, rows, payments, from, to);
+  const title = BOOKING_REPORTS.find(([k]) => k === key)[1];
+  const totals = {};
+  report.columns.forEach((c, ci) => {
+    if (c.type === "money") totals[ci] = roundMoney(report.rows.reduce((s, r) => s + (Number(r[ci]) || 0), 0));
+  });
+  const usesRange = ["register", "customer", "product", "advance", "cancel"].includes(key);
+
+  function exportCsv() {
+    bookingCsvDownload(
+      `${title.replace(/[^A-Za-z0-9]+/g, "_").toLowerCase()}_${todayISO()}.csv`,
+      report.columns.map((c) => c.label),
+      report.rows.map((r) => r.map((v, i) => (report.columns[i].type === "date" ? (v || "") : v)))
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex gap-2 flex-wrap mb-3">
+        {BOOKING_REPORTS.map(([k, label]) => (
+          <Btn key={k} small variant={key === k ? "primary" : "ghost"} onClick={() => setKey(k)}>{label}</Btn>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-end gap-3 mb-3">
+        {usesRange && (
+          <>
+            <Field label="From"><input type="date" className={inputCls} value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
+            <Field label="To"><input type="date" className={inputCls} value={to} onChange={(e) => setTo(e.target.value)} /></Field>
+          </>
+        )}
+        <div className="mb-3 flex gap-2">
+          <Btn variant="dark" onClick={exportCsv}>Export Excel (CSV)</Btn>
+          <Btn variant="ghost" onClick={() => onPrint({ title: title.replace(/\s+/g, "-"), node: <BookingReportPrintBody settings={settings} title={title} period={report.period} columns={report.columns} rows={report.rows} totals={totals} /> })}>Export PDF</Btn>
+        </div>
+      </div>
+      <div className="text-xs text-slate-500 mb-2">{report.period}</div>
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <BookingReportTable columns={report.columns} rows={report.rows} totals={totals} />
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Booking: main page ---------------- */
+
+function Bookings({
+  customers, products, bookings, invoices, payments, settings, currentUser, branches,
+  onCreateAdvanceBooking, onConvertToInvoice, onOpenInvoice,
+  onReceiveAdvance, onEditAdvance, onRefundAdvance, onCancelBooking, onRenewBooking,
+  onChangeBookingRate, onUpdateBookingDetails, onPostLegacyAdvance,
+}) {
+  const [tab, setTab] = useState("bookings");
+  const [showForm, setShowForm] = useState(false);
+  const [detailId, setDetailId] = useState(null);
+  const [printDoc, setPrintDoc] = useState(null);
+  const [q, setQ] = useState("");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [productFilter, setProductFilter] = useState("All");
+  const [branchFilter, setBranchFilter] = useState("All");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [expFrom, setExpFrom] = useState("");
+  const [expTo, setExpTo] = useState("");
+
+  const rows = useMemo(
+    () => (bookings || []).map((b) => ({ booking: b, state: computeBookingState(b, invoices, payments) })),
+    [bookings, invoices, payments]
+  );
+
+  // Print one document at a time through the app's existing print-area rule.
+  useEffect(() => {
+    if (!printDoc) return undefined;
+    const prevTitle = document.title;
+    const done = () => { window.removeEventListener("afterprint", done); setPrintDoc(null); };
+    const raf = requestAnimationFrame(() => {
+      if (printDoc.title) document.title = printDoc.title;
+      window.addEventListener("afterprint", done);
+      window.print();
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("afterprint", done);
+      document.title = prevTitle;
+    };
+  }, [printDoc]);
+
+  const cards = useMemo(() => {
+    const c = { active: 0, value: 0, advance: 0, unused: 0, outstanding: 0, pending: [], soon: 0, expired: 0, completed: 0, cancelled: 0 };
+    rows.forEach(({ booking: b, state: s }) => {
+      if (s.isOpen) c.active += 1;
+      if (s.status !== "Cancelled") c.value += s.bookingValue;
+      c.advance += s.advanceReceived;
+      c.unused += Math.max(0, s.unusedAdvance);
+      c.outstanding += s.outstandingValue;
+      c.pending.push({ qty: s.pendingQty, unit: b.unit });
+      if (s.expiringSoon) c.soon += 1;
+      if (s.status === "Expired") c.expired += 1;
+      if (s.status === "Completed") c.completed += 1;
+      if (s.status === "Cancelled") c.cancelled += 1;
+    });
+    return c;
+  }, [rows]);
+
+  const productNames = Array.from(new Set(rows.map((r) => r.booking.productName).filter(Boolean))).sort();
+  const showBranchFilter = currentUser?.role === "admin" && (branches || []).length > 1;
+  const qs = q.trim().toLowerCase();
+  const filtered = rows
+    .filter(({ booking: b, state: s }) => {
+      if (qs && !(`${b.code} ${b.customerName} ${b.productName} ${b.customerPhone || ""}`.toLowerCase().includes(qs))) return false;
+      if (statusFilter === "Expiring Soon" ? !s.expiringSoon : statusFilter !== "All" && s.status !== statusFilter) return false;
+      if (productFilter !== "All" && b.productName !== productFilter) return false;
+      if (showBranchFilter && branchFilter !== "All" && (b.branchId || "") !== branchFilter) return false;
+      if (dateFrom && b.date < dateFrom) return false;
+      if (dateTo && b.date > dateTo) return false;
+      if (expFrom && (b.expiryDate || "") < expFrom) return false;
+      if (expTo && (b.expiryDate || "") > expTo) return false;
+      return true;
+    })
+    .sort((a, b) => parseDateValue(b.booking.date) - parseDateValue(a.booking.date) || String(b.booking.code).localeCompare(String(a.booking.code)));
+
+  const detailRow = detailId ? rows.find((r) => r.booking.id === detailId) : null;
+  const detailCustomer = detailRow ? customers.find((c) => c.id === detailRow.booking.customerId) : null;
+  const productRate = (b) => (products || []).find((p) => p.id === b.productId)?.price;
+  const soonRows = rows.filter((r) => r.state.expiringSoon);
+
+  function handleCreate(data) {
+    const created = onCreateAdvanceBooking(data);
+    if (!created) return false;
+    setShowForm(false);
+    setDetailId(created.id);
+    return true;
+  }
+
+  const handlers = { onReceiveAdvance, onEditAdvance, onRefundAdvance, onCancelBooking, onRenewBooking, onChangeBookingRate, onUpdateBookingDetails, onPostLegacyAdvance };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Advance Booking</h2>
+        <div className="flex gap-2 flex-wrap">
+          <Btn small variant={tab === "bookings" ? "primary" : "ghost"} onClick={() => setTab("bookings")}>Advance Booking Dashboard</Btn>
+          <Btn small variant={tab === "reports" ? "primary" : "ghost"} onClick={() => setTab("reports")}>Booking Reports</Btn>
+          <Btn onClick={() => setShowForm(true)} disabled={customers.length === 0}>+ New Advance Booking</Btn>
+        </div>
+      </div>
+      <div className="text-xs text-slate-400 mb-4 max-w-3xl">
+        Customer advance de kar rate lock kara sakta hai — booking ke 1 mahine ke andar wahi rate milega. Advance customer ledger mein credit hota hai, har delivery ki alag invoice banti hai, aur remaining qty / unused advance apne aap update hote hain.
+      </div>
+
+      {tab === "reports" ? (
+        <BookingReports rows={rows} payments={payments} settings={settings} onPrint={setPrintDoc} />
+      ) : (
+        <>
+          {soonRows.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 p-3 mb-4 text-sm cursor-pointer hover:bg-amber-100" onClick={() => setStatusFilter("Expiring Soon")}>
+              <div className="text-[11px] uppercase tracking-wide font-black text-amber-700 mb-1">{t("Expiring Soon")} ({BOOKING_EXPIRY_WARN_DAYS} days)</div>
+              <div className="flex flex-wrap gap-x-6 gap-y-1">
+                {soonRows.map(({ booking: b, state: s }) => (
+                  <div key={b.id}><span className="font-bold">{b.code}</span> {b.customerName} — {fmtQty(s.remainingQty)} {b.unit} · {fmtDate(b.expiryDate)}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-3 mb-4">
+            <Stat label="Active Bookings" value={cards.active} />
+            <Stat label="Total Booked Value" value={fmtMoney(cards.value)} />
+            <Stat label="Total Advance Received" value={fmtMoney(cards.advance)} accent="text-emerald-600" />
+            <Stat label="Unused Advance Balance" value={fmtMoney(cards.unused)} accent="text-blue-700" />
+            <Stat label="Outstanding Booking Value" value={fmtMoney(cards.outstanding)} accent="text-red-600" />
+          </div>
+          <div className="flex flex-wrap gap-3 mb-6">
+            <Stat label="Pending Delivery Qty" value={bookingQtyByUnit(cards.pending)} />
+            <Stat label="Expiring Soon" value={cards.soon} accent="text-amber-600" />
+            <Stat label="Expired Bookings" value={cards.expired} accent="text-red-600" />
+            <Stat label="Completed Bookings" value={cards.completed} accent="text-emerald-600" />
+            <Stat label="Cancelled Bookings" value={cards.cancelled} accent="text-slate-500" />
+          </div>
+
+          <div className="flex flex-wrap gap-2 mb-3 items-end">
+            <input className={`${inputCls} max-w-xs`} placeholder="Search booking # / customer / product..." value={q} onChange={(e) => setQ(e.target.value)} />
+            <select className={`${inputCls} max-w-[180px]`} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="All">All Status</option>
+              {BOOKING_STATUS_LIST.map((s) => <option key={s} value={s}>{s}</option>)}
+              <option value="Expiring Soon">Expiring Soon</option>
+            </select>
+            <select className={`${inputCls} max-w-[180px]`} value={productFilter} onChange={(e) => setProductFilter(e.target.value)}>
+              <option value="All">All Products</option>
+              {productNames.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+            {showBranchFilter && (
+              <select className={`${inputCls} max-w-[180px]`} value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
+                <option value="All">All Branches</option>
+                {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
+            )}
+            <label className="text-[10px] uppercase font-bold text-slate-500">{t("Booking Date From")}<input type="date" className={`${inputCls} block`} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} /></label>
+            <label className="text-[10px] uppercase font-bold text-slate-500">{t("Booking Date To")}<input type="date" className={`${inputCls} block`} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></label>
+            <label className="text-[10px] uppercase font-bold text-slate-500">{t("Expiry From")}<input type="date" className={`${inputCls} block`} value={expFrom} onChange={(e) => setExpFrom(e.target.value)} /></label>
+            <label className="text-[10px] uppercase font-bold text-slate-500">{t("Expiry To")}<input type="date" className={`${inputCls} block`} value={expTo} onChange={(e) => setExpTo(e.target.value)} /></label>
+          </div>
+
+          <div className="bg-white border border-slate-200 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+                <th className="px-3 py-2">Ref</th><th className="px-3 py-2">Customer</th><th className="px-3 py-2">Item</th>
+                <th className="px-3 py-2 text-right">Booked</th><th className="px-3 py-2 text-right">Delivered</th><th className="px-3 py-2 text-right">Remaining</th>
+                <th className="px-3 py-2 text-right">Locked Rate</th><th className="px-3 py-2 text-right">Booking Value</th>
+                <th className="px-3 py-2 text-right">Advance</th><th className="px-3 py-2 text-right">Unused Advance</th>
+                <th className="px-3 py-2">Valid Till</th><th className="px-3 py-2">Status</th><th></th>
+              </tr></thead>
+              <tbody>
+                {filtered.length === 0 && <tr><td colSpan={13} className="px-4 py-6 text-center text-slate-400">Koi advance booking nahi.</td></tr>}
+                {filtered.map(({ booking: b, state: s }) => {
+                  const current = productRate(b);
+                  return (
+                    <tr key={b.id} className={`border-t border-slate-100 hover:bg-slate-50 ${s.status === "Cancelled" ? "opacity-60" : ""}`}>
+                      <td className="px-3 py-2 font-black text-blue-700 cursor-pointer hover:underline" onClick={() => setDetailId(b.id)}>{b.code || "-"}<div className="text-[10px] font-normal text-slate-400">{fmtDate(b.date)}</div></td>
+                      <td className="px-3 py-2 font-bold">{b.customerName}</td>
+                      <td className="px-3 py-2">{b.productName || "-"} {b.unit ? <span className="text-slate-400">({b.unit})</span> : ""}</td>
+                      <td className="px-3 py-2 text-right">{fmtQty(s.bookedQty)}</td>
+                      <td className="px-3 py-2 text-right text-emerald-600">{fmtQty(s.deliveredQty)}</td>
+                      <td className="px-3 py-2 text-right font-bold text-red-600">{fmtQty(s.remainingQty)}</td>
+                      <td className="px-3 py-2 text-right font-bold">
+                        {fmtMoney(s.rate)}
+                        {current != null && Number(current) !== Number(s.rate) && <div className="text-[10px] font-normal text-slate-400">Now {fmtMoney(current)}</div>}
+                      </td>
+                      <td className="px-3 py-2 text-right">{fmtMoney(s.bookingValue)}</td>
+                      <td className="px-3 py-2 text-right text-emerald-600 font-bold">{fmtMoney(s.advanceReceived)}</td>
+                      <td className="px-3 py-2 text-right text-blue-700 font-bold">{fmtMoney(Math.max(0, s.unusedAdvance))}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {fmtDate(b.expiryDate)}
+                        {s.expiringSoon && <div className="text-[10px] font-bold text-amber-600 uppercase">{s.daysToExpiry === 0 ? "Today" : `${s.daysToExpiry} days left`}</div>}
+                      </td>
+                      <td className="px-3 py-2"><BookingStatusBadge status={s.status} /></td>
+                      <td className="px-3 py-2 text-right whitespace-nowrap space-x-2">
+                        <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setDetailId(b.id)}>View</button>
+                        {s.isOpen && <button className="text-xs font-bold text-blue-700 hover:underline" onClick={() => onConvertToInvoice(b)}>Convert to Invoice</button>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {showForm && (
+        <Modal title="New Advance Booking" onClose={() => setShowForm(false)} wide>
+          <BookingCreateForm customers={customers} products={products} onSave={handleCreate} onCancel={() => setShowForm(false)} />
+        </Modal>
+      )}
+
+      {detailRow && (
+        <BookingDetail
+          booking={detailRow.booking} state={detailRow.state} customer={detailCustomer}
+          settings={settings} products={products} currentUser={currentUser}
+          onClose={() => setDetailId(null)}
+          onConvertToInvoice={(b) => { setDetailId(null); onConvertToInvoice(b); }}
+          onOpenInvoice={onOpenInvoice ? (id) => { setDetailId(null); onOpenInvoice(id); } : null}
+          onPrint={setPrintDoc}
+          handlers={handlers}
+        />
+      )}
+
+      {printDoc && (
+        <div id="print-booking" className="print-area" style={{ display: "none" }}>
+          {printDoc.node}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /* ---------------- Orders (Daily Call Orders) ---------------- */
 
@@ -5359,30 +6846,18 @@ function Leads({ leads, saveLead, deleteLead }) {
 
 /* ---------------- Products ---------------- */
 
-function Products({ products, saveProduct, deleteProduct, cementState, onOpenStock }) {
+function Products({ products, saveProduct, deleteProduct }) {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
-  const emptyForm = { name: "", unit: "Bag", price: 0, isCement: false, brand: "", minStockLevel: "", minStockUnit: "Ton" };
-  const [form, setForm] = useState(emptyForm);
-  const cs = cementState?.cs;
+  const [form, setForm] = useState({ name: "", unit: "Bag", price: 0 });
 
-  function openNew() { setEditing(null); setForm(emptyForm); setShowForm(true); }
-  function openEdit(p) { setEditing(p); setForm({ ...emptyForm, ...p }); setShowForm(true); }
+  function openNew() { setEditing(null); setForm({ name: "", unit: "Bag", price: 0 }); setShowForm(true); }
+  function openEdit(p) { setEditing(p); setForm(p); setShowForm(true); }
 
   function submit() {
     if (!form.name.trim()) { alert("Product ka naam zaroori hai."); return; }
-    const clean = { ...form, price: Number(form.price) };
-    // Cement fields are only stored on cement products, so other products stay exactly as before.
-    if (form.isCement) {
-      clean.isCement = true;
-      clean.brand = (form.brand || "").trim();
-      clean.minStockLevel = Number(form.minStockLevel) || 0;
-      clean.minStockUnit = cementUnitLabel(cementUnitKind(form.minStockUnit));
-    } else {
-      delete clean.isCement; delete clean.brand; delete clean.minStockLevel; delete clean.minStockUnit;
-    }
-    if (editing) saveProduct({ ...editing, ...clean, ...(!form.isCement && editing.isCement ? { isCement: false } : {}) });
-    else saveProduct({ id: uid("prod"), ...clean });
+    if (editing) saveProduct({ ...editing, ...form, price: Number(form.price) });
+    else saveProduct({ id: uid("prod"), ...form, price: Number(form.price) });
     setShowForm(false);
   }
 
@@ -5395,36 +6870,21 @@ function Products({ products, saveProduct, deleteProduct, cementState, onOpenSto
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-            <th className="px-4 py-2">Product Name</th><th className="px-4 py-2">Unit</th><th className="px-4 py-2 text-right">Rate</th>
-            <th className="px-4 py-2">{t("Cement Stock")}</th><th></th>
+            <th className="px-4 py-2">Product Name</th><th className="px-4 py-2">Unit</th><th className="px-4 py-2 text-right">Rate</th><th></th>
           </tr></thead>
           <tbody>
-            {products.length === 0 && <tr><td colSpan={5} className="px-4 py-6 text-center text-slate-400">Koi product nahi.</td></tr>}
-            {products.map((p) => {
-              const s = p.isCement ? cementState?.products?.[p.id] : null;
-              return (
-                <tr key={p.id} className="border-t border-slate-100">
-                  <td className="px-4 py-2 font-bold">{p.name}{p.isCement && p.brand ? <span className="text-xs text-slate-500 font-normal"> — {p.brand}</span> : null}</td>
-                  <td className="px-4 py-2 text-slate-500">{p.unit}</td>
-                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.price)}</td>
-                  <td className="px-4 py-2 text-xs">
-                    {!p.isCement ? <span className="text-slate-300">—</span> : !s?.tracked ? (
-                      <button className="font-bold text-blue-700 underline" onClick={onOpenStock}>{t("Set opening stock")}</button>
-                    ) : (
-                      <button className="text-left" onClick={onOpenStock}>
-                        <span className={`font-bold ${s.low ? "text-red-600" : "text-emerald-700"}`}>{t("Available")} {fmtTons(s.availableKg)}</span>
-                        <span className="text-slate-500"> · {fmtBags(s.availableKg, cs)}</span>
-                        {s.low && <span className="ml-1 font-black text-red-600 uppercase">{t("Low")}</span>}
-                      </button>
-                    )}
-                  </td>
-                  <td className="px-4 py-2 text-right whitespace-nowrap">
-                    <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => openEdit(p)}>Edit</button>
-                    <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete ${p.name}?`)) deleteProduct(p.id); }}>Delete</button>
-                  </td>
-                </tr>
-              );
-            })}
+            {products.length === 0 && <tr><td colSpan={4} className="px-4 py-6 text-center text-slate-400">Koi product nahi.</td></tr>}
+            {products.map((p) => (
+              <tr key={p.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-bold">{p.name}</td>
+                <td className="px-4 py-2 text-slate-500">{p.unit}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.price)}</td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => openEdit(p)}>Edit</button>
+                  <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete ${p.name}?`)) deleteProduct(p.id); }}>Delete</button>
+                </td>
+              </tr>
+            ))}
           </tbody>
         </table>
       </div>
@@ -5435,24 +6895,6 @@ function Products({ products, saveProduct, deleteProduct, cementState, onOpenSto
             <input list="unit-suggestions" className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
           </Field>
           <Field label="Rate / Unit"><input type="number" className={inputCls} value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></Field>
-          <label className="flex items-center gap-2 text-sm font-bold mb-3">
-            <input type="checkbox" checked={!!form.isCement} onChange={(e) => setForm({ ...form, isCement: e.target.checked })} data-cement="is-cement" />
-            {t("Cement product (track stock in tons and bags)")}
-          </label>
-          {form.isCement && (
-            <div className="border border-slate-200 bg-slate-50 p-3 mb-3">
-              <Field label="Brand"><input className={inputCls} value={form.brand} onChange={(e) => setForm({ ...form, brand: e.target.value })} data-cement="brand" /></Field>
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="Minimum Stock Level"><input type="number" step="any" className={inputCls} value={form.minStockLevel} onChange={(e) => setForm({ ...form, minStockLevel: e.target.value })} data-cement="min-stock" /></Field>
-                <Field label="Minimum Unit">
-                  <select className={inputCls} value={form.minStockUnit} onChange={(e) => setForm({ ...form, minStockUnit: e.target.value })}>
-                    <option value="Ton">{t("Metric Tons")}</option><option value="Bag">{t("Bags")}</option>
-                  </select>
-                </Field>
-              </div>
-              <div className="text-[11px] text-slate-500">{t("Unit should be Bag or Ton. Opening stock and purchases are entered in Cement Stock.")}</div>
-            </div>
-          )}
           <div className="flex gap-2"><Btn onClick={submit}>Save Product</Btn><Btn variant="ghost" onClick={() => setShowForm(false)}>Cancel</Btn></div>
         </Modal>
       )}
@@ -5617,7 +7059,7 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
   const inRange = (d) => d >= from && d <= to;
 
   const salesInRange = invoices.filter((i) => inRange(i.date) && i.docStatus !== "Cancelled").reduce((s, i) => s + i.total, 0);
-  const collectedInRange = payments.filter((p) => inRange(p.date)).reduce((s, p) => s + p.amount, 0);
+  const collectedInRange = payments.filter((p) => inRange(p.date)).reduce((s, p) => s + (p.kind === "Refund" ? -p.amount : p.amount), 0);
   const totalInvoices = invoices.filter((i) => inRange(i.date)).length;
   const totalOrders = orders.filter((o) => inRange(o.date)).length;
   const totalReturnAmount = returns.filter((r) => inRange(r.date) && r.status !== "Deleted").reduce((s, r) => s + r.amount, 0);
@@ -6201,7 +7643,6 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState(null);
   const [page, setPage] = useState("dashboard");
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [prefill, setPrefill] = useState(null);
   const [focusCustomerId, setFocusCustomerId] = useState(null);
   const [focusInvoiceId, setFocusInvoiceId] = useState(null);
@@ -6222,11 +7663,6 @@ function App() {
   const [drivers, setDrivers] = useState([]);
   const [offers, setOffers] = useState([]);
   const [bookings, setBookings] = useState([]);
-  // Cement stock module
-  const [stockMovements, setStockMovements] = useState([]);
-  const [bookingDeliveries, setBookingDeliveries] = useState([]);
-  const [cementSettings, setCementSettings] = useState(CEMENT_DEFAULT_SETTINGS);
-  const [cementLoadError, setCementLoadError] = useState("");
   const [orders, setOrders] = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [branches, setBranches] = useState(DEFAULT_BRANCHES);
@@ -6245,7 +7681,7 @@ function App() {
       const [
         u, c, inv, pay, ret, exch, cn, prom, tr, adj,
         ld, prod, drv, off, bk, ord, set, br, aud,
-        cAgents, cRules, cTxns, cPays, cementSet, cementData,
+        cAgents, cRules, cTxns, cPays,
       ] = await Promise.all([
         storeGet("ct-users", DEFAULT_USERS),
         storeGet("ct-customers", []),
@@ -6270,8 +7706,6 @@ function App() {
         storeGet("ct-commissionrules", []),
         storeGet("ct-commissiontransactions", []),
         storeGet("ct-commissionpayments", []),
-        storeGet(CEMENT_SETTINGS_KEY, {}),
-        cementLoadAll(),
       ]);
       if (cancelled) return;
       setUsers(u); setCustomers(c); setInvoices(inv); setPayments(pay); setReturns(ret);
@@ -6279,7 +7713,6 @@ function App() {
       setLeads(ld); setProducts(prod); setDrivers(drv); setOffers(off); setBookings(bk); setOrders(ord);
       setSettings({ ...DEFAULT_SETTINGS, ...set }); setBranches(br); setAuditLog(aud);
       setCommissionAgents(cAgents); setCommissionRules(cRules); setCommissionTransactions(cTxns); setCommissionPayments(cPays);
-      setCementSettings(cementSettingsOf(cementSet)); setStockMovements(cementData.movements); setBookingDeliveries(cementData.deliveries); setCementLoadError(cementData.error);
       setLoading(false);
     })();
     return () => { cancelled = true; };
@@ -6297,28 +7730,18 @@ function App() {
       "ct-settings": (v) => setSettings({ ...DEFAULT_SETTINGS, ...v }), "ct-branches": setBranches, "ct-auditlog": setAuditLog,
       "ct-commissionagents": setCommissionAgents, "ct-commissionrules": setCommissionRules,
       "ct-commissiontransactions": setCommissionTransactions, "ct-commissionpayments": setCommissionPayments,
-      [CEMENT_SETTINGS_KEY]: (v) => setCementSettings(cementSettingsOf(v)),
     };
     const channel = supabase
       .channel("kv_store_changes")
       .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, (payload) => {
         const row = payload.new || payload.old;
         if (!row) return;
-        // Cement stock movements / deliveries are one row each.
-        const rowKey = String(row.key || "");
-        if (rowKey.startsWith(CEMENT_MV_PREFIX)) { if (payload.new?.value) setStockMovements((prev) => cementUpsertById(prev, payload.new.value)); return; }
-        if (rowKey.startsWith(CEMENT_DLV_PREFIX)) { if (payload.new?.value) setBookingDeliveries((prev) => cementUpsertById(prev, payload.new.value)); return; }
         const setter = setterByKey[row.key];
         if (setter && payload.new) setter(payload.new.value);
       })
       .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, []);
-
-  // Whole cement stock picture, recalculated from the source records.
-  const cementState = useMemo(() => computeCementState({
-    products, movements: stockMovements, deliveries: bookingDeliveries, bookings, invoices, returns, exchanges, payments, cementSettings, today: todayISO(),
-  }), [products, stockMovements, bookingDeliveries, bookings, invoices, returns, exchanges, payments, cementSettings]);
 
   const persist = {
     users: (v) => { setUsers(v); storeSet("ct-users", v); },
@@ -6441,6 +7864,17 @@ function App() {
 
   /* ---------- Invoices ---------- */
   function saveInvoice(inv) {
+    if (invoices.some((i) => i.id === inv.id)) return; // duplicate submit
+    const bookingError = validateBookingInvoice(inv, null, bookings, invoices, payments);
+    if (bookingError) { alert(bookingError); return; }
+    if (inv.fromBookingId && inv.bookingQty != null) {
+      const b = bookings.find((x) => x.id === inv.fromBookingId);
+      if (b) {
+        commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Delivery Invoiced",
+          `${inv.number}: ${fmtQty(inv.bookingQty)} ${b.unit || ""} @ ${fmtMoney(inv.bookingRate)}${Number(inv.advanceApplied) > 0 ? ` · advance applied ${fmtMoney(inv.advanceApplied)}` : ""}`)]));
+      }
+      logAudit("Booking Delivery Invoiced", inv.bookingRef || inv.fromBookingId, `${inv.number} — ${fmtQty(inv.bookingQty)} ${b?.unit || ""}`);
+    }
     persist.invoices([...invoices, inv]);
     persist.settings({ ...settings, invoiceCounter: settings.invoiceCounter + 1 });
     if (inv.paymentReceived > 0) {
@@ -6454,6 +7888,8 @@ function App() {
   }
 
   function updateInvoice(inv, original) {
+    const bookingError = validateBookingInvoice(inv, original, bookings, invoices, payments);
+    if (bookingError) { alert(bookingError); return; }
     const editEntry = {
       action: "Edited", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString(),
       previousValues: { total: original.total, status: original.status },
@@ -6542,8 +7978,8 @@ function App() {
           ? invoices.find((i) => i.number === current.note.replace("Against ", "").trim())
           : null);
       if (linkedInv && !isInvoiceCancelled(linkedInv) && linkedInv.customerType !== "Cash") {
-        const balanceDue = roundMoney((Number(linkedInv.total) || 0) - newAmount);
-        const status = balanceDue <= 0 ? "Paid" : newAmount > 0 ? "Partial" : "Unpaid";
+        const balanceDue = roundMoney((Number(linkedInv.total) || 0) - newAmount - (Number(linkedInv.advanceApplied) || 0));
+        const status = balanceDue <= 0 ? "Paid" : (newAmount > 0 || Number(linkedInv.advanceApplied) > 0) ? "Partial" : "Unpaid";
         const invEditEntry = {
           action: "Payment Edited", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString(),
           previousValues: { paymentReceived: linkedInv.paymentReceived, status: linkedInv.status },
@@ -6565,7 +8001,7 @@ function App() {
   /* ---------- Sales Return / Exchange ---------- */
   function onCreateReturn(data) {
     const returnCode = "RET-" + String(settings.returnCounter).padStart(4, "0");
-    const record = { id: uid("ret"), code: returnCode, status: "Active", createdAt: new Date().toISOString(), ...data };
+    const record = { id: uid("ret"), code: returnCode, status: "Active", ...data };
     const nextReturns = [...returns, record];
     persist.returns(nextReturns);
 
@@ -6580,7 +8016,7 @@ function App() {
   }
 
   function onDeleteReturn(record, reason) {
-    const updated = { ...record, status: "Deleted", deleteReason: reason, deletedAt: new Date().toISOString() };
+    const updated = { ...record, status: "Deleted", deleteReason: reason };
     const nextReturns = returns.map((r) => (r.id === record.id ? updated : r));
     persist.returns(nextReturns);
     const linkedCn = creditNotes.find((cn) => cn.returnId === record.id);
@@ -6591,7 +8027,7 @@ function App() {
 
   function onCreateExchange(data) {
     const code = "EX-" + String(settings.exchangeCounter).padStart(4, "0");
-    const record = { id: uid("ex"), code, status: "Active", createdAt: new Date().toISOString(), ...data };
+    const record = { id: uid("ex"), code, status: "Active", ...data };
     const nextExchanges = [...exchanges, record];
     persist.exchanges(nextExchanges);
     persist.settings({ ...settings, exchangeCounter: settings.exchangeCounter + 1 });
@@ -6600,7 +8036,7 @@ function App() {
   }
 
   function onDeleteExchange(record, reason) {
-    const updated = { ...record, status: "Deleted", deleteReason: reason, deletedAt: new Date().toISOString() };
+    const updated = { ...record, status: "Deleted", deleteReason: reason };
     const nextExchanges = exchanges.map((ex) => (ex.id === record.id ? updated : ex));
     persist.exchanges(nextExchanges);
     recalcCommissionAfterReturnOrExchange(record.invoiceId, returns, nextExchanges);
@@ -6658,242 +8094,216 @@ function App() {
   }
 
   /* ---------- Bookings / Orders ---------- */
-  function saveBooking(b) { persist.bookings(bookings.map((x) => (x.id === b.id ? b : x))); }
-  function onBookingFulfilled(id) { persist.bookings(bookings.map((b) => (b.id === id ? { ...b, status: "Completed" } : b))); }
-
-  /* ---------- Cement stock + advance booking (see CEMENT STOCK module) ---------- */
-  const cementUser = currentUser?.name || currentUser?.username || "";
-
-  function saveCementSettings(next) {
-    const v = cementSettingsOf(next);
-    setCementSettings(v);
-    storeSet(CEMENT_SETTINGS_KEY, v);
-    logAudit("Cement Settings Changed", "", `Bag ${v.bagWeightKg} kg`);
+  /* ---------- Advance Booking (upgraded — see "ADVANCE BOOKING UPGRADE v2") ---------- */
+  function bookingActor() { return currentUser?.name || currentUser?.username || "System"; }
+  function bookingIsAdmin() { return currentUser?.role === "admin"; }
+  function bookingHistoryEntry(action, details) {
+    return { action, details: details || "", by: bookingActor(), at: new Date().toISOString() };
+  }
+  function bookingWithHistory(b, entries, patch) {
+    return { ...b, ...(patch || {}), history: [...(b.history || []), ...entries] };
+  }
+  function commitBooking(updated) {
+    persist.bookings(bookings.map((x) => (x.id === updated.id ? updated : x)));
+  }
+  function findBookingOrAlert(bookingId) {
+    const b = bookings.find((x) => x.id === bookingId);
+    if (!b) alert("Booking not found. Please refresh and try again.");
+    return b || null;
+  }
+  function bookingPaymentRecord(b, { id, amount, date, method, note, kind }) {
+    const isRefund = kind === "Refund";
+    return {
+      id: id || uid("pay"), customerId: b.customerId, customerName: b.customerName,
+      date: date || todayISO(), amount: roundMoney(amount), method: method || "Cash",
+      note: `${isRefund ? "Refund" : "Advance"} for Booking ${b.code}${note ? " — " + note : ""}`,
+      bookingId: b.id, bookingCode: b.code, promiseId: "",
+      branchId: b.branchId || currentUser?.branchId || "",
+      ...(isRefund ? { kind: "Refund" } : {}),
+      createdBy: bookingActor(), createdAt: new Date().toISOString(),
+    };
   }
 
-  async function cementSaveMovement(record) {
-    if (cementLoadError) return { error: t("Stock records are not loaded. Reload the page and try again.") };
-    const s = cementState.products[record.productId];
-    if (!s) return { error: t("Select a cement product.") };
-    const needs = record.kind === "Opening" || record.kind === "Purchase" ? "stockIn" : "adjust";
-    if (!cementCan(currentUser, cementSettings, needs)) return { error: t("You do not have permission for this stock entry.") };
-    if (stockMovements.some((m) => m.id === record.id)) return { ok: true, duplicate: true };
-    if (record.kind === "Opening" && s.tracked) return { error: `${t("Opening stock is already set for")} ${s.product.name} (${fmtDate(s.openingDate)}). ${t("Use a stock adjustment instead.")}` };
-    if (record.kind !== "Opening" && !s.tracked) return { error: t("Set opening stock for this product first.") };
-    if ((record.kind === "Damage" || (record.kind === "Adjustment" && record.direction === "out")) && record.kg > s.physicalKg + CEMENT_EPS_KG) {
-      return { error: cementStockShortMsg(cementState, record.productId, record.kg, s.physicalKg, "not enough physical stock") };
-    }
-    if (record.kind === "DamageWriteOff" && record.kg > s.damagedKg + CEMENT_EPS_KG) {
-      return { error: cementStockShortMsg(cementState, record.productId, record.kg, s.damagedKg, "not enough damaged stock") };
-    }
-    try {
-      const result = await cementCreateRecord(CEMENT_MV_PREFIX + record.id, record);
-      setStockMovements((prev) => cementUpsertById(prev, record));
-      if (result === "created") logAudit(`Stock ${record.kind}`, `${record.code} — ${record.productName}`, `${fmtCement(record.kg, cementSettings)}${record.reason ? " · " + record.reason : ""}`);
-      return { ok: true, duplicate: result === "exists" };
-    } catch (e) {
-      return { error: `${t("Could not save. Please check your internet and try again.")} (${cementErrorText(e)})` };
-    }
-  }
-
-  async function cementReverseMovement(record, reason) {
-    if (!cementCan(currentUser, cementSettings, "reverse")) return { error: t("Only an admin can reverse stock entries.") };
-    if (record.status === "Reversed") return { ok: true };
-    const s = cementState.products[record.productId];
-    // Reversing stock that came IN must not take physical stock below zero.
-    const removesGood = record.kind === "Opening" || record.kind === "Purchase" || (record.kind === "Adjustment" && record.direction !== "out");
-    if (removesGood && s && record.kg > s.physicalKg + CEMENT_EPS_KG) return { error: cementStockShortMsg(cementState, record.productId, record.kg, s.physicalKg, "reversal would make physical stock negative") };
-    if (record.kind === "Damage" && s && record.kg > s.damagedKg + CEMENT_EPS_KG) return { error: cementStockShortMsg(cementState, record.productId, record.kg, s.damagedKg, "damaged stock is already lower") };
-    if (record.kind === "Opening" && stockMovements.some((m) => m.productId === record.productId && m.kind !== "Opening" && m.status !== "Reversed")) {
-      return { error: t("Opening stock cannot be reversed after other stock entries exist. Use a stock adjustment.") };
-    }
-    const updated = { ...record, status: "Reversed", reversedAt: new Date().toISOString(), reversedBy: cementUser, reverseReason: reason };
-    try {
-      await cementPutRecord(CEMENT_MV_PREFIX + record.id, updated);
-      setStockMovements((prev) => cementUpsertById(prev, updated));
-      logAudit("Stock Entry Reversed", record.code, reason);
-      return { ok: true };
-    } catch (e) {
-      return { error: `${t("Could not save. Please check your internet and try again.")} (${cementErrorText(e)})` };
-    }
-  }
-
-  function cementDerivedStatus(booking, deliveriesList) {
-    const bookedKg = cementBookingKg(booking, cementSettings);
-    const deliveredKg = roundQty(deliveriesList.filter((d) => d.bookingId === booking.id && d.status !== "Reversed").reduce((s, d) => s + (Number(d.kg) || 0), 0), 3);
-    if (booking.status === "Cancelled") return "Cancelled";
-    if (deliveredKg >= bookedKg - CEMENT_EPS_KG && bookedKg > 0) return "Completed";
-    return deliveredKg > CEMENT_EPS_KG ? "Partially Delivered" : "Booked";
-  }
-
-  async function cementSaveDelivery(record) {
-    if (cementLoadError) return { error: t("Stock records are not loaded. Reload the page and try again.") };
-    if (!cementCan(currentUser, cementSettings, "deliver")) return { error: t("You do not have permission to confirm deliveries.") };
-    if (bookingDeliveries.some((d) => d.id === record.id)) return { ok: true, duplicate: true };
-    const msg = cementCheckDelivery(cementState, record.bookingId, record.kg);
-    if (msg) return { error: msg };
-    try {
-      const result = await cementCreateRecord(CEMENT_DLV_PREFIX + record.id, record);
-      const nextDeliveries = cementUpsertById(bookingDeliveries, record);
-      setBookingDeliveries(nextDeliveries);
-      const b = bookings.find((x) => x.id === record.bookingId);
-      if (b) {
-        // The stored status mirrors the delivery records so older screens (dashboard counters) agree.
-        persist.bookings(bookings.map((x) => (x.id === b.id ? { ...x, trackDeliveries: true, status: cementDerivedStatus({ ...x, trackDeliveries: true }, nextDeliveries) } : x)));
-      }
-      if (result === "created") logAudit("Booking Delivery", `${record.code} — ${record.bookingCode}`, fmtCement(record.kg, cementSettings));
-      return { ok: true, duplicate: result === "exists" };
-    } catch (e) {
-      const text = cementErrorText(e);
-      if (/CEMENT_OVER_DELIVERY/.test(text)) return { error: t("Another device already delivered against this booking. Reload and check the remaining quantity.") + ` (${text})` };
-      return { error: `${t("Could not save. Please check your internet and try again.")} (${text})` };
-    }
-  }
-
-  async function cementReverseDelivery(delivery, reason) {
-    if (!cementCan(currentUser, cementSettings, "reverse")) return { error: t("Only an admin can reverse a delivery.") };
-    const inv = cementState.invoiceByDelivery.get(delivery.id);
-    if (inv) return { error: `${t("Cancel invoice")} ${inv.number} ${t("first.")}` };
-    const b = bookings.find((x) => x.id === delivery.bookingId);
-    if (b && b.status === "Cancelled") return { error: t("This booking is cancelled; its delivery history cannot be changed.") };
-    const updated = { ...delivery, status: "Reversed", reversedAt: new Date().toISOString(), reversedBy: cementUser, reverseReason: reason };
-    try {
-      await cementPutRecord(CEMENT_DLV_PREFIX + delivery.id, updated);
-      const nextDeliveries = cementUpsertById(bookingDeliveries, updated);
-      setBookingDeliveries(nextDeliveries);
-      if (b) persist.bookings(bookings.map((x) => (x.id === b.id ? { ...x, status: cementDerivedStatus(x, nextDeliveries) } : x)));
-      logAudit("Booking Delivery Reversed", `${delivery.code} — ${delivery.bookingCode}`, reason);
-      return { ok: true };
-    } catch (e) {
-      return { error: `${t("Could not save. Please check your internet and try again.")} (${cementErrorText(e)})` };
-    }
-  }
-
-  function cementBranchFor(customerId) {
-    return customers.find((c) => c.id === customerId)?.branchId || currentUser?.branchId || "";
-  }
-
-  function cementCreateBooking(data, extra) {
-    const existing = bookings.find((b) => b.id === extra.requestId);
-    if (existing) return { ok: true, id: existing.id, duplicate: true };
-    const { code, next } = cementNextBookingCode(settings, bookings);
-    const now = new Date().toISOString();
+  function onCreateAdvanceBooking(data) {
+    const customer = customers.find((c) => c.id === data.customerId);
+    const qty = roundQty(Number(data.qty) || 0);
+    const rate = roundMoney(Number(data.rate) || 0);
+    const advance = roundMoney(Number(data.advanceAmount) || 0);
+    const productName = String(data.productName || "").trim();
+    if (!customer) { alert("Customer select karein."); return false; }
+    if (!productName) { alert("Select a product or enter the custom item name."); return false; }
+    if (!(qty > 0)) { alert("Booked quantity must be more than 0."); return false; }
+    if (!(rate > 0)) { alert("Locked rate must be more than 0."); return false; }
+    if (advance < 0) { alert("Advance cannot be negative."); return false; }
+    if (advance > roundMoney(qty * rate) + 0.005) { alert("Advance cannot be more than the booking value."); return false; }
+    if (!data.date) { alert("Booking date is required."); return false; }
+    if (data.advancePaymentId && payments.some((p) => p.id === data.advancePaymentId)) { alert("This booking was already saved."); return false; }
+    let n = Number(settings.bookingCounter) || 1;
+    let code;
+    do { code = "BK-" + String(n).padStart(4, "0"); n += 1; } while (bookings.some((b) => b.code === code));
+    const history = [bookingHistoryEntry("Created", `${fmtQty(qty)} ${data.unit || ""} ${productName} @ ${fmtMoney(rate)} = ${fmtMoney(qty * rate)}`)];
+    if (advance > 0) history.push(bookingHistoryEntry("Advance Received", `${fmtMoney(advance)} (${data.advanceMethod || "Cash"})`));
     const record = {
-      id: extra.requestId, code, status: "Booked", expiryDate: addOneMonth(data.date), ...data,
-      advanceAmount: Number(extra.advanceAmount) || 0, createdBy: cementUser, createdAt: now, editHistory: [],
+      id: uid("bk"), v: 2, code, status: "Booked",
+      customerId: customer.id, customerName: customer.name, customerPhone: customer.phone || "",
+      productId: data.productId || "", productName, unit: data.unit || "",
+      qty, rate, originalRate: rate, advanceAmount: 0,
+      date: data.date, expiryDate: addOneMonth(data.date),
+      notes: data.notes || "", terms: data.terms || "",
+      branchId: customer.branchId || currentUser?.branchId || "",
+      createdBy: bookingActor(), createdAt: new Date().toISOString(),
+      rateHistory: [], renewals: [], history,
     };
-    let payment = null;
-    if (record.advanceAmount > 0) {
-      payment = {
-        id: uid("pay"), customerId: data.customerId, customerName: data.customerName, date: data.date, amount: roundMoney(record.advanceAmount),
-        method: extra.advanceMethod || "Cash", note: `Advance for booking ${code}`, bookingId: record.id, branchId: cementBranchFor(data.customerId),
-      };
-      record.advancePaymentId = payment.id;
-    }
     persist.bookings([...bookings, record]);
-    persist.settings({ ...settings, bookingCounter: next });
-    if (payment) persist.payments([...payments, payment]);
-    logAudit("Advance Booking Created", code, data.qtyKg != null ? fmtCement(data.qtyKg, cementSettings) : `${data.qty} ${data.unit}`);
-    if (extra.overReserveApproved) logAudit("Over-reservation Allowed", code, `${cementUser} allowed booking beyond available stock`);
-    return { ok: true, id: record.id };
-  }
-
-  function cementUpdateBooking(original, data, extra) {
-    const info = cementState.bookings[original.id];
-    const now = new Date().toISOString();
-    const changes = [];
-    if (data.qty !== original.qty || (data.qtyUnit || data.unit) !== (original.qtyUnit || original.unit)) changes.push(`Qty ${original.qty} ${original.qtyUnit || original.unit} → ${data.qty} ${data.qtyUnit || data.unit}`);
-    if (data.rate !== original.rate) changes.push(`Rate ${original.rate} → ${data.rate}`);
-    if (data.date !== original.date) changes.push(`Date ${original.date} → ${data.date}`);
-    if (data.customerId !== original.customerId) changes.push(`Customer ${original.customerName} → ${data.customerName}`);
-    if (data.productId !== original.productId) changes.push(`Product ${original.productName} → ${data.productName}`);
-    if ((data.expectedDeliveryDate || "") !== (original.expectedDeliveryDate || "")) changes.push(`Expected delivery ${original.expectedDeliveryDate || "-"} → ${data.expectedDeliveryDate || "-"}`);
-    if ((data.siteAddress || "") !== (original.siteAddress || "")) changes.push("Site address changed");
-    if ((data.notes || "") !== (original.notes || "")) changes.push("Notes changed");
-    const entry = { at: now, by: cementUser, summary: changes.join("; ") || "No field changes" };
-    if (info?.isCement && data.qtyKg != null && !cementZero(data.qtyKg - info.bookedKg)) {
-      entry.qtyKgBefore = info.bookedKg;
-      entry.qtyKgAfter = data.qtyKg;
+    persist.settings({ ...settings, bookingCounter: n });
+    if (advance > 0) {
+      persist.payments([...payments, bookingPaymentRecord(record, { id: data.advancePaymentId, amount: advance, date: data.date, method: data.advanceMethod })]);
     }
-    const { trackDeliveries: _ignored, ...rest } = data;
-    const updated = {
-      ...original, ...rest,
-      trackDeliveries: original.trackDeliveries || (data.trackDeliveries && !info?.isCement) || false,
-      expiryDate: data.date !== original.date ? addOneMonth(data.date) : original.expiryDate,
-      editHistory: [...(original.editHistory || []), entry],
-    };
-    if (updated.trackDeliveries && updated.status !== "Cancelled") updated.status = cementDerivedStatus(updated, bookingDeliveries);
-    let nextPayments = null;
-    const more = Number(extra.advanceAmount) || 0;
-    if (more > 0 && !payments.some((p) => p.id === extra.requestId)) {
-      nextPayments = [...payments, {
-        id: extra.requestId, customerId: updated.customerId, customerName: updated.customerName, date: todayISO(), amount: roundMoney(more),
-        method: extra.advanceMethod || "Cash", note: `Booking ${updated.code}`, bookingId: updated.id, branchId: cementBranchFor(updated.customerId),
-      }];
+    logAudit("Advance Booking Created", code, `${customer.name} — ${fmtQty(qty)} ${data.unit || ""} @ ${fmtMoney(rate)}`);
+    if (advance > 0) logAudit("Booking Advance Received", code, fmtMoney(advance));
+    return record;
+  }
+
+  function onReceiveAdvance(bookingId, data) {
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    if (data.id && payments.some((p) => p.id === data.id)) { alert("This advance was already recorded."); return false; }
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled" || st.status === "Completed") { alert(`Booking ${b.code} is ${st.status}.`); return false; }
+    const amount = roundMoney(Number(data.amount) || 0);
+    if (!(amount > 0)) { alert("Amount 0 se zyada hona chahiye."); return false; }
+    if (!data.date) { alert("Date is required."); return false; }
+    if (amount > st.remainingAmount + 0.005) { alert(`Advance cannot be more than the remaining booking amount (${fmtMoney(st.remainingAmount)}).`); return false; }
+    const pay = bookingPaymentRecord(b, { id: data.id, amount, date: data.date, method: data.method, note: data.note });
+    persist.payments([...payments, pay]);
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Advance Received", `${fmtMoney(amount)} (${pay.method}) — ${paymentReceiptNo(pay)}`)]));
+    logAudit("Booking Advance Received", b.code, fmtMoney(amount));
+    return true;
+  }
+
+  function onEditAdvance(bookingId, paymentId, data) {
+    if (!bookingIsAdmin()) { alert("Only admin can edit a booking advance."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const p = payments.find((x) => x.id === paymentId && x.bookingId === b.id && x.kind !== "Refund");
+    if (!p) { alert("Advance payment not found."); return false; }
+    const reason = String(data.reason || "").trim();
+    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+    const amount = roundMoney(Number(data.amount) || 0);
+    if (!(amount > 0)) { alert("Amount 0 se zyada hona chahiye."); return false; }
+    const oldAmount = roundMoney(Number(p.amount) || 0);
+    const st = computeBookingState(b, invoices, payments);
+    if (roundMoney(st.unusedAdvance - oldAmount + amount) < -0.005) {
+      alert(`Part of this advance is already applied to invoices or refunded. Minimum allowed is ${fmtMoney(Math.max(0, oldAmount - st.unusedAdvance))}.`); return false;
     }
-    persist.bookings(bookings.map((b) => (b.id === original.id ? updated : b)));
-    if (nextPayments) persist.payments(nextPayments);
-    logAudit("Advance Booking Edited", original.code, entry.summary);
-    if (extra.overReserveApproved) logAudit("Over-reservation Allowed", original.code, `${cementUser} allowed booking beyond available stock`);
-    return { ok: true, id: original.id };
-  }
-
-  function cementCancelBooking(b, reason) {
-    if (!cementCan(currentUser, cementSettings, "cancelBooking")) return { error: t("You do not have permission to cancel bookings.") };
-    if (b.status === "Cancelled") return { ok: true };
-    const now = new Date().toISOString();
-    persist.bookings(bookings.map((x) => (x.id === b.id ? { ...x, status: "Cancelled", cancelReason: reason, cancelledAt: now, cancelledBy: cementUser } : x)));
-    const info = cementState.bookings[b.id];
-    logAudit("Advance Booking Cancelled", b.code, `${reason}${info?.isCement ? ` · released ${fmtCement(info.remainingKg, cementSettings)}` : ""}`);
-    return { ok: true };
-  }
-
-  function cementRecordBookingPayment(b, p) {
-    if (payments.some((x) => x.id === p.id)) return { ok: true, duplicate: true };
-    savePayment({
-      id: p.id, customerId: b.customerId, customerName: b.customerName, date: p.date, amount: p.amount, method: p.method,
-      note: `Booking ${b.code}${p.note ? " — " + p.note : ""}`, bookingId: b.id, branchId: cementBranchFor(b.customerId),
+    if (amount - oldAmount > st.remainingAmount + 0.005) {
+      alert(`Total advance cannot be more than the booking value. Maximum allowed is ${fmtMoney(oldAmount + st.remainingAmount)}.`); return false;
+    }
+    updatePayment(p, {
+      customerId: p.customerId, customerName: p.customerName, date: data.date || p.date, amount,
+      method: data.method || p.method, promiseId: "", note: `Advance for Booking ${b.code} — ${reason}`,
     });
-    logAudit("Booking Payment", b.code, fmtMoney(p.amount));
-    return { ok: true };
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Advance Edited", `${paymentReceiptNo(p)}: ${fmtMoney(oldAmount)} → ${fmtMoney(amount)} — ${reason}`)]));
+    logAudit("Booking Advance Edited", b.code, `${fmtMoney(oldAmount)} → ${fmtMoney(amount)} — ${reason}`);
+    return true;
   }
 
-  function cementDeliveryToInvoice(d) {
-    const b = bookings.find((x) => x.id === d.bookingId);
-    if (!b) return;
-    if (cementState.invoiceByDelivery.get(d.id)) { alert(t("This delivery already has an invoice.")); return; }
-    const unit = cementUnitLabel(cementBookingUnit(b));
-    setPrefill({
-      sourceType: "booking", sourceId: b.id, sourceCode: b.code, deliveryId: d.id, deliveryCode: d.code,
-      customerId: b.customerId, productId: b.productId, productName: b.productName, unit,
-      qty: cementToUnit(d.kg, unit, cementSettings), rate: b.rate,
-    });
-    setPage("invoices");
+  function onRefundAdvance(bookingId, data) {
+    if (!bookingIsAdmin()) { alert("Only admin can refund a booking advance."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    if (data.id && payments.some((p) => p.id === data.id)) { alert("This refund was already recorded."); return false; }
+    const reason = String(data.reason || "").trim();
+    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+    const amount = roundMoney(Number(data.amount) || 0);
+    const st = computeBookingState(b, invoices, payments);
+    if (!(amount > 0)) { alert("Amount 0 se zyada hona chahiye."); return false; }
+    if (amount > Math.max(0, st.unusedAdvance) + 0.005) { alert(`Refund cannot be more than the refundable balance (${fmtMoney(Math.max(0, st.unusedAdvance))}).`); return false; }
+    const refund = bookingPaymentRecord(b, { id: data.id, amount, date: data.date, method: data.method, note: reason, kind: "Refund" });
+    persist.payments([...payments, refund]);
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Advance Refunded", `${fmtMoney(amount)} (${refund.method}) — ${reason}`)]));
+    logAudit("Booking Advance Refunded", b.code, `${fmtMoney(amount)} — ${reason}`);
+    return true;
   }
 
-  function cementDeleteProduct(id) {
-    const used = stockMovements.some((m) => m.productId === id) || bookingDeliveries.some((d) => d.productId === id) || bookings.some((b) => b.productId === id);
-    if (used) { alert(t("This product has stock entries or bookings and cannot be deleted. Untick “Cement product” or rename it instead.")); return; }
-    deleteProduct(id);
-  }
-
-  async function cementRestoreRecords(list, prefix, setter) {
-    for (const rec of list || []) {
-      if (!rec || !rec.id) continue;
-      try {
-        const result = await cementCreateRecord(prefix + rec.id, rec);
-        if (result === "created") setter((prev) => cementUpsertById(prev, rec));
-      } catch (e) { console.error("restore failed", prefix, rec.id, e); }
+  function onCancelBooking(bookingId, data) {
+    if (!bookingIsAdmin()) { alert("Only admin can cancel a booking."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled") { alert(`Booking ${b.code} is already cancelled.`); return false; }
+    if (st.status === "Completed") { alert(`Booking ${b.code} is fully delivered. Use Refund for any unused advance.`); return false; }
+    const reason = String(data.reason || "").trim();
+    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+    const refundAmount = roundMoney(Number(data.refundAmount) || 0);
+    if (refundAmount < 0 || refundAmount > Math.max(0, st.unusedAdvance) + 0.005) { alert(`Refund cannot be more than the refundable balance (${fmtMoney(Math.max(0, st.unusedAdvance))}).`); return false; }
+    if (refundAmount > 0 && data.refundId && payments.some((p) => p.id === data.refundId)) { alert("This refund was already recorded."); return false; }
+    const entries = [bookingHistoryEntry("Cancelled", `${reason} — undelivered ${fmtQty(st.remainingQty)} ${b.unit || ""}`)];
+    let refund = null;
+    if (refundAmount > 0) {
+      refund = bookingPaymentRecord(b, { id: data.refundId, amount: refundAmount, date: data.refundDate, method: data.refundMethod, note: reason, kind: "Refund" });
+      entries.push(bookingHistoryEntry("Advance Refunded", `${fmtMoney(refundAmount)} (${refund.method}) — ${reason}`));
     }
+    commitBooking(bookingWithHistory(b, entries, { status: "Cancelled", cancelReason: reason, cancelledBy: bookingActor(), cancelledAt: new Date().toISOString() }));
+    if (refund) persist.payments([...payments, refund]);
+    logAudit("Advance Booking Cancelled", b.code, reason);
+    if (refund) logAudit("Booking Advance Refunded", b.code, `${fmtMoney(refundAmount)} — ${reason}`);
+    return true;
   }
 
-  const cementCheckInvoiceFn = (draft, original) => cementCheckInvoice(cementState, draft, original);
-  // Stamp the bag weight on documents that contain cement (see cementCsFor).
-  function cementStamp(doc, lines) {
-    const hasCement = (lines || []).some((l) => cementProductForLine(cementState.idx, l));
-    return hasCement ? { ...doc, cementBagKg: cementBagKg(cementSettings) } : doc;
+  function onRenewBooking(bookingId, data) {
+    if (!bookingIsAdmin()) { alert("Only admin can renew a booking."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled" || st.status === "Completed") { alert(`Booking ${b.code} is ${st.status}.`); return false; }
+    const reason = String(data.reason || "").trim();
+    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+    const base = todayISO() > (b.expiryDate || "") ? todayISO() : b.expiryDate;
+    const to = addOneMonth(base);
+    const renewal = { from: b.expiryDate || "", to, reason, by: bookingActor(), at: new Date().toISOString() };
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Renewed", `${fmtDate(b.expiryDate)} → ${fmtDate(to)} — ${reason}`)], { expiryDate: to, renewals: [...(b.renewals || []), renewal] }));
+    logAudit("Advance Booking Renewed", b.code, `${b.expiryDate} → ${to} — ${reason}`);
+    return true;
   }
-  const cementCheckExchangeFn = (ex) => cementCheckExchange(cementState, ex);
+
+  function onChangeBookingRate(bookingId, data) {
+    if (!bookingIsAdmin()) { alert("Only admin can change a locked rate."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled" || st.status === "Completed") { alert(`Booking ${b.code} is ${st.status}.`); return false; }
+    const reason = String(data.reason || "").trim();
+    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+    const newRate = roundMoney(Number(data.newRate) || 0);
+    if (!(newRate > 0)) { alert("Rate must be more than 0."); return false; }
+    const newValue = roundMoney(st.deliveredAmount + st.remainingQty * newRate);
+    if (st.netAdvance + st.legacyAdvance > newValue + 0.005) { alert(`Advance received (${fmtMoney(st.netAdvance + st.legacyAdvance)}) would be more than the new booking value (${fmtMoney(newValue)}). Refund the difference first.`); return false; }
+    const change = { oldRate: b.rate, newRate, reason, by: bookingActor(), at: new Date().toISOString() };
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Rate Changed", `${fmtMoney(b.rate)} → ${fmtMoney(newRate)} — ${reason}`)], {
+      rate: newRate, originalRate: b.originalRate != null ? b.originalRate : b.rate, rateHistory: [...(b.rateHistory || []), change],
+    }));
+    logAudit("Booking Rate Changed", b.code, `${fmtMoney(b.rate)} → ${fmtMoney(newRate)} — ${reason}`);
+    return true;
+  }
+
+  function onUpdateBookingDetails(bookingId, data) {
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Notes / Terms Updated", "")], { notes: data.notes || "", terms: data.terms || "" }));
+    logAudit("Advance Booking Updated", b.code, "Notes / terms");
+    return true;
+  }
+
+  function onPostLegacyAdvance(bookingId) {
+    if (!bookingIsAdmin()) { alert("Only admin can do this."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const amount = roundMoney(Number(b.advanceAmount) || 0);
+    if (b.v === 2 || b.legacyAdvancePosted || !(amount > 0)) { alert("There is no older advance to post for this booking."); return false; }
+    const pay = bookingPaymentRecord(b, { amount, date: b.date, method: "Cash", note: "older booking advance posted to ledger" });
+    persist.payments([...payments, pay]);
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Old Advance Posted To Ledger", `${fmtMoney(amount)} dated ${fmtDate(b.date)}`)], { legacyAdvancePosted: true }));
+    logAudit("Booking Advance Received", b.code, `${fmtMoney(amount)} (older booking advance posted)`);
+    return true;
+  }
+
+  function saveBooking(b) { persist.bookings(bookings.map((x) => (x.id === b.id ? b : x))); }
+  // Booking status is now derived from real delivery invoices, so nothing is
+  // marked "Completed" by hand here any more (delivery is logged in saveInvoice).
+  function onBookingFulfilled() {}
 
   function onCreateOrder(data) {
     const code = "ORD-" + String(settings.orderCounter).padStart(4, "0");
@@ -6906,7 +8316,16 @@ function App() {
   function onOrderFulfilled(id) { persist.orders(orders.map((o) => (o.id === id ? { ...o, status: "Completed" } : o))); }
 
   function convertBookingToInvoice(b) {
-    setPrefill({ sourceType: "booking", sourceId: b.id, sourceCode: b.code, customerId: b.customerId, productId: b.productId, productName: b.productName, unit: b.unit, qty: b.qty, rate: b.rate });
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled") { alert(`Booking ${b.code} is cancelled.`); return; }
+    if (st.status === "Completed") { alert(`Booking ${b.code} is already fully delivered.`); return; }
+    if (st.status === "Expired") { alert(`Booking ${b.code} expired on ${fmtDate(b.expiryDate)}. An admin must renew it before delivery at the locked rate.`); return; }
+    if (prefill && prefill.sourceType === "booking" && prefill.sourceId === b.id) { setPage("invoices"); return; }
+    const suggestedAdvance = roundMoney(Math.max(0, Math.min(st.unusedAdvance, st.remainingQty * st.rate)));
+    setPrefill({
+      sourceType: "booking", sourceId: b.id, sourceCode: b.code, customerId: b.customerId, productId: b.productId,
+      productName: b.productName, unit: b.unit, qty: st.remainingQty, rate: st.rate, suggestedAdvance,
+    });
     setPage("invoices");
   }
   function convertOrderToInvoice(o) {
@@ -6957,7 +8376,6 @@ function App() {
       users, customers, invoices, payments, returns, exchanges, creditNotes, promises, transfers, adjustments,
       leads, products, drivers, offers, bookings, orders, settings, branches, auditLog,
       commissionAgents, commissionRules, commissionTransactions, commissionPayments,
-      stockMovements, bookingDeliveries, cementSettings,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -6989,10 +8407,6 @@ function App() {
     if (data.commissionRules) persist.commissionRules(data.commissionRules);
     if (data.commissionTransactions) persist.commissionTransactions(data.commissionTransactions);
     if (data.commissionPayments) persist.commissionPayments(data.commissionPayments);
-    if (data.cementSettings) { const v = cementSettingsOf(data.cementSettings); setCementSettings(v); storeSet(CEMENT_SETTINGS_KEY, v); }
-    // Stock movements and deliveries are add-only: a restore adds missing records, never overwrites one.
-    if (Array.isArray(data.stockMovements)) cementRestoreRecords(data.stockMovements, CEMENT_MV_PREFIX, setStockMovements);
-    if (Array.isArray(data.bookingDeliveries)) cementRestoreRecords(data.bookingDeliveries, CEMENT_DLV_PREFIX, setBookingDeliveries);
   }
 
   /* ---------- Commission Management handlers ---------- */
@@ -7144,13 +8558,12 @@ function App() {
     ),
     invoices: (
       <Invoices
-        cementCheckInvoice={cementCheckInvoiceFn}
         customers={visibleCustomers} products={products} drivers={drivers}
         invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
         promises={promises} transfers={transfers} adjustments={adjustments}
         commissionAgents={commissionAgents} commissionRules={commissionRules} commissionTransactions={commissionTransactions}
         bookings={bookings} settings={settings} currentUser={currentUser}
-        saveInvoice={(inv) => saveInvoice(cementStamp(inv, inv.items))} updateInvoice={(inv, original) => updateInvoice(cementStamp(inv, inv.items), original)} cancelInvoice={cancelInvoiceFn}
+        saveInvoice={saveInvoice} updateInvoice={updateInvoice} cancelInvoice={cancelInvoiceFn}
         prefill={prefill} onClearPrefill={() => setPrefill(null)}
         onBookingFulfilled={onBookingFulfilled} onOrderFulfilled={onOrderFulfilled}
         focusInvoiceId={focusInvoiceId} setFocusInvoiceId={setFocusInvoiceId}
@@ -7161,14 +8574,13 @@ function App() {
     returns: (
       <SalesReturnPage
         customers={visibleCustomers} invoices={visibleInvoices} returns={returns} exchanges={exchanges}
-        onCreateReturn={(data) => onCreateReturn(cementStamp(data, (data.items || []).map((it) => ({ ...(invoices.find((i) => i.id === data.invoiceId)?.items?.[it.itemIndex] || {}), name: it.name }))))} onDeleteReturn={onDeleteReturn} currentUser={currentUser}
+        onCreateReturn={onCreateReturn} onDeleteReturn={onDeleteReturn} currentUser={currentUser}
       />
     ),
     exchange: (
       <ExchangePage
         customers={visibleCustomers} products={products} invoices={visibleInvoices} returns={returns} exchanges={exchanges}
-        onCreateExchange={(data) => onCreateExchange(cementStamp(data, [...(data.newItems || []), ...(data.returnedItems || []).map((it) => ({ name: it.name }))]))} onDeleteExchange={onDeleteExchange} currentUser={currentUser}
-        cementCheckExchange={cementCheckExchangeFn}
+        onCreateExchange={onCreateExchange} onDeleteExchange={onDeleteExchange} currentUser={currentUser}
       />
     ),
     creditNotes: <CreditNotesPage creditNotes={creditNotes} onLinkInvoice={onLinkCreditNoteInvoice} />,
@@ -7213,20 +8625,15 @@ function App() {
       />
     ),
     bookings: (
-      <CementBookingsPage
-        state={cementState} customers={visibleCustomers} products={products} bookings={bookings} drivers={drivers}
-        currentUser={currentUser} settings={settings} loadError={cementLoadError}
-        onCreateBooking={cementCreateBooking} onUpdateBooking={cementUpdateBooking} onCancelBooking={cementCancelBooking}
-        onSaveDelivery={cementSaveDelivery} onReverseDelivery={cementReverseDelivery} onRecordPayment={cementRecordBookingPayment}
-        onDeliveryInvoice={cementDeliveryToInvoice} onLegacyConvert={convertBookingToInvoice}
-        onLegacyStatus={(b, status) => { saveBooking({ ...b, status }); logAudit("Advance Booking Status", b.code, status); }}
-      />
-    ),
-    cementStock: (
-      <CementStockPage
-        state={cementState} products={products} movements={stockMovements} customers={visibleCustomers} bookings={bookings}
-        deliveries={bookingDeliveries} currentUser={currentUser} cementSettings={cementSettings} settings={settings} loadError={cementLoadError}
-        onSaveMovement={cementSaveMovement} onReverseMovement={cementReverseMovement} onOpenProducts={() => setPage("products")}
+      <Bookings
+        customers={visibleCustomers} products={products}
+        bookings={isBranchScoped ? bookings.filter((b) => visibleCustomerIds.has(b.customerId)) : bookings}
+        invoices={invoices} payments={payments} settings={settings} currentUser={currentUser} branches={branches}
+        onCreateAdvanceBooking={onCreateAdvanceBooking} onConvertToInvoice={convertBookingToInvoice}
+        onOpenInvoice={(id) => { setFocusInvoiceId(id); setPage("invoices"); }}
+        onReceiveAdvance={onReceiveAdvance} onEditAdvance={onEditAdvance} onRefundAdvance={onRefundAdvance}
+        onCancelBooking={onCancelBooking} onRenewBooking={onRenewBooking} onChangeBookingRate={onChangeBookingRate}
+        onUpdateBookingDetails={onUpdateBookingDetails} onPostLegacyAdvance={onPostLegacyAdvance}
       />
     ),
     orders: (
@@ -7242,7 +8649,7 @@ function App() {
       />
     ),
     leads: <Leads leads={leads} saveLead={saveLead} deleteLead={deleteLead} />,
-    products: <Products products={products} saveProduct={saveProduct} deleteProduct={cementDeleteProduct} cementState={cementState} onOpenStock={() => setPage("cementStock")} />,
+    products: <Products products={products} saveProduct={saveProduct} deleteProduct={deleteProduct} />,
     drivers: <Drivers drivers={drivers} saveDriver={saveDriver} deleteDriver={deleteDriver} nextCode={nextDriverCode} />,
     offers: <Offers offers={offers} saveOffer={saveOffer} deleteOffer={deleteOffer} />,
     reports: (
@@ -7264,14 +8671,6 @@ function App() {
       />
     ),
   };
-  if (currentUser.role === "admin") {
-    pages.settings = (
-      <>
-        {pages.settings}
-        <CementSettingsSection key={JSON.stringify(cementSettings)} cementSettings={cementSettings} onSave={saveCementSettings} />
-      </>
-    );
-  }
 
   return (
     <>
@@ -7280,17 +8679,13 @@ function App() {
       {/* Receiving Proof (add-only): current admin / staff user for upload permissions */}
       <RecvSessionUser user={currentUser} />
       <div className="flex h-screen bg-slate-100 text-slate-900">
-        <div className={`${mobileNavOpen ? "fixed inset-0 z-40 flex" : "hidden"} md:static md:flex print:hidden`}>
-          <Sidebar page={page} setPage={(p) => { setPage(p); setMobileNavOpen(false); }} role={currentUser.role} onLogout={handleLogout} companyName={settings.companyName} logoUrl={settings.logoUrl} />
-          <div className="flex-1 bg-black/40 md:hidden" onClick={() => setMobileNavOpen(false)} />
-        </div>
+        <Sidebar page={page} setPage={setPage} role={currentUser.role} onLogout={handleLogout} companyName={settings.companyName} logoUrl={settings.logoUrl} />
         <div className="flex-1 overflow-y-auto">
-          <div className="flex items-center justify-end gap-3 px-4 md:px-6 py-2 border-b border-slate-200 bg-white print:hidden">
-            <button type="button" className="md:hidden mr-auto px-3 py-1.5 text-xs font-bold uppercase tracking-wide border border-slate-300" onClick={() => setMobileNavOpen(true)}>☰ {t("Menu")}</button>
+          <div className="flex items-center justify-end gap-3 px-6 py-2 border-b border-slate-200 bg-white print:hidden">
             <span className="text-xs text-slate-500">{t("Welcome,")} <span className="font-bold text-slate-700">{currentUser.name || currentUser.username}</span></span>
             <LanguageSwitcher compact />
           </div>
-          <div className="p-4 md:p-6">
+          <div className="p-6">
             {pages[page] || pages.dashboard}
           </div>
         </div>
@@ -8004,2587 +9399,5 @@ function RecvInvoicePrintProof({ invoice }) {
     </div>
   );
 }
-
-/* ============================================================
-   CEMENT STOCK MANAGEMENT + CUSTOMER-WISE ADVANCE BOOKING
-   ------------------------------------------------------------
-   How stock is calculated (one rule, used everywhere):
-
-   Physical stock is never stored as a running number that every screen
-   has to remember to update. It is RECALCULATED from the source records
-   every time, so a record can only ever affect stock once:
-
-     ct-stockmv:<id>       Opening / Purchase / Adjustment / Damage /
-                           Damage write-off (one kv row per movement)
-     ct-bkdelivery:<id>    Booking deliveries (one kv row per delivery)
-     ct-invoices           Normal cement sales (existing data)
-     ct-returns            Sales returns       (existing data)
-     ct-exchanges          Exchanges           (existing data)
-     ct-bookings           Reservations        (existing data)
-
-   Each movement / delivery is created with an id generated when its
-   form is opened, and saved with an INSERT that refuses an existing
-   key. Pressing Save twice, a retry after a network error, or two
-   devices replaying the same save can therefore never add or deduct
-   stock twice.
-
-   Quantities are stored in kilograms (3 decimals). Tons and bags are
-   always derived from kg with cementToUnit(), so tons and bags can
-   never be counted twice or drift apart.
-
-   Stock tracking for a cement product starts on the date of its
-   Opening Stock entry (the balance at the START of that day). Sales,
-   returns and exchanges dated before that are history and do not move
-   stock.
-   ============================================================ */
-
-const CEMENT_TON_KG = 1000;
-const CEMENT_EPS_KG = 0.0005;
-const CEMENT_MV_PREFIX = "ct-stockmv:";
-const CEMENT_DLV_PREFIX = "ct-bkdelivery:";
-const CEMENT_SETTINGS_KEY = "ct-cement-settings";
-const CEMENT_DEFAULT_SETTINGS = {
-  bagWeightKg: 50,
-  staffCanViewStock: true,
-  staffCanStockIn: true,
-  staffCanAdjust: false,
-  staffCanDeliver: true,
-  staffCanCancelBooking: false,
-  staffCanOverReserve: false,
-};
-const CEMENT_BOOKING_ACTIVE = ["Booked", "Partially Delivered"];
-
-function cementSettingsOf(cs) {
-  return { ...CEMENT_DEFAULT_SETTINGS, ...(cs || {}) };
-}
-function cementBagKg(cs) {
-  const v = Number(cs?.bagWeightKg);
-  return v > 0 ? v : CEMENT_DEFAULT_SETTINGS.bagWeightKg;
-}
-function cementBagsPerTon(cs) {
-  return roundQty(CEMENT_TON_KG / cementBagKg(cs), 3);
-}
-
-// "Ton", "tons", "MT" -> ton; "kg" -> kg; anything else (Bag, Bags, Bori) -> bag.
-function cementUnitKind(unit) {
-  const u = String(unit || "").trim().toLowerCase().replace(/\.$/, "");
-  if (/^(t|ton|tons|tonne|tonnes|mt|m\.t|metric ton|metric tons)$/.test(u)) return "ton";
-  if (/^(kg|kgs|kilo|kilogram|kilograms)$/.test(u)) return "kg";
-  return "bag";
-}
-function cementUnitLabel(kind) {
-  return kind === "ton" ? "Ton" : kind === "kg" ? "KG" : "Bag";
-}
-// The single conversion used by the whole application.
-function cementToKg(qty, unit, cs) {
-  const n = Number(qty) || 0;
-  const kind = cementUnitKind(unit);
-  const factor = kind === "ton" ? CEMENT_TON_KG : kind === "kg" ? 1 : cementBagKg(cs);
-  return roundQty(n * factor, 3);
-}
-function cementToUnit(kg, unit, cs) {
-  const kind = cementUnitKind(unit);
-  const factor = kind === "ton" ? CEMENT_TON_KG : kind === "kg" ? 1 : cementBagKg(cs);
-  return roundQty((Number(kg) || 0) / factor, 3);
-}
-// Documents saved after this feature carry the bag weight in force when they
-// were saved, so changing the bag weight later never re-interprets old sales.
-function cementCsFor(doc, cs) {
-  const w = Number(doc?.cementBagKg);
-  return w > 0 ? { ...cs, bagWeightKg: w } : cs;
-}
-function cementTons(kg) { return roundQty((Number(kg) || 0) / CEMENT_TON_KG, 3); }
-function cementBags(kg, cs) { return roundQty((Number(kg) || 0) / cementBagKg(cs), 3); }
-function fmtTons(kg) { return `${fmtQty(cementTons(kg))} MT`; }
-function fmtBags(kg, cs) { return `${fmtQty(cementBags(kg, cs))} bags`; }
-function fmtCement(kg, cs) { return `${fmtTons(kg)} · ${fmtBags(kg, cs)}`; }
-function cementZero(kg) { return Math.abs(Number(kg) || 0) < CEMENT_EPS_KG; }
-
-function cementLocalDate(iso) {
-  if (!iso) return "";
-  const d = new Date(iso);
-  return isNaN(d) ? "" : dateToLocalISO(d);
-}
-function cementNormName(s) { return String(s || "").trim().toLowerCase().replace(/\s+/g, " "); }
-
-function cementProductIndex(products) {
-  const byId = new Map();
-  const byName = new Map();
-  (products || []).forEach((p) => {
-    if (!p || !p.isCement) return;
-    byId.set(p.id, p);
-    const n = cementNormName(p.name);
-    if (n && !byName.has(n)) byName.set(n, p);
-  });
-  return { byId, byName };
-}
-// A sale / exchange / return line belongs to a cement product when it carries
-// that product's id (new invoices) or, for older lines without an id, when its
-// item name is exactly the cement product's name.
-function cementProductForLine(idx, line) {
-  if (!line) return null;
-  const byIdProduct = line.productId ? idx.byId.get(line.productId) : null;
-  if (byIdProduct && (!line.name || cementNormName(line.name) === cementNormName(byIdProduct.name))) return byIdProduct;
-  return idx.byName.get(cementNormName(line.name)) || null;
-}
-
-// Human-readable number derived from the record id, so a retried save of the
-// same record always gets the same number.
-function cementCode(prefix, id) {
-  const parts = String(id || "").split("_");
-  const tail = parts[parts.length - 1] || "";
-  const ms = parseInt(tail.slice(0, -5), 36);
-  const d = isNaN(ms) ? new Date() : new Date(ms);
-  const ymd = String(d.getFullYear()).slice(2) + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
-  return `${prefix}-${ymd}-${(tail.slice(-5) || Math.random().toString(36).slice(2, 7)).toUpperCase()}`;
-}
-
-function cementCan(user, cs, action) {
-  if (!user) return false;
-  if (user.role === "admin") return true;
-  if (user.role !== "staff" && user.role) return false;
-  const s = cementSettingsOf(cs);
-  const map = {
-    view: s.staffCanViewStock, stockIn: s.staffCanStockIn, adjust: s.staffCanAdjust,
-    deliver: s.staffCanDeliver, cancelBooking: s.staffCanCancelBooking, overReserve: s.staffCanOverReserve,
-    reverse: false, editBooking: true, createBooking: true,
-  };
-  return !!map[action];
-}
-
-/* ---------------- Booking helpers ---------------- */
-
-function cementBookingUnit(b) {
-  return cementUnitKind(b.qtyUnit || b.unit);
-}
-function cementBookingKg(b, cs) {
-  if (b.qtyKg != null && b.qtyKg !== "" && !isNaN(Number(b.qtyKg))) return roundQty(Number(b.qtyKg), 3);
-  return cementToKg(b.qty, b.qtyUnit || b.unit, cs);
-}
-function cementBookingKgAtEdit(b, cs) {
-  // Booked kg at creation time (before any edit) — used to replay reservation history.
-  const firstEdit = (b.editHistory || []).find((h) => h.qtyKgBefore != null);
-  return firstEdit ? Number(firstEdit.qtyKgBefore) : cementBookingKg(b, cs);
-}
-
-/* ============================================================
-   computeCementState — the whole stock picture from source records.
-   Pure function: same input -> same output, no side effects.
-   ============================================================ */
-function computeCementState({ products, movements, deliveries, bookings, invoices, returns, exchanges, payments, cementSettings, today }) {
-  const cs = cementSettingsOf(cementSettings);
-  const idx = cementProductIndex(products);
-  const todayStr = today || todayISO();
-  const rows = [];
-  const prod = {};
-  idx.byId.forEach((p) => {
-    prod[p.id] = {
-      product: p, productId: p.id, tracked: false, openingDate: "", openingMovementId: "",
-      physicalKg: 0, damagedKg: 0, reservedKg: 0, availableKg: 0,
-      todayInKg: 0, todayOutKg: 0, minKg: cementToKg(p.minStockLevel, p.minStockUnit || "Ton", cs),
-      purchasedKg: 0, purchaseCost: 0,
-    };
-  });
-
-  const activeMovements = (movements || []).filter((m) => m && prod[m.productId]);
-  // Opening stock: the earliest active Opening entry starts tracking for that product.
-  activeMovements
-    .filter((m) => m.kind === "Opening" && m.status !== "Reversed")
-    .sort((a, b) => (a.date + (a.createdAt || "")).localeCompare(b.date + (b.createdAt || "")))
-    .forEach((m) => {
-      const s = prod[m.productId];
-      if (!s.tracked) { s.tracked = true; s.openingDate = m.date; s.openingMovementId = m.id; }
-    });
-  const countsOn = (productId, date) => {
-    const s = prod[productId];
-    return !!s && s.tracked && !!date && date >= s.openingDate;
-  };
-
-  function push(r) {
-    rows.push({
-      inKg: 0, outKg: 0, returnKg: 0, adjustKg: 0, physicalDeltaKg: 0, damagedDeltaKg: 0, reservedDeltaKg: 0,
-      party: "", ref: "", refId: "", user: "", notes: "", at: "", rank: 1, ...r,
-    });
-  }
-
-  /* ---- 1. Manual movements ---- */
-  activeMovements.forEach((m) => {
-    const kg = roundQty(Math.abs(Number(m.kg) || 0), 3);
-    const base = {
-      key: "mv:" + m.id, date: m.date, at: m.createdAt || "", productId: m.productId, ref: m.code || "",
-      refId: m.id, sourceType: "movement", user: m.createdBy || "", notes: m.reason || m.notes || "",
-      party: m.supplier || "",
-    };
-    let r = null;
-    if (m.kind === "Opening") r = { ...base, type: "Opening", inKg: kg, physicalDeltaKg: kg, rank: 0 };
-    else if (m.kind === "Purchase") r = { ...base, type: "Purchase", inKg: kg, physicalDeltaKg: kg, ref: m.supplierInvoiceNo || m.code || "" };
-    else if (m.kind === "Adjustment") {
-      const signed = m.direction === "out" ? -kg : kg;
-      r = { ...base, type: "Adjustment", adjustKg: signed, physicalDeltaKg: signed };
-    } else if (m.kind === "Damage") r = { ...base, type: "Damage", outKg: kg, physicalDeltaKg: -kg, damagedDeltaKg: kg };
-    else if (m.kind === "DamageWriteOff") r = { ...base, type: "Damage Write-off", damagedDeltaKg: -kg };
-    if (!r) return;
-    push(r);
-    if (m.kind === "Purchase" && m.status !== "Reversed") {
-      prod[m.productId].purchasedKg += kg;
-      prod[m.productId].purchaseCost += Number(m.totalCost) || 0;
-    }
-    if (m.status === "Reversed") {
-      push({
-        ...base, key: "mvrev:" + m.id, type: "Reversal", date: cementLocalDate(m.reversedAt) || m.date, at: m.reversedAt || "",
-        inKg: r.outKg, outKg: r.inKg, adjustKg: -r.adjustKg, physicalDeltaKg: -r.physicalDeltaKg, damagedDeltaKg: -r.damagedDeltaKg,
-        user: m.reversedBy || "", notes: `Reversal of ${r.type}${m.reverseReason ? " — " + m.reverseReason : ""}`, rank: 1,
-      });
-    }
-  });
-
-  /* ---- 2. Bookings, reservations and deliveries ---- */
-  const deliveriesByBooking = new Map();
-  (deliveries || []).forEach((d) => {
-    if (!d || !d.bookingId) return;
-    if (!deliveriesByBooking.has(d.bookingId)) deliveriesByBooking.set(d.bookingId, []);
-    deliveriesByBooking.get(d.bookingId).push(d);
-  });
-  const invoiceByDelivery = new Map();
-  (invoices || []).forEach((inv) => {
-    if (inv.bookingDeliveryId && !isInvoiceCancelled(inv)) invoiceByDelivery.set(inv.bookingDeliveryId, inv);
-  });
-  const bookingInfo = {};
-  (bookings || []).forEach((b) => {
-    const product = idx.byId.get(b.productId) || null;
-    const ds = (deliveriesByBooking.get(b.id) || []).slice().sort((x, y) =>
-      (x.at || "").localeCompare(y.at || "") || (Number(x.seq) || 0) - (Number(y.seq) || 0) || (x.createdAt || "").localeCompare(y.createdAt || ""));
-    const activeDs = ds.filter((d) => d.status !== "Reversed");
-    const unitKind = cementBookingUnit(b);
-    const bookedKg = cementBookingKg(b, cs);
-    const deliveredKg = roundQty(activeDs.reduce((s, d) => s + (Number(d.kg) || 0), 0), 3);
-    const legacy = !b.trackDeliveries && ds.length === 0;
-    let status;
-    if (b.status === "Cancelled") status = "Cancelled";
-    else if (legacy) status = BOOKING_STATUSES.includes(b.status) ? b.status : "Booked";
-    else if (deliveredKg >= bookedKg - CEMENT_EPS_KG && bookedKg > 0) status = "Completed";
-    else if (deliveredKg > CEMENT_EPS_KG) status = "Partially Delivered";
-    else status = "Booked";
-    const shownDeliveredKg = legacy && status === "Completed" ? bookedKg : deliveredKg;
-    const remainingKg = status === "Completed" ? 0 : roundQty(Math.max(0, bookedKg - shownDeliveredKg), 3);
-    const reservedKg = product && CEMENT_BOOKING_ACTIVE.includes(status) ? remainingKg : 0;
-    const rate = Number(b.rate) || 0;
-    const totalAmount = roundMoney((Number(b.qty) || 0) * rate);
-    const deliveredValue = legacy && status === "Completed"
-      ? totalAmount
-      : roundMoney(activeDs.reduce((s, d) => s + cementToUnit(d.kg, unitKind, cs) * rate, 0));
-    const bookingPayments = (payments || []).filter((p) => p.bookingId === b.id && !isPaymentLinkedToCancelledInvoice(p, invoices || []));
-    const paid = roundMoney(bookingPayments.reduce((s, p) => s + (Number(p.amount) || 0), 0) + (b.advancePaymentId ? 0 : Number(b.advanceAmount) || 0));
-    const payable = status === "Cancelled" ? deliveredValue : totalAmount;
-    bookingInfo[b.id] = {
-      booking: b, isCement: !!product, product, productId: b.productId, unitKind, legacy, status,
-      bookedKg, deliveredKg: shownDeliveredKg, remainingKg, reservedKg,
-      deliveries: ds, activeDeliveries: activeDs, payments: bookingPayments,
-      totalAmount, deliveredValue, paid, payable, balance: roundMoney(payable - paid),
-      invoices: (invoices || []).filter((i) => i.fromBookingId === b.id || (i.bookingDeliveryId && ds.some((d) => d.id === i.bookingDeliveryId))),
-    };
-    if (!product) return;
-
-    // Replay the booking's life to get reservation changes in time order.
-    const events = [];
-    const createdAt = b.createdAt || "";
-    const createDate = b.date || cementLocalDate(createdAt) || todayStr;
-    events.push({ kind: "create", at: createdAt, date: createDate, order: 0 });
-    (b.editHistory || []).forEach((h, i) => {
-      if (h.qtyKgAfter != null) events.push({ kind: "edit", at: h.at || "", date: cementLocalDate(h.at) || createDate, order: 1, h, i });
-    });
-    ds.forEach((d) => {
-      events.push({ kind: "delivery", at: d.at || "", date: d.date, order: 2, d });
-      if (d.status === "Reversed") events.push({ kind: "deliveryReversal", at: d.reversedAt || "", date: cementLocalDate(d.reversedAt) || d.date, order: 3, d });
-    });
-    if (status === "Cancelled") events.push({ kind: "cancel", at: b.cancelledAt || "", date: cementLocalDate(b.cancelledAt) || createDate, order: 4 });
-    if (legacy && status === "Completed") events.push({ kind: "legacyComplete", at: "", date: (bookingInfo[b.id].invoices[0] || {}).date || createDate, order: 5 });
-    events.sort((x, y) => (x.kind === "create" ? -1 : y.kind === "create" ? 1 : 0) || (x.date + (x.at || "")).localeCompare(y.date + (y.at || "")) || x.order - y.order);
-
-    let st = { booked: cementBookingKgAtEdit(b, cs), delivered: 0, closed: false };
-    let level = 0;
-    const levelOf = () => (st.closed ? 0 : roundQty(Math.max(0, st.booked - st.delivered), 3));
-    const bookingRef = b.code || "";
-    events.forEach((ev) => {
-      const base = { productId: b.productId, ref: bookingRef, refId: b.id, party: b.customerName || "", date: ev.date, at: ev.at, bookingId: b.id };
-      if (ev.kind === "create") {
-        const next = levelOf();
-        push({ ...base, key: "bk:" + b.id, type: "Booking Reservation", reservedDeltaKg: next - level, sourceType: "booking", user: b.createdBy || "", notes: `Booked ${fmtCement(st.booked, cs)}` });
-        level = next;
-      } else if (ev.kind === "edit") {
-        st.booked = Number(ev.h.qtyKgAfter) || 0;
-        const next = levelOf();
-        if (!cementZero(next - level)) {
-          push({ ...base, key: `bkedit:${b.id}:${ev.i}`, type: "Reservation Change", reservedDeltaKg: next - level, sourceType: "booking", user: ev.h.by || "", notes: `Booking edited: ${fmtCement(ev.h.qtyKgBefore, cs)} → ${fmtCement(ev.h.qtyKgAfter, cs)}` });
-        }
-        level = next;
-      } else if (ev.kind === "delivery") {
-        const kg = roundQty(Number(ev.d.kg) || 0, 3);
-        st.delivered = roundQty(st.delivered + kg, 3);
-        const next = levelOf();
-        push({
-          ...base, key: "dlv:" + ev.d.id, type: "Delivery", ref: ev.d.code || bookingRef, refId: ev.d.id, outKg: kg, physicalDeltaKg: -kg,
-          reservedDeltaKg: next - level, sourceType: "delivery", user: ev.d.createdBy || "",
-          notes: `${bookingRef}${ev.d.notes ? " — " + ev.d.notes : ""}`,
-        });
-        level = next;
-      } else if (ev.kind === "deliveryReversal") {
-        const kg = roundQty(Number(ev.d.kg) || 0, 3);
-        st.delivered = roundQty(st.delivered - kg, 3);
-        const next = levelOf();
-        push({
-          ...base, key: "dlvrev:" + ev.d.id, type: "Reversal", ref: ev.d.code || bookingRef, refId: ev.d.id, inKg: kg, physicalDeltaKg: kg,
-          reservedDeltaKg: next - level, sourceType: "delivery", user: ev.d.reversedBy || "",
-          notes: `Delivery reversed${ev.d.reverseReason ? " — " + ev.d.reverseReason : ""}`,
-        });
-        level = next;
-      } else if (ev.kind === "cancel" || ev.kind === "legacyComplete") {
-        st.closed = true;
-        const next = levelOf();
-        if (!cementZero(next - level)) {
-          push({
-            ...base, key: `bkclose:${b.id}`, type: "Reservation Release", reservedDeltaKg: next - level, sourceType: "booking",
-            user: ev.kind === "cancel" ? b.cancelledBy || "" : "",
-            notes: ev.kind === "cancel" ? `Booking cancelled${b.cancelReason ? " — " + b.cancelReason : ""}` : "Completed by invoice (before delivery tracking)",
-          });
-        }
-        level = next;
-      }
-    });
-  });
-
-  /* ---- 3. Normal sales (invoices) ---- */
-  const deliveryById = new Map((deliveries || []).map((d) => [d.id, d]));
-  (invoices || []).forEach((inv) => {
-    const kgByProduct = cementInvoiceKgByProduct(inv, idx, cs);
-    const linked = inv.bookingDeliveryId ? deliveryById.get(inv.bookingDeliveryId) : null;
-    if (linked && linked.status !== "Reversed" && kgByProduct[linked.productId] != null) {
-      // The cement on this invoice already left stock through the booking delivery.
-      kgByProduct[linked.productId] = roundQty(Math.max(0, kgByProduct[linked.productId] - (Number(linked.kg) || 0)), 3);
-    }
-    Object.entries(kgByProduct).forEach(([productId, kg]) => {
-      if (cementZero(kg) || !countsOn(productId, inv.date)) return;
-      const base = { productId, ref: inv.number, refId: inv.id, party: inv.customerName || "", sourceType: "invoice", invoiceId: inv.id };
-      push({ ...base, key: `inv:${inv.id}:${productId}`, type: "Sale", date: inv.date, at: inv.createdAt || "", outKg: kg, physicalDeltaKg: -kg, notes: linked ? "Extra cement on booking invoice" : "" });
-      if (isInvoiceCancelled(inv)) {
-        const c = [...(inv.editHistory || [])].reverse().find((h) => h.action === "Cancelled");
-        push({ ...base, key: `invrev:${inv.id}:${productId}`, type: "Reversal", date: cementLocalDate(c?.editedAt) || inv.date, at: c?.editedAt || "", inKg: kg, physicalDeltaKg: kg, user: c?.editedBy || "", notes: "Invoice cancelled — stock restored" });
-      }
-    });
-  });
-
-  /* ---- 4. Sales returns ---- */
-  const invoiceById = new Map((invoices || []).map((i) => [i.id, i]));
-  (returns || []).forEach((r) => {
-    const inv = invoiceById.get(r.invoiceId);
-    const damaged = r.stockCondition === "Damaged";
-    const kgByProduct = {};
-    (r.items || []).forEach((it) => {
-      const line = inv?.items?.[it.itemIndex] || { name: it.name, unit: it.unit };
-      const p = cementProductForLine(idx, { ...line, name: line.name || it.name });
-      if (!p) return;
-      kgByProduct[p.id] = roundQty((kgByProduct[p.id] || 0) + cementToKg(it.qtyReturned, it.unit || line.unit, cementCsFor(inv, cementCsFor(r, cs))), 3);
-    });
-    Object.entries(kgByProduct).forEach(([productId, kg]) => {
-      if (cementZero(kg) || !countsOn(productId, r.date)) return;
-      const base = { productId, ref: r.code || "", refId: r.id, party: r.customerName || "", sourceType: "return" };
-      const eff = damaged ? { damagedDeltaKg: kg } : { returnKg: kg, physicalDeltaKg: kg };
-      push({ ...base, key: `ret:${r.id}:${productId}`, type: "Return", date: r.date, at: r.createdAt || "", ...eff, notes: `${damaged ? "Damaged — kept separate" : "Resalable"} · ${r.invoiceNumber || ""} · ${r.reason || ""}` });
-      if (r.status === "Deleted") {
-        push({ ...base, key: `retrev:${r.id}:${productId}`, type: "Reversal", date: cementLocalDate(r.deletedAt) || r.date, at: r.deletedAt || "",
-          returnKg: damaged ? 0 : -kg, physicalDeltaKg: damaged ? 0 : -kg, damagedDeltaKg: damaged ? -kg : 0, notes: `Return deleted${r.deleteReason ? " — " + r.deleteReason : ""}` });
-      }
-    });
-  });
-
-  /* ---- 5. Exchanges ---- */
-  (exchanges || []).forEach((ex) => {
-    const inv = invoiceById.get(ex.invoiceId);
-    const damaged = ex.returnedCondition === "Damaged";
-    const inKg = {};
-    const outKg = {};
-    (ex.returnedItems || []).forEach((it) => {
-      const line = inv?.items?.[it.itemIndex] || { name: it.name, unit: it.unit };
-      const p = cementProductForLine(idx, { ...line, name: line.name || it.name });
-      if (p) inKg[p.id] = roundQty((inKg[p.id] || 0) + cementToKg(it.qty, it.unit || line.unit, cementCsFor(inv, cementCsFor(ex, cs))), 3);
-    });
-    (ex.newItems || []).forEach((it) => {
-      const p = cementProductForLine(idx, it);
-      if (p) outKg[p.id] = roundQty((outKg[p.id] || 0) + cementToKg(it.qty, it.unit, cementCsFor(ex, cs)), 3);
-    });
-    new Set([...Object.keys(inKg), ...Object.keys(outKg)]).forEach((productId) => {
-      if (!countsOn(productId, ex.date)) return;
-      const back = inKg[productId] || 0;
-      const out = outKg[productId] || 0;
-      if (cementZero(back) && cementZero(out)) return;
-      const base = { productId, ref: ex.code || "", refId: ex.id, party: ex.customerName || "", sourceType: "exchange" };
-      const eff = {
-        returnKg: damaged ? 0 : back, outKg: out, damagedDeltaKg: damaged ? back : 0,
-        physicalDeltaKg: roundQty((damaged ? 0 : back) - out, 3),
-      };
-      push({ ...base, key: `ex:${ex.id}:${productId}`, type: "Exchange", date: ex.date, at: ex.createdAt || "", ...eff, notes: `In ${fmtCement(back, cs)}${damaged && back ? " (damaged)" : ""} / Out ${fmtCement(out, cs)} · ${ex.invoiceNumber || ""}` });
-      if (ex.status === "Deleted") {
-        push({ ...base, key: `exrev:${ex.id}:${productId}`, type: "Reversal", date: cementLocalDate(ex.deletedAt) || ex.date, at: ex.deletedAt || "",
-          returnKg: -eff.returnKg, outKg: -eff.outKg, damagedDeltaKg: -eff.damagedDeltaKg, physicalDeltaKg: -eff.physicalDeltaKg,
-          notes: `Exchange deleted${ex.deleteReason ? " — " + ex.deleteReason : ""}` });
-      }
-    });
-  });
-
-  /* ---- Running balances, in time order ---- */
-  rows.sort((a, b) =>
-    (a.date || "").localeCompare(b.date || "") || a.rank - b.rank || (a.at || "").localeCompare(b.at || "") || a.key.localeCompare(b.key));
-  const run = {};
-  rows.forEach((r) => {
-    const s = prod[r.productId];
-    if (!run[r.productId]) run[r.productId] = { physical: 0, damaged: 0, reserved: 0 };
-    const c = run[r.productId];
-    c.physical = roundQty(c.physical + r.physicalDeltaKg, 3);
-    c.damaged = roundQty(c.damaged + r.damagedDeltaKg, 3);
-    c.reserved = roundQty(c.reserved + r.reservedDeltaKg, 3);
-    r.runPhysicalKg = c.physical;
-    r.runDamagedKg = c.damaged;
-    r.runReservedKg = c.reserved;
-    r.runAvailableKg = roundQty(c.physical - c.reserved, 3);
-    r.productName = s?.product?.name || "";
-    r.brand = s?.product?.brand || "";
-    if (r.date === todayStr && r.type !== "Opening") {
-      if (r.physicalDeltaKg > 0) s.todayInKg = roundQty(s.todayInKg + r.physicalDeltaKg, 3);
-      if (r.physicalDeltaKg < 0) s.todayOutKg = roundQty(s.todayOutKg - r.physicalDeltaKg, 3);
-    }
-  });
-  Object.values(prod).forEach((s) => {
-    const c = run[s.productId] || { physical: 0, damaged: 0, reserved: 0 };
-    s.physicalKg = c.physical;
-    s.damagedKg = c.damaged;
-    s.reservedKg = c.reserved;
-    s.availableKg = roundQty(c.physical - c.reserved, 3);
-    s.low = s.tracked && s.minKg > 0 && s.availableKg < s.minKg - CEMENT_EPS_KG;
-    s.negative = s.physicalKg < -CEMENT_EPS_KG;
-    const unitKg = cementToKg(1, s.product.unit || "Bag", cs) || cementBagKg(cs);
-    s.costPerKg = s.purchasedKg > 0 ? s.purchaseCost / s.purchasedKg : (Number(s.product.price) || 0) / unitKg;
-    s.valuation = roundMoney(Math.max(0, s.physicalKg) * s.costPerKg);
-  });
-
-  const totals = Object.values(prod).reduce((t, s) => {
-    if (!s.tracked && cementZero(s.reservedKg)) return t;
-    t.physicalKg += s.physicalKg; t.reservedKg += s.reservedKg; t.availableKg += s.availableKg; t.damagedKg += s.damagedKg;
-    t.todayInKg += s.todayInKg; t.todayOutKg += s.todayOutKg; t.valuation += s.valuation; if (s.low) t.lowCount += 1;
-    return t;
-  }, { physicalKg: 0, reservedKg: 0, availableKg: 0, damagedKg: 0, todayInKg: 0, todayOutKg: 0, valuation: 0, lowCount: 0 });
-  Object.keys(totals).forEach((k) => { if (k !== "lowCount" && k !== "valuation") totals[k] = roundQty(totals[k], 3); });
-
-  return { cs, idx, rows, products: prod, totals, bookings: bookingInfo, invoiceByDelivery, deliveryById, today: todayStr };
-}
-
-// kg of each cement product on an invoice (any status).
-function cementInvoiceKgByProduct(inv, idx, cs) {
-  const out = {};
-  const docCs = cementCsFor(inv, cs);
-  (inv?.items || []).forEach((line) => {
-    const p = cementProductForLine(idx, line);
-    if (!p) return;
-    out[p.id] = roundQty((out[p.id] || 0) + cementToKg(line.qty, line.unit, docCs), 3);
-  });
-  return out;
-}
-
-/* ---------------- Validation used by every stock-changing screen ---------------- */
-
-function cementStockShortMsg(state, productId, requiredKg, availableKg, what) {
-  const cs = state.cs;
-  const name = state.products[productId]?.product?.name || "Cement";
-  return `${name}: ${what}. Required ${fmtCement(requiredKg, cs)}, available ${fmtCement(Math.max(0, availableKg), cs)}.`;
-}
-
-// Extra stock an invoice (new or edited) takes out, compared with what it took before.
-function cementCheckInvoice(state, draft, original) {
-  const errors = [];
-  const warnings = [];
-  const after = cementInvoiceOutflow(state, draft);
-  const before = original && !isInvoiceCancelled(original) ? cementInvoiceOutflow(state, original) : {};
-  new Set([...Object.keys(after), ...Object.keys(before)]).forEach((productId) => {
-    const delta = roundQty((after[productId] || 0) - (before[productId] || 0), 3);
-    if (delta <= CEMENT_EPS_KG) return;
-    const s = state.products[productId];
-    if (delta > s.physicalKg + CEMENT_EPS_KG) errors.push(cementStockShortMsg(state, productId, delta, s.physicalKg, "not enough physical stock (stock cannot go negative)"));
-    else if (delta > s.availableKg + CEMENT_EPS_KG) warnings.push(cementStockShortMsg(state, productId, delta, s.availableKg, `this sale uses ${fmtCement(delta - Math.max(0, s.availableKg), state.cs)} that is reserved for advance bookings`));
-  });
-  return { errors, warnings };
-}
-function cementInvoiceOutflow(state, inv) {
-  const kg = cementInvoiceKgByProduct(inv, state.idx, state.cs);
-  const linked = inv.bookingDeliveryId ? state.deliveryById.get(inv.bookingDeliveryId) : null;
-  if (linked && linked.status !== "Reversed" && kg[linked.productId] != null) {
-    kg[linked.productId] = roundQty(Math.max(0, kg[linked.productId] - (Number(linked.kg) || 0)), 3);
-  }
-  Object.keys(kg).forEach((pid) => {
-    const s = state.products[pid];
-    if (!s || !s.tracked || !inv.date || inv.date < s.openingDate) delete kg[pid];
-  });
-  return kg;
-}
-function cementCheckExchange(state, ex) {
-  const errors = [];
-  const warnings = [];
-  const out = {};
-  (ex.newItems || []).forEach((it) => {
-    const p = cementProductForLine(state.idx, it);
-    if (!p) return;
-    const s = state.products[p.id];
-    if (!s.tracked || (ex.date || state.today) < s.openingDate) return;
-    out[p.id] = roundQty((out[p.id] || 0) + cementToKg(it.qty, it.unit, state.cs), 3);
-  });
-  Object.entries(out).forEach(([productId, kg]) => {
-    const s = state.products[productId];
-    if (kg > s.physicalKg + CEMENT_EPS_KG) errors.push(cementStockShortMsg(state, productId, kg, s.physicalKg, "not enough physical stock for the exchange"));
-    else if (kg > s.availableKg + CEMENT_EPS_KG) warnings.push(cementStockShortMsg(state, productId, kg, s.availableKg, "this exchange uses stock reserved for advance bookings"));
-  });
-  return { errors, warnings };
-}
-// Can this booking (new or edited) reserve `remainingKg`?
-function cementCheckReservation(state, productId, remainingKg, bookingId) {
-  const s = state.products[productId];
-  if (!s) return { ok: true, untracked: false };
-  if (!s.tracked) return { ok: true, untracked: true };
-  const ownReserved = bookingId ? state.bookings[bookingId]?.reservedKg || 0 : 0;
-  const availableForThis = roundQty(s.physicalKg - (s.reservedKg - ownReserved), 3);
-  return { ok: remainingKg <= availableForThis + CEMENT_EPS_KG, availableKg: availableForThis, requiredKg: remainingKg };
-}
-function cementCheckDelivery(state, bookingId, kg) {
-  const info = state.bookings[bookingId];
-  if (!info || !info.isCement) return "Booking cement product nahi hai.";
-  if (!(kg > CEMENT_EPS_KG)) return "Delivery quantity zero se zyada honi chahiye.";
-  if (!CEMENT_BOOKING_ACTIVE.includes(info.status)) return `Booking ${info.status} hai — is par delivery nahi ho sakti.`;
-  if (kg > info.remainingKg + CEMENT_EPS_KG) return `Delivery remaining booking se zyada hai. Remaining ${fmtCement(info.remainingKg, state.cs)}, entered ${fmtCement(kg, state.cs)}.`;
-  const s = state.products[info.productId];
-  if (!s.tracked) return `${s.product.name} ka Opening Stock set nahi hai. Pehle Cement Stock mein opening stock darj karein.`;
-  if (kg > s.physicalKg + CEMENT_EPS_KG) return cementStockShortMsg(state, info.productId, kg, s.physicalKg, "not enough physical stock for this delivery");
-  return "";
-}
-
-
-/* ---------------- Cement storage: one kv row per movement / delivery ----------------
-   Same kv_store table the ERP already uses. When Supabase is configured a
-   failed call is reported to the user (never silently written to this
-   browser only), so a delivery is never shown as saved when it is not. */
-
-// Create only. Returns "created", or "exists" when that id was already saved
-// (a repeated click / retry) — in that case nothing is written again.
-async function cementCreateRecord(key, value) {
-  if (supabase) {
-    const { error } = await supabase.from("kv_store").insert({ key, value, updated_at: new Date().toISOString() });
-    if (error) {
-      if (error.code === "23505" || /duplicate key/i.test(error.message || "")) return "exists";
-      throw error;
-    }
-    return "created";
-  }
-  const k = LS_PREFIX + key;
-  if (window.localStorage.getItem(k) !== null) return "exists";
-  window.localStorage.setItem(k, JSON.stringify(value));
-  return "created";
-}
-
-// Update an existing record (used only to mark a movement / delivery Reversed).
-async function cementPutRecord(key, value) {
-  if (supabase) {
-    const { error } = await supabase.from("kv_store").upsert({ key, value, updated_at: new Date().toISOString() });
-    if (error) throw error;
-    return;
-  }
-  window.localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
-}
-
-async function cementListRecords(prefix) {
-  let values = [];
-  if (supabase) {
-    const pattern = prefix.replace(/[\\%_]/g, (ch) => "\\" + ch) + "%";
-    const pageSize = 1000;
-    for (let from = 0; ; from += pageSize) {
-      const { data, error } = await supabase.from("kv_store").select("key,value").like("key", pattern).order("key").range(from, from + pageSize - 1);
-      if (error) throw error;
-      const rows = data || [];
-      values.push(...rows.filter((row) => String(row.key).startsWith(prefix)).map((row) => row.value));
-      if (rows.length < pageSize) break;
-    }
-  } else {
-    const full = LS_PREFIX + prefix;
-    for (let i = 0; i < window.localStorage.length; i++) {
-      const k = window.localStorage.key(i);
-      if (!k || !k.startsWith(full)) continue;
-      try { values.push(JSON.parse(window.localStorage.getItem(k))); } catch {}
-    }
-  }
-  return values.filter((v) => v && v.id);
-}
-
-function cementUpsertById(list, record) {
-  const i = list.findIndex((x) => x.id === record.id);
-  if (i === -1) return [...list, record];
-  const next = list.slice();
-  next[i] = record;
-  return next;
-}
-
-function cementErrorText(e) {
-  return (e && (e.message || e.error_description || e.details)) || String(e || "Unknown error");
-}
-
-async function cementLoadAll() {
-  try {
-    const [movements, deliveries] = await Promise.all([cementListRecords(CEMENT_MV_PREFIX), cementListRecords(CEMENT_DLV_PREFIX)]);
-    return { movements, deliveries, error: "" };
-  } catch (e) {
-    console.error("cement stock records could not be loaded", e);
-    return { movements: [], deliveries: [], error: cementErrorText(e) };
-  }
-}
-
-
-/* ---------------- Cement UI: shared pieces ---------------- */
-
-const CEMENT_PAYMENT_METHODS = ["Cash", "Bank Transfer", "Cheque", "Easypaisa/JazzCash"];
-
-function CementStat({ label, kg, cs, value, sub, accent, onClick }) {
-  return (
-    <div
-      className={`bg-white border border-slate-200 p-4 min-w-0 ${onClick ? "cursor-pointer hover:border-slate-400" : ""}`}
-      onClick={onClick}
-    >
-      <div className="text-[11px] uppercase tracking-wide text-slate-500 font-bold">{t(label)}</div>
-      <div className={`text-xl md:text-2xl font-black mt-1 ${accent || "text-slate-900"}`}>{value != null ? value : fmtTons(kg)}</div>
-      <div className="text-xs text-slate-500 font-semibold mt-0.5">{sub != null ? sub : kg != null ? fmtBags(kg, cs) : ""}</div>
-    </div>
-  );
-}
-
-// Quantity entry in tons or bags with the live equivalent underneath.
-function CementQtyInput({ label, qty, unit, onChange, cs, autoFocus }) {
-  const kg = cementToKg(qty, unit, cs);
-  return (
-    <Field label={label || "Quantity"}>
-      <div className="flex gap-2">
-        <input
-          type="number" step="any" min="0" className={`${inputCls} flex-1`} value={qty} autoFocus={autoFocus}
-          onChange={(e) => onChange({ qty: e.target.value, unit })} data-cement="qty"
-        />
-        <div className="flex border border-slate-300 shrink-0">
-          {["Ton", "Bag"].map((u) => (
-            <button
-              key={u} type="button" data-cement-unit={u}
-              onClick={() => {
-                // Switching unit keeps the same physical quantity.
-                const nextQty = qty === "" ? "" : String(cementToUnit(kg, u, cs));
-                onChange({ qty: nextQty, unit: u });
-              }}
-              className={`px-3 text-xs font-bold uppercase ${cementUnitKind(unit) === cementUnitKind(u) ? "bg-slate-900 text-white" : "bg-white text-slate-600"}`}
-            >
-              {u === "Ton" ? t("Metric Tons") : t("Bags")}
-            </button>
-          ))}
-        </div>
-      </div>
-      <span className="block text-xs text-slate-500 mt-1" data-cement="equivalent">
-        = {fmtTons(kg)} = {fmtBags(kg, cs)} <span className="text-slate-400">({fmtQty(cementBagKg(cs))} kg / bag)</span>
-      </span>
-    </Field>
-  );
-}
-
-function CementTabs({ tabs, active, onChange }) {
-  return (
-    <div className="flex flex-wrap gap-1 mb-4 border-b border-slate-200 print:hidden">
-      {tabs.map(([id, label]) => (
-        <button
-          key={id} type="button" onClick={() => onChange(id)}
-          className={`px-3 py-2 text-xs font-bold uppercase tracking-wide -mb-px border-b-2 ${active === id ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-900"}`}
-        >
-          {t(label)}
-        </button>
-      ))}
-    </div>
-  );
-}
-
-function CementStatusBadge({ status }) {
-  const cls = {
-    "Booked": "bg-blue-50 text-blue-700 border-blue-200",
-    "Partially Delivered": "bg-amber-50 text-amber-700 border-amber-200",
-    "Completed": "bg-emerald-50 text-emerald-700 border-emerald-200",
-    "Cancelled": "bg-slate-100 text-slate-500 border-slate-300",
-    "Low": "bg-red-50 text-red-700 border-red-200",
-    "OK": "bg-emerald-50 text-emerald-700 border-emerald-200",
-    "Not Set": "bg-slate-100 text-slate-500 border-slate-300",
-    "Negative": "bg-red-600 text-white border-red-700",
-    "Reversed": "bg-slate-100 text-slate-500 border-slate-300",
-    "Active": "bg-emerald-50 text-emerald-700 border-emerald-200",
-  }[status] || "bg-slate-50 text-slate-600 border-slate-200";
-  return <span className={`inline-block px-2 py-0.5 text-[10px] font-black uppercase tracking-wide border ${cls}`}>{tStatus(status)}</span>;
-}
-
-function useCementPager(rows, pageSize) {
-  const [page, setPage] = useState(1);
-  const pages = Math.max(1, Math.ceil(rows.length / pageSize));
-  const current = Math.min(page, pages);
-  useEffect(() => { if (page > pages) setPage(pages); }, [pages]);
-  return { page: current, pages, setPage, pageRows: rows.slice((current - 1) * pageSize, current * pageSize), total: rows.length };
-}
-function CementPager({ pager }) {
-  if (pager.pages <= 1) return <div className="text-xs text-slate-400 mt-2 print:hidden">{pager.total} {t("records")}</div>;
-  return (
-    <div className="flex items-center gap-2 mt-2 text-xs print:hidden">
-      <Btn small variant="ghost" disabled={pager.page <= 1} onClick={() => pager.setPage(pager.page - 1)}>‹ Prev</Btn>
-      <span className="text-slate-500">{t("Page")} {pager.page} / {pager.pages} · {pager.total} {t("records")}</span>
-      <Btn small variant="ghost" disabled={pager.page >= pager.pages} onClick={() => pager.setPage(pager.page + 1)}>Next ›</Btn>
-    </div>
-  );
-}
-
-function cementCsvCell(v) {
-  const s = v == null ? "" : String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-function cementDownloadCsv(filename, columns, rows) {
-  const lines = [columns.map((c) => cementCsvCell(c.label)).join(",")];
-  rows.forEach((r) => lines.push(columns.map((c) => cementCsvCell(c.csv ? c.csv(r) : r[c.key])).join(",")));
-  // BOM so Excel opens Urdu / special characters correctly.
-  const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = filename; a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-const cementThCls = "px-3 py-2 whitespace-nowrap";
-const cementTdCls = "px-3 py-2 whitespace-nowrap";
-const cementTableHead = "text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200 bg-slate-50";
-
-function CementSaving({ busy, error }) {
-  if (error) return <div className="bg-red-50 border border-red-200 text-red-700 text-sm font-semibold p-2 mb-3" role="alert">{error}</div>;
-  if (busy) return <div className="text-xs text-slate-500 mb-3">{t("Saving...")}</div>;
-  return null;
-}
-
-function CementLoadBanner({ error }) {
-  if (!error) return null;
-  return (
-    <div className="bg-red-50 border border-red-300 text-red-700 text-sm font-semibold p-3 mb-4" role="alert">
-      {t("Stock records could not be loaded from the database. Stock-changing actions are disabled until the page is reloaded successfully.")}
-      <div className="text-xs font-normal mt-1">{error}</div>
-    </div>
-  );
-}
-
-
-/* ---------------- Cement Stock page ---------------- */
-
-function CementStockPage({ state, products, movements, customers, bookings, deliveries, currentUser, cementSettings, settings, loadError, onSaveMovement, onReverseMovement, onOpenProducts }) {
-  const cs = state.cs;
-  const [tab, setTab] = useState("dashboard");
-  const canView = cementCan(currentUser, cs, "view");
-  const cementProducts = products.filter((p) => p.isCement);
-  if (!canView) return <div className="text-slate-500">{t("You do not have permission to view cement stock.")}</div>;
-
-  return (
-    <div>
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-        <h2 className="text-xl font-black uppercase tracking-tight">{t("Cement Stock")}</h2>
-        <div className="text-xs text-slate-500">1 {t("metric ton")} = 1,000 kg · 1 {t("bag")} = {fmtQty(cementBagKg(cs))} kg · 1 {t("metric ton")} = {fmtQty(cementBagsPerTon(cs))} {t("bags")}</div>
-      </div>
-      <CementLoadBanner error={loadError} />
-      {cementProducts.length === 0 && (
-        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm p-3 mb-4">
-          {t("No cement products yet. Open Products, edit a cement product and tick “Cement product (track stock)”.")}{" "}
-          <button className="font-bold underline" onClick={onOpenProducts}>{t("Open Products")}</button>
-        </div>
-      )}
-      <CementTabs
-        active={tab} onChange={setTab}
-        tabs={[["dashboard", "Stock Dashboard"], ["in", "Stock In / Purchase"], ["adjust", "Adjustment / Damage"], ["movements", "Stock Movement History"], ["reports", "Stock & Booking Reports"]]}
-      />
-      {tab === "dashboard" && <CementStockDashboard state={state} onTab={setTab} />}
-      {tab === "in" && <CementStockInTab state={state} products={cementProducts} movements={movements} currentUser={currentUser} disabled={!!loadError} onSave={onSaveMovement} onReverse={onReverseMovement} />}
-      {tab === "adjust" && <CementAdjustTab state={state} products={cementProducts} movements={movements} currentUser={currentUser} disabled={!!loadError} onSave={onSaveMovement} onReverse={onReverseMovement} />}
-      {tab === "movements" && <CementMovementLedger state={state} products={cementProducts} />}
-      {tab === "reports" && <CementReports state={state} products={cementProducts} customers={customers} bookings={bookings} deliveries={deliveries} settings={settings} />}
-    </div>
-  );
-}
-
-function CementStockDashboard({ state, onTab }) {
-  const cs = state.cs;
-  const T = state.totals;
-  const list = Object.values(state.products);
-  const lows = list.filter((s) => s.low);
-  return (
-    <div>
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-6" data-cement="stock-cards">
-        <CementStat label="Total Physical Stock" kg={T.physicalKg} cs={cs} />
-        <CementStat label="Reserved Stock" kg={T.reservedKg} cs={cs} accent="text-amber-600" />
-        <CementStat label="Available Stock" kg={T.availableKg} cs={cs} accent={T.availableKg < 0 ? "text-red-600" : "text-emerald-700"} />
-        <CementStat label="Today's Stock In" kg={T.todayInKg} cs={cs} />
-        <CementStat label="Today's Stock Out" kg={T.todayOutKg} cs={cs} />
-        <CementStat label="Low Stock Alerts" value={String(T.lowCount)} sub={T.lowCount ? lows.map((s) => s.product.name).join(", ") : t("All above minimum")} accent={T.lowCount ? "text-red-600" : "text-slate-900"} />
-        <CementStat label="Damaged Stock" kg={T.damagedKg} cs={cs} accent="text-red-600" />
-      </div>
-      <div className="text-xs text-slate-500 mb-2">{t("Available = Physical − Reserved. Reserved stock is cement still owed on active advance bookings; it has not left the yard.")}</div>
-      <div className="bg-white border border-slate-200 overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead><tr className={cementTableHead}>
-            <th className={cementThCls}>Product</th><th className={cementThCls}>Brand</th>
-            <th className={`${cementThCls} text-right`}>Physical</th><th className={`${cementThCls} text-right`}>Reserved</th>
-            <th className={`${cementThCls} text-right`}>Available</th><th className={`${cementThCls} text-right`}>Damaged</th>
-            <th className={`${cementThCls} text-right`}>Minimum</th><th className={cementThCls}>Tracking From</th><th className={cementThCls}>Status</th>
-          </tr></thead>
-          <tbody>
-            {list.length === 0 && <tr><td colSpan={9} className="px-4 py-6 text-center text-slate-400">{t("No cement products.")}</td></tr>}
-            {list.map((s) => {
-              const status = !s.tracked ? "Not Set" : s.negative ? "Negative" : s.low ? "Low" : "OK";
-              return (
-                <tr key={s.productId} className="border-t border-slate-100" data-cement-product={s.product.name}>
-                  <td className={`${cementTdCls} font-bold`}>{s.product.name}</td>
-                  <td className={cementTdCls}>{s.product.brand || "-"}</td>
-                  <td className={`${cementTdCls} text-right`}><div className="font-bold">{s.tracked ? fmtTons(s.physicalKg) : "—"}</div><div className="text-[11px] text-slate-500">{s.tracked ? fmtBags(s.physicalKg, cs) : ""}</div></td>
-                  <td className={`${cementTdCls} text-right text-amber-700`}><div className="font-bold">{fmtTons(s.reservedKg)}</div><div className="text-[11px]">{fmtBags(s.reservedKg, cs)}</div></td>
-                  <td className={`${cementTdCls} text-right ${s.availableKg < 0 ? "text-red-600" : "text-emerald-700"}`}><div className="font-black">{s.tracked ? fmtTons(s.availableKg) : "—"}</div><div className="text-[11px]">{s.tracked ? fmtBags(s.availableKg, cs) : ""}</div></td>
-                  <td className={`${cementTdCls} text-right text-red-600`}><div className="font-bold">{fmtTons(s.damagedKg)}</div><div className="text-[11px]">{fmtBags(s.damagedKg, cs)}</div></td>
-                  <td className={`${cementTdCls} text-right text-slate-500`}>{s.minKg ? fmtTons(s.minKg) : "-"}</td>
-                  <td className={cementTdCls}>{s.tracked ? fmtDate(s.openingDate) : <button className="text-xs font-bold text-blue-700 underline" onClick={() => onTab("in")}>{t("Set opening stock")}</button>}</td>
-                  <td className={cementTdCls}><CementStatusBadge status={status} /></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
-
-function cementNewMovementForm(kind, products) {
-  return {
-    id: uid("smv"), kind, productId: products[0]?.id || "", date: todayISO(), qty: "", unit: "Ton",
-    supplier: "", supplierInvoiceNo: "", rate: "", direction: "in", reason: "", notes: "",
-  };
-}
-
-function CementMovementList({ state, movements, kinds, currentUser, onReverse, emptyText }) {
-  const cs = state.cs;
-  const [reversing, setReversing] = useState(null);
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const list = movements.filter((m) => kinds.includes(m.kind)).sort((a, b) => (b.date + (b.createdAt || "")).localeCompare(a.date + (a.createdAt || "")));
-  const pager = useCementPager(list, 20);
-  const canReverse = cementCan(currentUser, cs, "reverse");
-  async function confirmReverse() {
-    if (!reason.trim()) { setError(t("Reason is required.")); return; }
-    setBusy(true); setError("");
-    const res = await onReverse(reversing, reason.trim());
-    setBusy(false);
-    if (res && res.error) { setError(res.error); return; }
-    setReversing(null); setReason("");
-  }
-  return (
-    <div className="bg-white border border-slate-200 overflow-x-auto">
-      <table className="w-full text-sm">
-        <thead><tr className={cementTableHead}>
-          <th className={cementThCls}>Date</th><th className={cementThCls}>Type</th><th className={cementThCls}>Product</th>
-          <th className={`${cementThCls} text-right`}>Quantity</th><th className={cementThCls}>Supplier / Reason</th>
-          <th className={cementThCls}>Ref</th><th className={`${cementThCls} text-right`}>Cost</th><th className={cementThCls}>By</th><th className={cementThCls}>Status</th><th></th>
-        </tr></thead>
-        <tbody>
-          {list.length === 0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-slate-400">{t(emptyText)}</td></tr>}
-          {pager.pageRows.map((m) => {
-            const name = state.products[m.productId]?.product?.name || m.productName || "-";
-            const label = m.kind === "Adjustment" ? `Adjustment (${m.direction === "out" ? "−" : "+"})` : m.kind === "DamageWriteOff" ? "Damage Write-off" : m.kind === "Opening" ? "Opening Stock" : m.kind;
-            return (
-              <tr key={m.id} className={`border-t border-slate-100 ${m.status === "Reversed" ? "opacity-50" : ""}`}>
-                <td className={cementTdCls}>{fmtDate(m.date)}</td>
-                <td className={`${cementTdCls} font-bold`}>{t(label)}</td>
-                <td className={cementTdCls}>{name}</td>
-                <td className={`${cementTdCls} text-right`}><div className="font-bold">{fmtTons(m.kg)}</div><div className="text-[11px] text-slate-500">{fmtBags(m.kg, cs)}</div></td>
-                <td className={`${cementTdCls} whitespace-normal max-w-[260px]`}>{m.supplier || m.reason || "-"}{m.notes && m.notes !== m.reason ? <div className="text-[11px] text-slate-400">{m.notes}</div> : null}</td>
-                <td className={cementTdCls}><div className="font-bold text-blue-700">{m.code}</div>{m.supplierInvoiceNo && <div className="text-[11px] text-slate-500">{t("Inv")} {m.supplierInvoiceNo}</div>}</td>
-                <td className={`${cementTdCls} text-right`}>{m.kind === "Purchase" ? <><div className="font-bold">{fmtMoney(m.totalCost)}</div><div className="text-[11px] text-slate-500">{fmtMoney(m.rate)} / {t(cementUnitLabel(cementUnitKind(m.unitEntered)))}</div></> : "-"}</td>
-                <td className={`${cementTdCls} text-xs text-slate-500`}>{m.createdBy}<div>{fmtDateTime(m.createdAt)}</div></td>
-                <td className={cementTdCls}><CementStatusBadge status={m.status === "Reversed" ? "Reversed" : "Active"} />{m.status === "Reversed" && <div className="text-[10px] text-slate-500 max-w-[160px] whitespace-normal">{m.reverseReason}</div>}</td>
-                <td className={`${cementTdCls} text-right`}>
-                  {canReverse && m.status !== "Reversed" && (
-                    <button className="text-xs font-bold text-red-600 hover:underline" onClick={() => { setReversing(m); setReason(""); setError(""); }}>{t("Reverse")}</button>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
-      <div className="px-3 pb-2"><CementPager pager={pager} /></div>
-      {reversing && (
-        <Modal title="Reverse Stock Entry" onClose={() => setReversing(null)}>
-          <div className="text-sm mb-3">
-            {reversing.code} — {fmtCement(reversing.kg, cs)}. {t("The original entry stays in history and a reversal entry is added.")}
-          </div>
-          <CementSaving busy={busy} error={error} />
-          <Field label="Reason (required)"><input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus /></Field>
-          <div className="flex gap-2"><Btn variant="danger" disabled={busy} onClick={confirmReverse}>Confirm Reverse</Btn><Btn variant="ghost" onClick={() => setReversing(null)}>Cancel</Btn></div>
-        </Modal>
-      )}
-    </div>
-  );
-}
-
-function CementStockInTab({ state, products, movements, currentUser, disabled, onSave, onReverse }) {
-  const cs = state.cs;
-  const canIn = cementCan(currentUser, cs, "stockIn");
-  const [form, setForm] = useState(() => cementNewMovementForm("Purchase", products));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [saved, setSaved] = useState("");
-  const s = state.products[form.productId];
-  const kind = s && !s.tracked ? "Opening" : form.kind === "Opening" ? "Purchase" : form.kind;
-  const kg = cementToKg(form.qty, form.unit, cs);
-  const total = roundMoney((Number(form.qty) || 0) * (Number(form.rate) || 0));
-
-  useEffect(() => { if (!form.productId && products[0]) setForm((f) => ({ ...f, productId: products[0].id })); }, [products.length]);
-
-  async function submit() {
-    setError(""); setSaved("");
-    if (!s) { setError(t("Select a cement product.")); return; }
-    if (!(kg > CEMENT_EPS_KG)) { setError(t("Quantity must be more than zero.")); return; }
-    if (!form.date) { setError(t("Date is required.")); return; }
-    if (kind === "Purchase" && form.date < s.openingDate) { setError(`${t("Purchase date cannot be before the opening stock date")} (${fmtDate(s.openingDate)}).`); return; }
-    if (kind === "Purchase" && !form.supplier.trim()) { setError(t("Supplier is required for a purchase.")); return; }
-    const record = {
-      id: form.id, code: cementCode(kind === "Opening" ? "OPN" : "PUR", form.id), kind, productId: s.productId, productName: s.product.name,
-      date: form.date, qtyEntered: Number(form.qty), unitEntered: cementUnitLabel(cementUnitKind(form.unit)), kg,
-      supplier: kind === "Purchase" ? form.supplier.trim() : "", supplierInvoiceNo: kind === "Purchase" ? form.supplierInvoiceNo.trim() : "",
-      rate: kind === "Purchase" ? Number(form.rate) || 0 : 0, totalCost: kind === "Purchase" ? total : 0,
-      notes: form.notes.trim(), reason: kind === "Opening" ? "Opening stock" : "",
-      status: "Active", createdBy: currentUser?.name || currentUser?.username || "", createdAt: new Date().toISOString(),
-    };
-    if (!confirm(`${t(kind === "Opening" ? "Save opening stock" : "Save purchase")}: ${s.product.name} — ${fmtCement(kg, cs)}?`)) return;
-    setBusy(true);
-    const res = await onSave(record);
-    setBusy(false);
-    if (res && res.error) { setError(res.error); return; }
-    setSaved(`${t(kind === "Opening" ? "Opening stock saved" : "Purchase saved")}: ${record.code}`);
-    setForm({ ...cementNewMovementForm("Purchase", products), productId: s.productId, unit: form.unit, supplier: kind === "Purchase" ? form.supplier : "" });
-  }
-
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,420px)_1fr] gap-6">
-      <div className="bg-white border border-slate-200 p-4 self-start">
-        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-3">{t(kind === "Opening" ? "Opening Stock" : "Purchase / Stock In")}</div>
-        {!canIn && <div className="text-sm text-red-600 mb-3">{t("You do not have permission to add stock.")}</div>}
-        <Field label="Cement Product / Brand">
-          <select className={inputCls} value={form.productId} onChange={(e) => setForm({ ...form, productId: e.target.value })} data-cement="product">
-            {products.map((p) => <option key={p.id} value={p.id}>{p.name}{p.brand ? ` — ${p.brand}` : ""}</option>)}
-          </select>
-        </Field>
-        {s && !s.tracked && (
-          <div className="bg-blue-50 border border-blue-200 text-blue-800 text-xs p-2 mb-3">
-            {t("This product has no opening stock yet. Enter the stock you physically have at the START of the selected date. Sales, returns and exchanges from that date onward will move stock.")}
-          </div>
-        )}
-        {s && s.tracked && <div className="text-xs text-slate-500 mb-3">{t("Current physical stock")}: <b>{fmtCement(s.physicalKg, cs)}</b> · {t("tracking from")} {fmtDate(s.openingDate)}</div>}
-        <Field label={kind === "Opening" ? "Opening Date" : "Purchase Date"}><input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
-        <CementQtyInput qty={form.qty} unit={form.unit} cs={cs} onChange={(v) => setForm({ ...form, ...v })} />
-        {kind === "Purchase" && (
-          <>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Supplier"><input className={inputCls} value={form.supplier} onChange={(e) => setForm({ ...form, supplier: e.target.value })} /></Field>
-              <Field label="Supplier Invoice No."><input className={inputCls} value={form.supplierInvoiceNo} onChange={(e) => setForm({ ...form, supplierInvoiceNo: e.target.value })} /></Field>
-            </div>
-            <Field label={`Rate (Rs per ${cementUnitKind(form.unit) === "ton" ? "ton" : "bag"})`}><input type="number" step="any" className={inputCls} value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} /></Field>
-            <div className="flex justify-between text-sm bg-slate-50 border border-slate-200 p-2 mb-3"><span>{t("Total Purchase Cost")}</span><b>{fmtMoney(total)}</b></div>
-          </>
-        )}
-        <Field label="Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
-        <CementSaving busy={busy} error={error} />
-        {saved && <div className="text-sm text-emerald-700 font-bold mb-3" role="status">{saved}</div>}
-        <Btn onClick={submit} disabled={busy || disabled || !canIn || !s}>{kind === "Opening" ? "Save Opening Stock" : "Save Purchase"}</Btn>
-      </div>
-      <div className="min-w-0">
-        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2">{t("Opening Stock and Purchases")}</div>
-        <CementMovementList state={state} movements={movements} kinds={["Opening", "Purchase"]} currentUser={currentUser} onReverse={onReverse} emptyText="No stock entries yet." />
-      </div>
-    </div>
-  );
-}
-
-function CementAdjustTab({ state, products, movements, currentUser, disabled, onSave, onReverse }) {
-  const cs = state.cs;
-  const canAdjust = cementCan(currentUser, cs, "adjust");
-  const [form, setForm] = useState(() => cementNewMovementForm("Adjustment", products));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [saved, setSaved] = useState("");
-  const s = state.products[form.productId];
-  const kg = cementToKg(form.qty, form.unit, cs);
-
-  async function submit() {
-    setError(""); setSaved("");
-    if (!s) { setError(t("Select a cement product.")); return; }
-    if (!s.tracked) { setError(t("Set opening stock for this product first.")); return; }
-    if (!(kg > CEMENT_EPS_KG)) { setError(t("Quantity must be more than zero.")); return; }
-    if (!form.date || form.date < s.openingDate) { setError(`${t("Date cannot be before the opening stock date")} (${fmtDate(s.openingDate)}).`); return; }
-    if (!form.reason.trim()) { setError(t("Reason is required.")); return; }
-    const takesGood = form.kind === "Damage" || (form.kind === "Adjustment" && form.direction === "out");
-    if (takesGood && kg > s.physicalKg + CEMENT_EPS_KG) { setError(cementStockShortMsg(state, s.productId, kg, s.physicalKg, "not enough physical stock")); return; }
-    if (form.kind === "DamageWriteOff" && kg > s.damagedKg + CEMENT_EPS_KG) { setError(cementStockShortMsg(state, s.productId, kg, s.damagedKg, "not enough damaged stock")); return; }
-    const record = {
-      id: form.id, code: cementCode(form.kind === "Adjustment" ? "ADJ" : "DMG", form.id), kind: form.kind, direction: form.kind === "Adjustment" ? form.direction : "",
-      productId: s.productId, productName: s.product.name, date: form.date, qtyEntered: Number(form.qty), unitEntered: cementUnitLabel(cementUnitKind(form.unit)), kg,
-      reason: form.reason.trim(), notes: form.notes.trim(), status: "Active",
-      createdBy: currentUser?.name || currentUser?.username || "", createdAt: new Date().toISOString(),
-    };
-    const what = form.kind === "Adjustment" ? (form.direction === "out" ? "Remove from stock" : "Add to stock") : form.kind === "Damage" ? "Move to damaged stock" : "Write off damaged stock";
-    if (!confirm(`${t(what)}: ${s.product.name} — ${fmtCement(kg, cs)}\n${t("Reason")}: ${record.reason}\n\n${t("Continue?")}`)) return;
-    setBusy(true);
-    const res = await onSave(record);
-    setBusy(false);
-    if (res && res.error) { setError(res.error); return; }
-    setSaved(`${t("Saved")}: ${record.code}`);
-    setForm({ ...cementNewMovementForm(form.kind, products), productId: s.productId, unit: form.unit, direction: form.direction });
-  }
-
-  return (
-    <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,420px)_1fr] gap-6">
-      <div className="bg-white border border-slate-200 p-4 self-start">
-        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-3">{t("Stock Adjustment / Damage")}</div>
-        {!canAdjust && <div className="text-sm text-red-600 mb-3">{t("Only an admin (or staff allowed in Settings) can adjust stock.")}</div>}
-        <Field label="Type">
-          <select className={inputCls} value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value })} data-cement="adjust-kind">
-            <option value="Adjustment">{t("Stock Adjustment")}</option>
-            <option value="Damage">{t("Damaged (move from good stock to damaged)")}</option>
-            <option value="DamageWriteOff">{t("Damaged Write-off (dispose damaged stock)")}</option>
-          </select>
-        </Field>
-        {form.kind === "Adjustment" && (
-          <Field label="Direction">
-            <select className={inputCls} value={form.direction} onChange={(e) => setForm({ ...form, direction: e.target.value })} data-cement="adjust-direction">
-              <option value="in">{t("Add to stock (+)")}</option>
-              <option value="out">{t("Remove from stock (−)")}</option>
-            </select>
-          </Field>
-        )}
-        <Field label="Cement Product / Brand">
-          <select className={inputCls} value={form.productId} onChange={(e) => setForm({ ...form, productId: e.target.value })}>
-            {products.map((p) => <option key={p.id} value={p.id}>{p.name}{p.brand ? ` — ${p.brand}` : ""}</option>)}
-          </select>
-        </Field>
-        {s && s.tracked && <div className="text-xs text-slate-500 mb-3">{t("Physical")}: <b>{fmtCement(s.physicalKg, cs)}</b> · {t("Damaged")}: <b>{fmtCement(s.damagedKg, cs)}</b></div>}
-        <Field label="Date"><input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
-        <CementQtyInput qty={form.qty} unit={form.unit} cs={cs} onChange={(v) => setForm({ ...form, ...v })} />
-        <Field label="Reason (required)"><input className={inputCls} value={form.reason} onChange={(e) => setForm({ ...form, reason: e.target.value })} placeholder="e.g. Physical count difference / bags torn in rain" /></Field>
-        <Field label="Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
-        <CementSaving busy={busy} error={error} />
-        {saved && <div className="text-sm text-emerald-700 font-bold mb-3" role="status">{saved}</div>}
-        <Btn onClick={submit} disabled={busy || disabled || !canAdjust || !s}>Save Adjustment</Btn>
-      </div>
-      <div className="min-w-0">
-        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2">{t("Adjustments and Damage")}</div>
-        <CementMovementList state={state} movements={movements} kinds={["Adjustment", "Damage", "DamageWriteOff"]} currentUser={currentUser} onReverse={onReverse} emptyText="No adjustments yet." />
-      </div>
-    </div>
-  );
-}
-
-const CEMENT_MOVEMENT_TYPES = ["Opening", "Purchase", "Sale", "Booking Reservation", "Reservation Change", "Reservation Release", "Delivery", "Return", "Exchange", "Adjustment", "Damage", "Damage Write-off", "Reversal"];
-
-function cementFilterRows(state, f) {
-  const q = (f.party || "").trim().toLowerCase();
-  const r = (f.ref || "").trim().toLowerCase();
-  return state.rows.filter((row) =>
-    (!f.from || row.date >= f.from) && (!f.to || row.date <= f.to) &&
-    (!f.productId || row.productId === f.productId) && (!f.type || row.type === f.type) &&
-    (!q || (row.party || "").toLowerCase().includes(q)) &&
-    (!r || (row.ref || "").toLowerCase().includes(r) || (row.notes || "").toLowerCase().includes(r)));
-}
-
-function cementMovementColumns(cs, unit) {
-  const q = (kg) => (cementZero(kg) ? "" : unit === "bag" ? fmtQty(cementBags(kg, cs)) : fmtQty(cementTons(kg)));
-  return [
-    { key: "date", label: "Date", csv: (r) => r.date },
-    { key: "time", label: "Time", csv: (r) => (r.at ? new Date(r.at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" }) : "") },
-    { key: "type", label: "Transaction Type", csv: (r) => r.type },
-    { key: "productName", label: "Cement Brand/Product", csv: (r) => r.productName },
-    { key: "ref", label: "Reference No.", csv: (r) => r.ref },
-    { key: "party", label: "Customer / Supplier", csv: (r) => r.party },
-    { key: "in", label: "Stock In", csv: (r) => q(r.inKg) },
-    { key: "out", label: "Stock Out", csv: (r) => q(r.outKg) },
-    { key: "ret", label: "Returned", csv: (r) => q(r.returnKg) },
-    { key: "adj", label: "Adjusted", csv: (r) => q(r.adjustKg) },
-    { key: "dmg", label: "Damaged ±", csv: (r) => q(r.damagedDeltaKg) },
-    { key: "phys", label: "Running Physical", csv: (r) => q(r.runPhysicalKg) || "0" },
-    { key: "res", label: "Reserved", csv: (r) => q(r.runReservedKg) || "0" },
-    { key: "avail", label: "Available", csv: (r) => q(r.runAvailableKg) || "0" },
-    { key: "user", label: "User", csv: (r) => r.user },
-    { key: "notes", label: "Notes / Reason", csv: (r) => r.notes },
-  ];
-}
-
-function CementMovementLedger({ state, products }) {
-  const cs = state.cs;
-  const [f, setF] = useState({ from: "", to: "", productId: "", type: "", party: "", ref: "" });
-  const [unit, setUnit] = useState("ton");
-  const filtered = useMemo(() => cementFilterRows(state, f).slice().reverse(), [state, f]);
-  const pager = useCementPager(filtered, 50);
-  const cols = cementMovementColumns(cs, unit);
-  const unitLabel = unit === "bag" ? t("bags") : "MT";
-  return (
-    <div>
-      <div className="bg-white border border-slate-200 p-3 mb-3 grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2 print:hidden">
-        <Field label="From"><input type="date" className={inputCls} value={f.from} onChange={(e) => setF({ ...f, from: e.target.value })} /></Field>
-        <Field label="To"><input type="date" className={inputCls} value={f.to} onChange={(e) => setF({ ...f, to: e.target.value })} /></Field>
-        <Field label="Product">
-          <select className={inputCls} value={f.productId} onChange={(e) => setF({ ...f, productId: e.target.value })}>
-            <option value="">{t("All")}</option>
-            {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Transaction Type">
-          <select className={inputCls} value={f.type} onChange={(e) => setF({ ...f, type: e.target.value })} data-cement="type-filter">
-            <option value="">{t("All")}</option>
-            {CEMENT_MOVEMENT_TYPES.map((x) => <option key={x} value={x}>{t(x)}</option>)}
-          </select>
-        </Field>
-        <Field label="Customer / Supplier"><input className={inputCls} value={f.party} onChange={(e) => setF({ ...f, party: e.target.value })} /></Field>
-        <Field label="Reference No."><input className={inputCls} value={f.ref} onChange={(e) => setF({ ...f, ref: e.target.value })} /></Field>
-        <Field label="Show In">
-          <select className={inputCls} value={unit} onChange={(e) => setUnit(e.target.value)}>
-            <option value="ton">{t("Metric Tons")}</option><option value="bag">{t("Bags")}</option>
-          </select>
-        </Field>
-        <div className="flex items-end gap-2 mb-3">
-          <Btn small variant="ghost" onClick={() => cementDownloadCsv(`stock_movements_${todayISO()}.csv`, cols, filtered)}>CSV</Btn>
-          <Btn small variant="ghost" onClick={() => window.print()}>Print / PDF</Btn>
-        </div>
-      </div>
-      <div className="print-area bg-white border border-slate-200 overflow-x-auto">
-        <div className="hidden print:block font-black uppercase mb-2">{t("Stock Movement Ledger")} ({unitLabel})</div>
-        <table className="w-full text-xs">
-          <thead><tr className={cementTableHead}>
-            {["Date / Time", "Type", "Product", "Ref", "Customer / Supplier", `In`, `Out`, `Returned`, `Adjusted`, `Running Physical`, `Reserved`, `Available`, "User", "Notes / Reason"].map((h, i) => (
-              <th key={h} className={`${cementThCls} ${i >= 5 && i <= 11 ? "text-right" : ""}`}>{t(h)}{i >= 5 && i <= 11 ? ` (${unitLabel})` : ""}</th>
-            ))}
-          </tr></thead>
-          <tbody data-cement="movement-rows">
-            {filtered.length === 0 && <tr><td colSpan={14} className="px-4 py-6 text-center text-slate-400">{t("No stock movements.")}</td></tr>}
-            {filtered.map((r, i) => {
-              const v = (kg) => cols[6].csv({ inKg: kg });
-              const onPage = i >= (pager.page - 1) * 50 && i < pager.page * 50;
-              return (
-                <tr key={r.key} className={`border-t border-slate-100 ${onPage ? "" : "hidden print:table-row"}`} data-type={r.type}>
-                  <td className={cementTdCls}>{fmtDate(r.date)}{r.at ? <div className="text-[10px] text-slate-400">{cols[1].csv(r)}</div> : null}</td>
-                  <td className={`${cementTdCls} font-bold`}>{t(r.type)}</td>
-                  <td className={cementTdCls}>{r.productName}</td>
-                  <td className={`${cementTdCls} text-blue-700 font-bold`}>{r.ref}</td>
-                  <td className={cementTdCls}>{r.party}</td>
-                  <td className={`${cementTdCls} text-right text-emerald-700`}>{v(r.inKg)}</td>
-                  <td className={`${cementTdCls} text-right text-red-600`}>{v(r.outKg)}</td>
-                  <td className={`${cementTdCls} text-right`}>{v(r.returnKg)}</td>
-                  <td className={`${cementTdCls} text-right`}>{v(r.adjustKg)}</td>
-                  <td className={`${cementTdCls} text-right font-bold`}>{v(r.runPhysicalKg) || "0"}</td>
-                  <td className={`${cementTdCls} text-right text-amber-700`}>{v(r.runReservedKg) || "0"}</td>
-                  <td className={`${cementTdCls} text-right font-bold`}>{v(r.runAvailableKg) || "0"}</td>
-                  <td className={cementTdCls}>{r.user}</td>
-                  <td className={`${cementTdCls} whitespace-normal min-w-[180px]`}>{r.notes}{!cementZero(r.damagedDeltaKg) && <div className="text-[10px] text-red-600">{t("Damaged")} {r.damagedDeltaKg > 0 ? "+" : ""}{v(r.damagedDeltaKg)}</div>}{!cementZero(r.reservedDeltaKg) && <div className="text-[10px] text-amber-700">{t("Reserved")} {r.reservedDeltaKg > 0 ? "+" : ""}{v(r.reservedDeltaKg)}</div>}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      <div className="text-[11px] text-slate-400 mt-1">{t("Running balances are per product. Booking reservations do not change physical stock.")}</div>
-      <CementPager pager={pager} />
-    </div>
-  );
-}
-
-
-/* ---------------- Cement stock & booking reports ---------------- */
-
-const CEMENT_REPORTS = [
-  ["currentStock", "Current Cement Stock"],
-  ["inOut", "Stock In and Stock Out"],
-  ["valuation", "Stock Valuation"],
-  ["lowStock", "Low Stock"],
-  ["damaged", "Damaged Stock"],
-  ["dailySales", "Daily Cement Sales"],
-  ["monthlySales", "Monthly Cement Sales"],
-  ["customerBookings", "Customer-wise Advance Bookings"],
-  ["combinedBookings", "Combined Advance Booking Totals"],
-  ["brandBookings", "Brand-wise Booking Totals"],
-  ["pendingDeliveries", "Pending Deliveries"],
-  ["partialDeliveries", "Partial Deliveries"],
-  ["completedBookings", "Completed Bookings"],
-  ["cancelledBookings", "Cancelled Bookings"],
-  ["paymentBalances", "Booking Payment Balances"],
-  ["deliveryHistory", "Delivery History"],
-  ["movementLedger", "Stock Movement Ledger"],
-];
-
-// Tons + bags column pair for a kg field.
-function cementQtyCols(key, label, cs) {
-  return [
-    { key: key + "T", label: `${label} (MT)`, align: "right", csv: (r) => fmtQty(cementTons(r[key])), total: true, kgKey: key, kind: "ton" },
-    { key: key + "B", label: `${label} (Bags)`, align: "right", csv: (r) => fmtQty(cementBags(r[key], cs)), total: true, kgKey: key, kind: "bag" },
-  ];
-}
-
-function cementBookingRowsFiltered(state, f) {
-  return Object.values(state.bookings).filter((info) => {
-    const b = info.booking;
-    if (!info.isCement) return false;
-    if (f.from && b.date < f.from) return false;
-    if (f.to && b.date > f.to) return false;
-    if (f.customerId && b.customerId !== f.customerId) return false;
-    if (f.productId && b.productId !== f.productId) return false;
-    return true;
-  });
-}
-
-function cementGroupBookings(infos, keyFn, labelFn) {
-  const map = new Map();
-  infos.forEach((info) => {
-    const k = keyFn(info);
-    if (!map.has(k)) map.set(k, { key: k, label: labelFn(info), count: 0, bookedKg: 0, deliveredKg: 0, remainingKg: 0, reservedKg: 0, amount: 0, paid: 0, balance: 0 });
-    const g = map.get(k);
-    g.count += 1;
-    g.bookedKg = roundQty(g.bookedKg + info.bookedKg, 3);
-    g.deliveredKg = roundQty(g.deliveredKg + info.deliveredKg, 3);
-    g.remainingKg = roundQty(g.remainingKg + (CEMENT_BOOKING_ACTIVE.includes(info.status) ? info.remainingKg : 0), 3);
-    g.reservedKg = roundQty(g.reservedKg + info.reservedKg, 3);
-    g.amount = roundMoney(g.amount + info.payable);
-    g.paid = roundMoney(g.paid + info.paid);
-    g.balance = roundMoney(g.balance + info.balance);
-  });
-  return [...map.values()].sort((a, b) => a.label.localeCompare(b.label));
-}
-
-function cementBookingDetailCols(cs) {
-  return [
-    { key: "code", label: "Booking No.", csv: (r) => r.booking.code },
-    { key: "date", label: "Booking Date", csv: (r) => r.booking.date, fmt: (r) => fmtDate(r.booking.date) },
-    { key: "customer", label: "Customer", csv: (r) => r.booking.customerName },
-    { key: "product", label: "Cement Brand/Product", csv: (r) => r.product?.name || r.booking.productName },
-    ...cementQtyCols("bookedKg", "Booked", cs),
-    ...cementQtyCols("deliveredKg", "Delivered", cs),
-    ...cementQtyCols("remainingKg", "Remaining", cs),
-    { key: "payable", label: "Amount", align: "right", csv: (r) => r.payable, fmt: (r) => fmtMoney(r.payable), total: true, money: true },
-    { key: "paid", label: "Paid", align: "right", csv: (r) => r.paid, fmt: (r) => fmtMoney(r.paid), total: true, money: true },
-    { key: "balance", label: "Balance", align: "right", csv: (r) => r.balance, fmt: (r) => fmtMoney(r.balance), total: true, money: true },
-    { key: "expected", label: "Expected Delivery", csv: (r) => r.booking.expectedDeliveryDate || "", fmt: (r) => (r.booking.expectedDeliveryDate ? fmtDate(r.booking.expectedDeliveryDate) : "-") },
-    { key: "status", label: "Status", csv: (r) => r.status },
-  ];
-}
-
-function cementBuildReport(id, state, f, ctx) {
-  const cs = state.cs;
-  const inRange = (d) => (!f.from || d >= f.from) && (!f.to || d <= f.to);
-  const productOk = (pid) => !f.productId || pid === f.productId;
-  const productList = Object.values(state.products).filter((s) => productOk(s.productId));
-  const custName = (id2) => ctx.customers.find((c) => c.id === id2)?.name || "";
-
-  // Stock position at the end of the "To" date (or now).
-  const asOf = (s) => {
-    const rows = state.rows.filter((r) => r.productId === s.productId && (!f.to || r.date <= f.to));
-    const last = rows[rows.length - 1];
-    return last
-      ? { physicalKg: last.runPhysicalKg, reservedKg: last.runReservedKg, availableKg: last.runAvailableKg, damagedKg: last.runDamagedKg }
-      : { physicalKg: 0, reservedKg: 0, availableKg: 0, damagedKg: 0 };
-  };
-  const asOfNote = f.to ? `${t("Position at end of")} ${fmtDate(f.to)}` : t("Current position");
-
-  if (id === "currentStock" || id === "lowStock") {
-    let rows = productList.filter((s) => s.tracked).map((s) => ({ ...asOf(s), name: s.product.name, brand: s.product.brand || "", minKg: s.minKg, s }));
-    if (id === "lowStock") rows = rows.filter((r) => r.minKg > 0 && r.availableKg < r.minKg - CEMENT_EPS_KG);
-    return {
-      note: asOfNote, rows,
-      columns: [
-        { key: "name", label: "Product" }, { key: "brand", label: "Brand" },
-        ...cementQtyCols("physicalKg", "Physical", cs), ...cementQtyCols("reservedKg", "Reserved", cs),
-        ...cementQtyCols("availableKg", "Available", cs), ...cementQtyCols("damagedKg", "Damaged", cs),
-        ...(id === "lowStock" ? cementQtyCols("minKg", "Minimum", cs) : []),
-      ],
-    };
-  }
-  if (id === "valuation") {
-    const rows = productList.filter((s) => s.tracked).map((s) => {
-      const a = asOf(s);
-      return { name: s.product.name, brand: s.product.brand || "", physicalKg: a.physicalKg, rateTon: roundMoney(s.costPerKg * CEMENT_TON_KG), rateBag: roundMoney(s.costPerKg * cementBagKg(cs)), value: roundMoney(Math.max(0, a.physicalKg) * s.costPerKg), basis: s.purchasedKg > 0 ? "Weighted average purchase cost" : "Product rate (no purchases yet)" };
-    });
-    return {
-      note: `${asOfNote}. ${t("Valued at weighted average purchase cost; products without purchases use the product rate.")}`, rows,
-      columns: [
-        { key: "name", label: "Product" }, { key: "brand", label: "Brand" }, ...cementQtyCols("physicalKg", "Physical", cs),
-        { key: "rateTon", label: "Cost / MT", align: "right", fmt: (r) => fmtMoney(r.rateTon) },
-        { key: "rateBag", label: "Cost / Bag", align: "right", fmt: (r) => fmtMoney(r.rateBag) },
-        { key: "value", label: "Stock Value", align: "right", fmt: (r) => fmtMoney(r.value), total: true, money: true },
-        { key: "basis", label: "Basis" },
-      ],
-    };
-  }
-  if (id === "inOut") {
-    const rows = productList.map((s) => {
-      const rs = state.rows.filter((r) => r.productId === s.productId && inRange(r.date) && r.type !== "Opening");
-      const sum = (fn) => roundQty(rs.reduce((t2, r) => t2 + fn(r), 0), 3);
-      return {
-        name: s.product.name, brand: s.product.brand || "",
-        purchaseKg: sum((r) => (r.type === "Purchase" ? r.inKg : 0)),
-        returnKg: sum((r) => r.returnKg),
-        adjInKg: sum((r) => (r.adjustKg > 0 ? r.adjustKg : 0)),
-        salesKg: sum((r) => (r.type === "Sale" || r.type === "Exchange" ? r.outKg : 0)),
-        deliveryKg: sum((r) => (r.type === "Delivery" ? r.outKg : 0)),
-        adjOutKg: sum((r) => (r.adjustKg < 0 ? -r.adjustKg : 0) + (r.type === "Damage" ? r.outKg : 0)),
-        reversalKg: sum((r) => (r.type === "Reversal" ? r.physicalDeltaKg : 0)),
-        netKg: sum((r) => r.physicalDeltaKg),
-      };
-    }).filter((r) => !cementZero(r.purchaseKg + r.returnKg + r.adjInKg + r.salesKg + r.deliveryKg + r.adjOutKg) || !cementZero(r.reversalKg));
-    return {
-      note: t("Stock In = purchases, resalable returns, positive adjustments. Stock Out = sales, booking deliveries, exchanges, negative adjustments, damage. Reversals are shown separately (net)."), rows,
-      columns: [
-        { key: "name", label: "Product" },
-        ...cementQtyCols("purchaseKg", "Purchased", cs), ...cementQtyCols("returnKg", "Returned", cs), ...cementQtyCols("adjInKg", "Adjusted +", cs),
-        ...cementQtyCols("salesKg", "Sold", cs), ...cementQtyCols("deliveryKg", "Delivered", cs), ...cementQtyCols("adjOutKg", "Adjusted − / Damaged", cs),
-        ...cementQtyCols("reversalKg", "Reversals (net)", cs), ...cementQtyCols("netKg", "Net Change", cs),
-      ],
-    };
-  }
-  if (id === "damaged") {
-    const rows = productList.filter((s) => s.tracked).map((s) => {
-      const rs = state.rows.filter((r) => r.productId === s.productId && inRange(r.date));
-      return {
-        name: s.product.name, brand: s.product.brand || "",
-        addedKg: roundQty(rs.reduce((t2, r) => t2 + (r.damagedDeltaKg > 0 ? r.damagedDeltaKg : 0), 0), 3),
-        removedKg: roundQty(rs.reduce((t2, r) => t2 + (r.damagedDeltaKg < 0 ? -r.damagedDeltaKg : 0), 0), 3),
-        balanceKg: asOf(s).damagedKg,
-      };
-    });
-    return { note: asOfNote, rows, columns: [{ key: "name", label: "Product" }, { key: "brand", label: "Brand" }, ...cementQtyCols("addedKg", "Damaged In (period)", cs), ...cementQtyCols("removedKg", "Written Off / Reversed (period)", cs), ...cementQtyCols("balanceKg", "Damaged Balance", cs)] };
-  }
-  if (id === "dailySales" || id === "monthlySales") {
-    const map = new Map();
-    state.rows.forEach((r) => {
-      if (!productOk(r.productId) || !inRange(r.date)) return;
-      if (!["Sale", "Delivery", "Exchange", "Return", "Reversal"].includes(r.type)) return;
-      if (r.type === "Reversal" && !["invoice", "delivery", "exchange", "return"].includes(r.sourceType)) return;
-      if (f.customerId) {
-        const cname = custName(f.customerId);
-        if (r.party !== cname) return;
-      }
-      const k = id === "dailySales" ? r.date : r.date.slice(0, 7);
-      if (!map.has(k)) map.set(k, { period: k, salesKg: 0, deliveryKg: 0, returnKg: 0, netKg: 0 });
-      const g = map.get(k);
-      let sold = 0, dlv = 0, back = 0;
-      if (r.type === "Sale") sold = r.outKg;
-      else if (r.type === "Delivery") dlv = r.outKg;
-      else if (r.type === "Return") back = r.returnKg + Math.max(0, r.damagedDeltaKg);
-      else if (r.type === "Exchange") { sold = r.outKg; back = r.returnKg + Math.max(0, r.damagedDeltaKg); }
-      else if (r.type === "Reversal") {
-        // A reversal undoes the original line, so it is subtracted from the same column.
-        if (r.sourceType === "invoice") sold = -r.inKg;
-        else if (r.sourceType === "delivery") dlv = -r.inKg;
-        else if (r.sourceType === "return") back = r.returnKg + Math.min(0, r.damagedDeltaKg);
-        else if (r.sourceType === "exchange") { sold = r.outKg; back = r.returnKg + Math.min(0, r.damagedDeltaKg); }
-      }
-      g.salesKg = roundQty(g.salesKg + sold, 3);
-      g.deliveryKg = roundQty(g.deliveryKg + dlv, 3);
-      g.returnKg = roundQty(g.returnKg + back, 3);
-      g.netKg = roundQty(g.salesKg + g.deliveryKg - g.returnKg, 3);
-    });
-    const rows = [...map.values()].sort((a, b) => b.period.localeCompare(a.period));
-    return {
-      note: t("Cement leaving stock to customers: invoice sales + booking deliveries, minus returns. Cancelled invoices and reversed deliveries are deducted."), rows,
-      columns: [
-        { key: "period", label: id === "dailySales" ? "Date" : "Month", fmt: (r) => (id === "dailySales" ? fmtDate(r.period) : r.period) },
-        ...cementQtyCols("salesKg", "Invoice Sales", cs), ...cementQtyCols("deliveryKg", "Booking Deliveries", cs),
-        ...cementQtyCols("returnKg", "Returned", cs), ...cementQtyCols("netKg", "Net Sold", cs),
-      ],
-    };
-  }
-
-  const infos = cementBookingRowsFiltered(state, f);
-  if (id === "customerBookings" || id === "brandBookings") {
-    const groups = id === "customerBookings"
-      ? cementGroupBookings(infos, (i) => i.booking.customerId, (i) => i.booking.customerName || custName(i.booking.customerId))
-      : cementGroupBookings(infos, (i) => i.product.brand || i.product.name, (i) => i.product.brand || i.product.name);
-    return {
-      note: t("All bookings in the period (every status). Remaining counts only active bookings."), rows: groups,
-      columns: [
-        { key: "label", label: id === "customerBookings" ? "Customer" : "Brand" }, { key: "count", label: "Bookings", align: "right", total: true },
-        ...cementQtyCols("bookedKg", "Booked", cs), ...cementQtyCols("deliveredKg", "Delivered", cs), ...cementQtyCols("remainingKg", "Remaining", cs),
-        { key: "amount", label: "Amount", align: "right", fmt: (r) => fmtMoney(r.amount), total: true, money: true },
-        { key: "paid", label: "Paid", align: "right", fmt: (r) => fmtMoney(r.paid), total: true, money: true },
-        { key: "balance", label: "Balance", align: "right", fmt: (r) => fmtMoney(r.balance), total: true, money: true },
-      ],
-    };
-  }
-  if (id === "combinedBookings") {
-    const rows = ["Booked", "Partially Delivered", "Completed", "Cancelled"].map((st) => {
-      const g = cementGroupBookings(infos.filter((i) => i.status === st), () => st, () => st)[0];
-      return g || { label: st, count: 0, bookedKg: 0, deliveredKg: 0, remainingKg: 0, reservedKg: 0, amount: 0, paid: 0, balance: 0 };
-    });
-    return {
-      note: t("One line per status; the total line is the combined total of all bookings. Each booking is counted once."), rows,
-      columns: [
-        { key: "label", label: "Status" }, { key: "count", label: "Bookings", align: "right", total: true },
-        ...cementQtyCols("bookedKg", "Booked", cs), ...cementQtyCols("deliveredKg", "Delivered", cs), ...cementQtyCols("remainingKg", "Remaining", cs), ...cementQtyCols("reservedKg", "Reserved", cs),
-        { key: "amount", label: "Amount", align: "right", fmt: (r) => fmtMoney(r.amount), total: true, money: true },
-        { key: "balance", label: "Balance", align: "right", fmt: (r) => fmtMoney(r.balance), total: true, money: true },
-      ],
-    };
-  }
-  const byStatus = { pendingDeliveries: "Booked", partialDeliveries: "Partially Delivered", completedBookings: "Completed", cancelledBookings: "Cancelled" };
-  if (byStatus[id] || id === "paymentBalances") {
-    const rows = infos.filter((i) => (byStatus[id] ? i.status === byStatus[id] : !cementZero(i.balance) || i.status !== "Cancelled"))
-      .sort((a, b) => b.booking.date.localeCompare(a.booking.date));
-    return { note: byStatus[id] === "Cancelled" ? t("Cancelled bookings stay in history; their undelivered quantity is no longer reserved.") : "", rows, columns: cementBookingDetailCols(cs) };
-  }
-  if (id === "deliveryHistory") {
-    const rows = [];
-    Object.values(state.bookings).forEach((info) => {
-      if (!info.isCement || (f.customerId && info.booking.customerId !== f.customerId) || !productOk(info.productId)) return;
-      info.deliveries.forEach((d) => { if (inRange(d.date)) rows.push({ d, info, kg: d.status === "Reversed" ? 0 : d.kg, enteredKg: d.kg }); });
-    });
-    rows.sort((a, b) => (b.d.date + (b.d.at || "")).localeCompare(a.d.date + (a.d.at || "")));
-    return {
-      note: t("Reversed deliveries are listed with zero quantity."), rows,
-      columns: [
-        { key: "code", label: "Delivery No.", csv: (r) => r.d.code }, { key: "date", label: "Date", csv: (r) => r.d.date, fmt: (r) => `${fmtDate(r.d.date)} ${r.d.time || ""}` },
-        { key: "booking", label: "Booking No.", csv: (r) => r.info.booking.code }, { key: "customer", label: "Customer", csv: (r) => r.info.booking.customerName },
-        { key: "product", label: "Product", csv: (r) => r.info.product.name }, ...cementQtyCols("kg", "Delivered", cs),
-        { key: "driver", label: "Driver / Staff", csv: (r) => [r.d.driverName, r.d.vehicleNumber, r.d.staffName].filter(Boolean).join(" · ") },
-        { key: "invoice", label: "Invoice", csv: (r) => state.invoiceByDelivery.get(r.d.id)?.number || "" },
-        { key: "status", label: "Status", csv: (r) => r.d.status || "Active" },
-        { key: "notes", label: "Notes", csv: (r) => r.d.notes || "" },
-      ],
-    };
-  }
-  if (id === "movementLedger") {
-    const rows = cementFilterRows(state, { from: f.from, to: f.to, productId: f.productId, party: f.customerId ? custName(f.customerId) : "" });
-    const cols = cementMovementColumns(cs, "ton").map((c) => ({ ...c, label: ["in", "out", "ret", "adj", "dmg", "phys", "res", "avail"].includes(c.key) ? `${c.label} (MT)` : c.label, align: ["in", "out", "ret", "adj", "dmg", "phys", "res", "avail"].includes(c.key) ? "right" : "" }));
-    return { note: t("Running balances are per product."), rows, columns: cols };
-  }
-  return { rows: [], columns: [] };
-}
-
-function CementReports({ state, products, customers, settings }) {
-  const cs = state.cs;
-  const [id, setId] = useState("currentStock");
-  const [f, setF] = useState({ from: todayISO().slice(0, 8) + "01", to: todayISO(), customerId: "", productId: "" });
-  const report = useMemo(() => cementBuildReport(id, state, f, { customers }), [id, state, f, customers]);
-  const title = CEMENT_REPORTS.find((r) => r[0] === id)?.[1] || "";
-  const pager = useCementPager(report.rows, 100);
-  const cell = (c, r) => (c.fmt ? c.fmt(r) : c.csv ? c.csv(r) : r[c.key]);
-  const totals = {};
-  report.columns.forEach((c) => {
-    if (!c.total) return;
-    if (c.kgKey) totals[c.key] = fmtQty(c.kind === "ton" ? cementTons(report.rows.reduce((s, r) => s + (Number(r[c.kgKey]) || 0), 0)) : cementBags(report.rows.reduce((s, r) => s + (Number(r[c.kgKey]) || 0), 0), cs));
-    else if (c.money) totals[c.key] = fmtMoney(report.rows.reduce((s, r) => s + (Number(r[c.key]) || 0), 0));
-    else totals[c.key] = String(report.rows.reduce((s, r) => s + (Number(r[c.key]) || 0), 0));
-  });
-  const hasTotals = Object.keys(totals).length > 0 && id !== "movementLedger";
-  function csv() {
-    const raw = (c, r) => (c.money ? r[c.key] : c.csv ? c.csv(r) : r[c.key]);
-    const rawTotal = (c) => (c.money ? roundMoney(report.rows.reduce((s2, r) => s2 + (Number(r[c.key]) || 0), 0)) : totals[c.key]);
-    const cols = report.columns.map((c, i) => ({
-      label: t(c.label),
-      csv: (r) => (r.__total ? (i === 0 ? "Grand Total" : c.total ? rawTotal(c) : "") : raw(c, r)),
-    }));
-    const rows = hasTotals && report.rows.length ? [...report.rows, { __total: true }] : report.rows;
-    cementDownloadCsv(`${id}_${f.from || "all"}_${f.to || todayISO()}.csv`, cols, rows);
-  }
-  return (
-    <div>
-      <div className="bg-white border border-slate-200 p-3 mb-3 grid grid-cols-2 md:grid-cols-6 gap-2 print:hidden">
-        <div className="col-span-2">
-          <Field label="Report">
-            <select className={inputCls} value={id} onChange={(e) => setId(e.target.value)} data-cement="report">
-              {CEMENT_REPORTS.map(([rid, label]) => <option key={rid} value={rid}>{t(label)}</option>)}
-            </select>
-          </Field>
-        </div>
-        <Field label="From"><input type="date" className={inputCls} value={f.from} onChange={(e) => setF({ ...f, from: e.target.value })} /></Field>
-        <Field label="To"><input type="date" className={inputCls} value={f.to} onChange={(e) => setF({ ...f, to: e.target.value })} /></Field>
-        <Field label="Customer">
-          <select className={inputCls} value={f.customerId} onChange={(e) => setF({ ...f, customerId: e.target.value })}>
-            <option value="">{t("All")}</option>
-            {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Product">
-          <select className={inputCls} value={f.productId} onChange={(e) => setF({ ...f, productId: e.target.value })}>
-            <option value="">{t("All")}</option>
-            {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-        </Field>
-        <div className="col-span-2 md:col-span-6 flex gap-2">
-          <Btn small variant="ghost" onClick={() => setF({ ...f, from: "", to: "" })}>All Dates</Btn>
-          <Btn small onClick={() => window.print()}>Print / Save as PDF</Btn>
-          <Btn small variant="ghost" onClick={csv}>Export CSV (Excel)</Btn>
-        </div>
-      </div>
-      <div className="print-area bg-white border border-slate-200 p-3" data-cement="report-body">
-        <div className="flex flex-wrap justify-between items-baseline gap-2 mb-2">
-          <div>
-            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">{settings?.companyName || ""}</div>
-            <div className="text-lg font-black uppercase tracking-tight">{t(title)}</div>
-          </div>
-          <div className="text-xs text-slate-500 text-right">
-            {f.from || f.to ? `${f.from ? fmtDate(f.from) : "…"} – ${f.to ? fmtDate(f.to) : "…"}` : t("All dates")}
-            {f.customerId ? ` · ${customers.find((c) => c.id === f.customerId)?.name || ""}` : ""}
-            {f.productId ? ` · ${products.find((p) => p.id === f.productId)?.name || ""}` : ""}
-            <div>1 MT = {fmtQty(cementBagsPerTon(cs))} {t("bags")} ({fmtQty(cementBagKg(cs))} kg/{t("bag")})</div>
-          </div>
-        </div>
-        {report.note && <div className="text-xs text-slate-500 mb-2">{report.note}</div>}
-        <div className="overflow-x-auto">
-          <table className="w-full text-xs">
-            <thead><tr className={cementTableHead}>{report.columns.map((c) => <th key={c.key} className={`${cementThCls} ${c.align === "right" ? "text-right" : ""}`}>{t(c.label)}</th>)}</tr></thead>
-            <tbody>
-              {report.rows.length === 0 && <tr><td colSpan={report.columns.length} className="px-4 py-6 text-center text-slate-400">{t("No records for this report.")}</td></tr>}
-              {report.rows.map((r, i) => {
-                const onPage = i >= (pager.page - 1) * 100 && i < pager.page * 100;
-                return (
-                  <tr key={i} className={`border-t border-slate-100 ${onPage ? "" : "hidden print:table-row"}`}>
-                    {report.columns.map((c) => <td key={c.key} className={`${cementTdCls} ${c.align === "right" ? "text-right" : ""}`}>{cell(c, r)}</td>)}
-                  </tr>
-                );
-              })}
-            </tbody>
-            {hasTotals && report.rows.length > 0 && (
-              <tfoot><tr className="border-t-2 border-slate-900 font-black bg-slate-50" data-cement="report-total">
-                {report.columns.map((c, i) => <td key={c.key} className={`${cementTdCls} ${c.align === "right" ? "text-right" : ""}`}>{i === 0 ? t("Grand Total") : totals[c.key] ?? ""}</td>)}
-              </tr></tfoot>
-            )}
-          </table>
-        </div>
-      </div>
-      <CementPager pager={pager} />
-    </div>
-  );
-}
-
-
-/* ---------------- Advance Booking page (upgraded, connected to cement stock) ---------------- */
-
-function CementBookingsPage({
-  state, customers, products, bookings, drivers, currentUser, settings, loadError,
-  onCreateBooking, onUpdateBooking, onCancelBooking, onSaveDelivery, onReverseDelivery, onRecordPayment,
-  onDeliveryInvoice, onLegacyConvert, onLegacyStatus,
-}) {
-  const [tab, setTab] = useState("dashboard");
-  const [formFor, setFormFor] = useState(null); // "new" | booking
-  const [openId, setOpenId] = useState(null);
-  const [listFilter, setListFilter] = useState(null);
-  const open = openId ? bookings.find((b) => b.id === openId) : null;
-
-  function openCustomer(customerId) {
-    setListFilter({ customerId, status: "all" });
-    setTab("list");
-  }
-
-  return (
-    <div>
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-        <h2 className="text-xl font-black uppercase tracking-tight">{t("Advance Booking")}</h2>
-        <Btn onClick={() => setFormFor("new")} disabled={!customers.length}>+ New Advance Booking</Btn>
-      </div>
-      <div className="text-xs text-slate-400 mb-3 max-w-3xl">
-        {t("Customer advance de kar rate lock kara sakta hai — booking ke 1 mahine ke andar wahi rate milega, chahe market rate badh jaye.")}{" "}
-        {t("A booking reserves cement for that customer; stock leaves the yard only when a delivery is recorded.")}
-      </div>
-      <CementLoadBanner error={loadError} />
-      <CementTabs active={tab} onChange={setTab} tabs={[["dashboard", "Booking Dashboard"], ["list", "Customer-wise Booking List"], ["deliveries", "Delivery Management"]]} />
-      {tab === "dashboard" && <CementBookingDashboard state={state} customers={customers} products={products} onOpen={setOpenId} onCustomer={openCustomer} />}
-      {tab === "list" && <CementBookingList state={state} bookings={bookings} customers={customers} products={products} onOpen={setOpenId} initialFilter={listFilter} key={JSON.stringify(listFilter)} />}
-      {tab === "deliveries" && <CementDeliveryList state={state} bookings={bookings} customers={customers} products={products} onOpen={setOpenId} />}
-
-      {formFor && (
-        <CementBookingForm
-          state={state} customers={customers} products={products} bookings={bookings} currentUser={currentUser} settings={settings}
-          editing={formFor === "new" ? null : formFor}
-          onClose={() => setFormFor(null)}
-          onSave={async (data, extra) => {
-            const res = formFor === "new" ? await onCreateBooking(data, extra) : await onUpdateBooking(formFor, data, extra);
-            if (!res?.error) { setFormFor(null); if (res?.id) setOpenId(res.id); }
-            return res;
-          }}
-        />
-      )}
-      {open && (
-        <CementBookingDetail
-          state={state} booking={open} drivers={drivers} currentUser={currentUser} settings={settings} loadError={loadError}
-          onClose={() => setOpenId(null)}
-          onEdit={() => { setFormFor(open); setOpenId(null); }}
-          onCancelBooking={onCancelBooking} onSaveDelivery={onSaveDelivery} onReverseDelivery={onReverseDelivery}
-          onRecordPayment={onRecordPayment} onDeliveryInvoice={(d) => { setOpenId(null); onDeliveryInvoice(d); }}
-          onLegacyConvert={(b) => { setOpenId(null); onLegacyConvert(b); }} onLegacyStatus={onLegacyStatus}
-        />
-      )}
-    </div>
-  );
-}
-
-function cementSummaryTable({ groups, cs, labelHead, onRow, testId }) {
-  const tot = groups.reduce((t2, g) => ({
-    count: t2.count + g.count, bookedKg: t2.bookedKg + g.bookedKg, deliveredKg: t2.deliveredKg + g.deliveredKg,
-    remainingKg: t2.remainingKg + g.remainingKg, amount: t2.amount + g.amount, paid: t2.paid + g.paid, balance: t2.balance + g.balance,
-  }), { count: 0, bookedKg: 0, deliveredKg: 0, remainingKg: 0, amount: 0, paid: 0, balance: 0 });
-  const q = (kg) => (
-    <><td className={`${cementTdCls} text-right`}>{fmtQty(cementTons(kg))}</td><td className={`${cementTdCls} text-right text-slate-500`}>{fmtQty(cementBags(kg, cs))}</td></>
-  );
-  return (
-    <div className="bg-white border border-slate-200 overflow-x-auto">
-      <table className="w-full text-xs md:text-[13px]" data-cement={testId}>
-        <thead><tr className={cementTableHead}>
-          <th className={cementThCls}>{t(labelHead)}</th><th className={`${cementThCls} text-right`}>{t("Bookings")}</th>
-          <th className={`${cementThCls} text-right`}>{t("Booked")} MT</th><th className={`${cementThCls} text-right`}>{t("Booked")} {t("Bags")}</th>
-          <th className={`${cementThCls} text-right`}>{t("Delivered")} MT</th><th className={`${cementThCls} text-right`}>{t("Delivered")} {t("Bags")}</th>
-          <th className={`${cementThCls} text-right`}>{t("Remaining")} MT</th><th className={`${cementThCls} text-right`}>{t("Remaining")} {t("Bags")}</th>
-          <th className={`${cementThCls} text-right`}>{t("Amount")}</th><th className={`${cementThCls} text-right`}>{t("Paid")}</th><th className={`${cementThCls} text-right`}>{t("Balance")}</th>
-        </tr></thead>
-        <tbody>
-          {groups.length === 0 && <tr><td colSpan={11} className="px-4 py-6 text-center text-slate-400">{t("No bookings match these filters.")}</td></tr>}
-          {groups.map((g) => (
-            <tr key={g.key} className={`border-t border-slate-100 ${onRow ? "cursor-pointer hover:bg-slate-50" : ""}`} onClick={onRow ? () => onRow(g) : undefined} data-row={g.label}>
-              <td className={`${cementTdCls} font-bold ${onRow ? "text-blue-700" : ""}`}>{g.label}</td>
-              <td className={`${cementTdCls} text-right`}>{g.count}</td>
-              {q(g.bookedKg)}{q(g.deliveredKg)}{q(g.remainingKg)}
-              <td className={`${cementTdCls} text-right`}>{fmtMoney(g.amount)}</td><td className={`${cementTdCls} text-right text-emerald-700`}>{fmtMoney(g.paid)}</td>
-              <td className={`${cementTdCls} text-right font-bold ${g.balance > 0 ? "text-red-600" : ""}`}>{fmtMoney(g.balance)}</td>
-            </tr>
-          ))}
-        </tbody>
-        {groups.length > 0 && (
-          <tfoot><tr className="border-t-2 border-slate-900 bg-slate-50 font-black" data-row="Grand Total">
-            <td className={cementTdCls}>{t("Grand Total")}</td><td className={`${cementTdCls} text-right`}>{tot.count}</td>
-            {q(roundQty(tot.bookedKg, 3))}{q(roundQty(tot.deliveredKg, 3))}{q(roundQty(tot.remainingKg, 3))}
-            <td className={`${cementTdCls} text-right`}>{fmtMoney(tot.amount)}</td><td className={`${cementTdCls} text-right`}>{fmtMoney(tot.paid)}</td><td className={`${cementTdCls} text-right`}>{fmtMoney(tot.balance)}</td>
-          </tr></tfoot>
-        )}
-      </table>
-    </div>
-  );
-}
-
-const CEMENT_STATUS_FILTERS = [["active", "Active"], ["all", "All"], ["Booked", "Booked"], ["Partially Delivered", "Partially Delivered"], ["Completed", "Completed"], ["Cancelled", "Cancelled"]];
-const CEMENT_DELIVERY_FILTERS = [["", "Any"], ["none", "None delivered"], ["partial", "Part delivered"], ["full", "Fully delivered"]];
-
-function cementBookingMatches(info, f) {
-  const b = info.booking;
-  if (f.from && b.date < f.from) return false;
-  if (f.to && b.date > f.to) return false;
-  if (f.customerId && b.customerId !== f.customerId) return false;
-  if (f.productId && b.productId !== f.productId) return false;
-  if (f.brand && (info.product?.brand || "") !== f.brand) return false;
-  if (f.status === "active" && !CEMENT_BOOKING_ACTIVE.includes(info.status)) return false;
-  if (f.status && !["active", "all"].includes(f.status) && info.status !== f.status) return false;
-  if (f.delivery === "none" && info.deliveredKg > CEMENT_EPS_KG) return false;
-  if (f.delivery === "partial" && !(info.deliveredKg > CEMENT_EPS_KG && info.deliveredKg < info.bookedKg - CEMENT_EPS_KG)) return false;
-  if (f.delivery === "full" && !(info.bookedKg > 0 && info.deliveredKg >= info.bookedKg - CEMENT_EPS_KG)) return false;
-  if (f.q) {
-    const q = f.q.trim().toLowerCase();
-    if (!`${b.code} ${b.customerName} ${b.productName} ${b.siteAddress || ""}`.toLowerCase().includes(q)) return false;
-  }
-  return true;
-}
-
-function CementBookingFilters({ f, setF, customers, products, showSearch }) {
-  const brands = [...new Set(products.filter((p) => p.isCement && p.brand).map((p) => p.brand))].sort();
-  return (
-    <div className="bg-white border border-slate-200 p-3 mb-3 grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2">
-      <Field label="From"><input type="date" className={inputCls} value={f.from} onChange={(e) => setF({ ...f, from: e.target.value })} /></Field>
-      <Field label="To"><input type="date" className={inputCls} value={f.to} onChange={(e) => setF({ ...f, to: e.target.value })} /></Field>
-      <Field label="Customer">
-        <select className={inputCls} value={f.customerId} onChange={(e) => setF({ ...f, customerId: e.target.value })} data-cement="f-customer">
-          <option value="">{t("All")}</option>{customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-        </select>
-      </Field>
-      <Field label="Cement Product">
-        <select className={inputCls} value={f.productId} onChange={(e) => setF({ ...f, productId: e.target.value })}>
-          <option value="">{t("All")}</option>{products.filter((p) => p.isCement).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </select>
-      </Field>
-      <Field label="Brand">
-        <select className={inputCls} value={f.brand} onChange={(e) => setF({ ...f, brand: e.target.value })}>
-          <option value="">{t("All")}</option>{brands.map((b) => <option key={b} value={b}>{b}</option>)}
-        </select>
-      </Field>
-      <Field label="Booking Status">
-        <select className={inputCls} value={f.status} onChange={(e) => setF({ ...f, status: e.target.value })} data-cement="f-status">
-          {CEMENT_STATUS_FILTERS.map(([v, l]) => <option key={v} value={v}>{t(l)}</option>)}
-        </select>
-      </Field>
-      <Field label="Delivery Status">
-        <select className={inputCls} value={f.delivery} onChange={(e) => setF({ ...f, delivery: e.target.value })}>
-          {CEMENT_DELIVERY_FILTERS.map(([v, l]) => <option key={v} value={v}>{t(l)}</option>)}
-        </select>
-      </Field>
-      {showSearch && <Field label="Search"><input className={inputCls} value={f.q} onChange={(e) => setF({ ...f, q: e.target.value })} placeholder="Booking no / customer / site" /></Field>}
-    </div>
-  );
-}
-
-function cementEmptyFilter(extra) {
-  return { from: "", to: "", customerId: "", productId: "", brand: "", status: "active", delivery: "", q: "", ...(extra || {}) };
-}
-
-function CementBookingDashboard({ state, customers, products, onOpen, onCustomer }) {
-  const cs = state.cs;
-  const [f, setF] = useState(cementEmptyFilter());
-  const all = Object.values(state.bookings).filter((i) => i.isCement);
-  const today = state.today;
-  const sumKg = (list, k) => roundQty(list.reduce((s, i) => s + i[k], 0), 3);
-  const todays = all.filter((i) => i.booking.date === today && i.status !== "Cancelled");
-  const active = all.filter((i) => CEMENT_BOOKING_ACTIVE.includes(i.status));
-  const notCancelled = all.filter((i) => i.status !== "Cancelled");
-  const filtered = all.filter((i) => cementBookingMatches(i, f));
-  const customerGroups = cementGroupBookings(filtered, (i) => i.booking.customerId, (i) => i.booking.customerName);
-  const brandGroups = cementGroupBookings(filtered, (i) => i.product.brand || i.product.name, (i) => i.product.brand || i.product.name);
-  const pending = active.filter((i) => cementBookingMatches(i, { ...f, status: "active" })).sort((a, b) => (a.booking.expectedDeliveryDate || "9999").localeCompare(b.booking.expectedDeliveryDate || "9999"));
-  const legacyNonCement = Object.values(state.bookings).filter((i) => !i.isCement && CEMENT_BOOKING_ACTIVE.includes(i.status)).length;
-
-  return (
-    <div>
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-3 mb-3" data-cement="booking-cards">
-        <CementStat label="Today's Total Bookings" value={String(todays.length)} sub={`${fmtTons(sumKg(todays, "bookedKg"))} · ${fmtBags(sumKg(todays, "bookedKg"), cs)}`} />
-        <CementStat label="Today's Booked Tons" value={fmtTons(sumKg(todays, "bookedKg"))} sub={t("Today's Booked Bags") + ": " + fmtQty(cementBags(sumKg(todays, "bookedKg"), cs))} />
-        <CementStat label="Total Active Bookings" value={String(active.length)} sub={t("Booked + Partially Delivered")} />
-        <CementStat label="Total Active Booked" kg={sumKg(active, "bookedKg")} cs={cs} />
-        <CementStat label="Total Delivered" kg={sumKg(notCancelled, "deliveredKg")} cs={cs} sub={`${fmtBags(sumKg(notCancelled, "deliveredKg"), cs)} · ${t("all non-cancelled bookings")}`} />
-        <CementStat label="Remaining To Deliver" kg={sumKg(active, "remainingKg")} cs={cs} accent="text-blue-700" />
-        <CementStat label="Total Reserved Cement Stock" kg={state.totals.reservedKg} cs={cs} accent="text-amber-600" />
-        <CementStat label="Available Stock" kg={state.totals.availableKg} cs={cs} accent={state.totals.availableKg < 0 ? "text-red-600" : "text-emerald-700"} />
-        <CementStat label="Pending (nothing delivered)" value={String(active.filter((i) => i.status === "Booked").length)} sub={t("bookings")} />
-        <CementStat label="Partially Delivered" value={String(active.filter((i) => i.status === "Partially Delivered").length)} sub={t("bookings")} />
-      </div>
-      {legacyNonCement > 0 && <div className="text-xs text-slate-500 mb-3">{legacyNonCement} {t("active booking(s) are for non-cement items and are listed in the booking list only.")}</div>}
-
-      <CementBookingFilters f={f} setF={setF} customers={customers} products={products} />
-
-      <div className="flex items-baseline justify-between mt-4 mb-2">
-        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">{t("Customer-wise Booking Summary")}</div>
-        <div className="text-[11px] text-slate-400">{t("Each booking is a separate record; the Grand Total is calculated from them.")}</div>
-      </div>
-      {cementSummaryTable({ groups: customerGroups, cs, labelHead: "Customer", testId: "customer-summary", onRow: (g) => onCustomer(g.key) })}
-
-      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mt-6 mb-2">{t("Brand-wise Booking Summary")}</div>
-      {cementSummaryTable({ groups: brandGroups, cs, labelHead: "Brand", testId: "brand-summary" })}
-
-      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mt-6 mb-2">{t("Pending and Partially Delivered Bookings")}</div>
-      <CementBookingTable state={state} rows={pending} onOpen={onOpen} />
-    </div>
-  );
-}
-
-function CementBookingTable({ state, rows, onOpen, pageSize }) {
-  const cs = state.cs;
-  const pager = useCementPager(rows, pageSize || 25);
-  return (
-    <div>
-      <div className="bg-white border border-slate-200 overflow-x-auto">
-        <table className="w-full text-sm" data-cement="booking-table">
-          <thead><tr className={cementTableHead}>
-            <th className={cementThCls}>Booking No.</th><th className={cementThCls}>Date</th><th className={cementThCls}>Customer</th><th className={cementThCls}>Product</th>
-            <th className={`${cementThCls} text-right`}>Booked</th><th className={`${cementThCls} text-right`}>Delivered</th><th className={`${cementThCls} text-right`}>Remaining</th>
-            <th className={`${cementThCls} text-right`}>Rate</th><th className={`${cementThCls} text-right`}>Balance</th><th className={cementThCls}>Expected Delivery</th><th className={cementThCls}>Status</th><th></th>
-          </tr></thead>
-          <tbody>
-            {rows.length === 0 && <tr><td colSpan={12} className="px-4 py-6 text-center text-slate-400">{t("No bookings.")}</td></tr>}
-            {pager.pageRows.map((info) => {
-              const b = info.booking;
-              const qty = (kg) => info.isCement
-                ? <><div className="font-bold">{fmtTons(kg)}</div><div className="text-[11px] text-slate-500">{fmtBags(kg, cs)}</div></>
-                : <div>{fmtQty(kg === info.bookedKg ? b.qty : 0)} {b.unit}</div>;
-              const overdue = b.expectedDeliveryDate && b.expectedDeliveryDate < state.today && CEMENT_BOOKING_ACTIVE.includes(info.status);
-              return (
-                <tr key={b.id} className="border-t border-slate-100 hover:bg-slate-50 cursor-pointer" onClick={() => onOpen(b.id)} data-booking={b.code}>
-                  <td className={`${cementTdCls} font-black text-blue-700`}>{b.code || "-"}</td>
-                  <td className={cementTdCls}>{fmtDate(b.date)}</td>
-                  <td className={`${cementTdCls} font-bold`}>{b.customerName}</td>
-                  <td className={cementTdCls}>{info.product?.name || b.productName || "-"}{!info.isCement && <div className="text-[10px] text-slate-400 uppercase">{t("not stock-tracked")}</div>}</td>
-                  <td className={`${cementTdCls} text-right`}>{info.isCement ? qty(info.bookedKg) : `${fmtQty(b.qty)} ${b.unit || ""}`}</td>
-                  <td className={`${cementTdCls} text-right`}>{info.isCement ? qty(info.deliveredKg) : "-"}</td>
-                  <td className={`${cementTdCls} text-right text-blue-700`}>{info.isCement ? qty(info.remainingKg) : "-"}</td>
-                  <td className={`${cementTdCls} text-right`}>{fmtMoney(b.rate)}<div className="text-[10px] text-slate-400">/ {t(cementUnitLabel(info.unitKind))}</div></td>
-                  <td className={`${cementTdCls} text-right font-bold ${info.balance > 0 ? "text-red-600" : "text-emerald-700"}`}>{fmtMoney(info.balance)}</td>
-                  <td className={cementTdCls}>{b.expectedDeliveryDate ? fmtDate(b.expectedDeliveryDate) : "-"}{overdue && <div className="text-[10px] font-bold text-red-600 uppercase">{t("Overdue")}</div>}</td>
-                  <td className={cementTdCls}><CementStatusBadge status={info.status} />{info.legacy && info.isCement && <div className="text-[10px] text-slate-400">{t("before delivery tracking")}</div>}</td>
-                  <td className={`${cementTdCls} text-right`}><span className="text-xs font-bold text-blue-700">{t("Open")} ›</span></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      <CementPager pager={pager} />
-    </div>
-  );
-}
-
-function CementBookingList({ state, customers, products, onOpen, initialFilter }) {
-  const [f, setF] = useState(cementEmptyFilter(initialFilter));
-  const [sort, setSort] = useState("newest");
-  // Non-cement bookings (old flow) are listed too, so nothing disappears from this page.
-  const rows = Object.values(state.bookings).filter((i) => cementBookingMatches(i.isCement ? i : { ...i, product: { brand: "" } }, f));
-  const sorters = {
-    newest: (a, b) => (b.booking.date + (b.booking.createdAt || "")).localeCompare(a.booking.date + (a.booking.createdAt || "")),
-    oldest: (a, b) => (a.booking.date + (a.booking.createdAt || "")).localeCompare(b.booking.date + (b.booking.createdAt || "")),
-    customer: (a, b) => (a.booking.customerName || "").localeCompare(b.booking.customerName || "") || a.booking.date.localeCompare(b.booking.date),
-    remaining: (a, b) => b.remainingKg - a.remainingKg,
-    expected: (a, b) => (a.booking.expectedDeliveryDate || "9999").localeCompare(b.booking.expectedDeliveryDate || "9999"),
-  };
-  rows.sort(sorters[sort]);
-  const cementRows = rows.filter((i) => i.isCement);
-  const grand = cementGroupBookings(cementRows, () => "all", () => "all")[0];
-  const cs = state.cs;
-  return (
-    <div>
-      <CementBookingFilters f={f} setF={setF} customers={customers} products={products} showSearch />
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-        <div className="text-sm" data-cement="list-total">
-          {grand ? <>{t("Combined total of listed bookings")}: <b>{fmtTons(grand.bookedKg)}</b> ({fmtBags(grand.bookedKg, cs)}) {t("booked")} · <b>{fmtTons(grand.deliveredKg)}</b> {t("delivered")} · <b>{fmtTons(grand.remainingKg)}</b> ({fmtBags(grand.remainingKg, cs)}) {t("remaining")}</> : t("No cement bookings in this list.")}
-        </div>
-        <select className="text-xs border border-slate-300 px-2 py-1" value={sort} onChange={(e) => setSort(e.target.value)}>
-          <option value="newest">{t("Newest first")}</option><option value="oldest">{t("Oldest first")}</option>
-          <option value="customer">{t("Customer A–Z")}</option><option value="remaining">{t("Most remaining first")}</option><option value="expected">{t("Expected delivery date")}</option>
-        </select>
-      </div>
-      <CementBookingTable state={state} rows={rows} onOpen={onOpen} />
-    </div>
-  );
-}
-
-function CementDeliveryList({ state, customers, products, onOpen }) {
-  const cs = state.cs;
-  const [f, setF] = useState({ from: "", to: "", customerId: "", productId: "", q: "" });
-  const rows = [];
-  Object.values(state.bookings).forEach((info) => {
-    if (!info.isCement) return;
-    const b = info.booking;
-    if (f.customerId && b.customerId !== f.customerId) return;
-    if (f.productId && b.productId !== f.productId) return;
-    info.deliveries.forEach((d) => {
-      if (f.from && d.date < f.from) return;
-      if (f.to && d.date > f.to) return;
-      if (f.q && !`${d.code} ${b.code} ${b.customerName} ${d.driverName || ""} ${d.vehicleNumber || ""}`.toLowerCase().includes(f.q.toLowerCase())) return;
-      rows.push({ d, info });
-    });
-  });
-  rows.sort((a, b) => (b.d.date + (b.d.at || "")).localeCompare(a.d.date + (a.d.at || "")));
-  const pager = useCementPager(rows, 25);
-  const activeKg = roundQty(rows.filter((r) => r.d.status !== "Reversed").reduce((s, r) => s + r.d.kg, 0), 3);
-  const readyToDeliver = Object.values(state.bookings).filter((i) => i.isCement && CEMENT_BOOKING_ACTIVE.includes(i.status)).length;
-  return (
-    <div>
-      <div className="text-sm text-slate-600 mb-3">{t("To record a delivery, open an active booking and press “Record Delivery”.")} {readyToDeliver} {t("active booking(s) can receive deliveries.")}</div>
-      <div className="bg-white border border-slate-200 p-3 mb-3 grid grid-cols-2 md:grid-cols-5 gap-2">
-        <Field label="From"><input type="date" className={inputCls} value={f.from} onChange={(e) => setF({ ...f, from: e.target.value })} /></Field>
-        <Field label="To"><input type="date" className={inputCls} value={f.to} onChange={(e) => setF({ ...f, to: e.target.value })} /></Field>
-        <Field label="Customer">
-          <select className={inputCls} value={f.customerId} onChange={(e) => setF({ ...f, customerId: e.target.value })}>
-            <option value="">{t("All")}</option>{customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Cement Product">
-          <select className={inputCls} value={f.productId} onChange={(e) => setF({ ...f, productId: e.target.value })}>
-            <option value="">{t("All")}</option>{products.filter((p) => p.isCement).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Search"><input className={inputCls} value={f.q} onChange={(e) => setF({ ...f, q: e.target.value })} placeholder="Delivery / booking / driver" /></Field>
-      </div>
-      <div className="text-sm mb-2">{t("Delivered in this list")}: <b>{fmtCement(activeKg, cs)}</b></div>
-      <div className="bg-white border border-slate-200 overflow-x-auto">
-        <table className="w-full text-sm" data-cement="delivery-table">
-          <thead><tr className={cementTableHead}>
-            <th className={cementThCls}>Delivery No.</th><th className={cementThCls}>Date / Time</th><th className={cementThCls}>Booking</th><th className={cementThCls}>Customer</th>
-            <th className={cementThCls}>Product</th><th className={`${cementThCls} text-right`}>Quantity</th><th className={cementThCls}>Driver / Staff</th><th className={cementThCls}>Invoice</th><th className={cementThCls}>Status</th>
-          </tr></thead>
-          <tbody>
-            {rows.length === 0 && <tr><td colSpan={9} className="px-4 py-6 text-center text-slate-400">{t("No deliveries yet.")}</td></tr>}
-            {pager.pageRows.map(({ d, info }) => (
-              <tr key={d.id} className={`border-t border-slate-100 cursor-pointer hover:bg-slate-50 ${d.status === "Reversed" ? "opacity-50" : ""}`} onClick={() => onOpen(info.booking.id)}>
-                <td className={`${cementTdCls} font-black text-blue-700`}>{d.code}</td>
-                <td className={cementTdCls}>{fmtDate(d.date)} <span className="text-slate-400 text-xs">{d.time}</span></td>
-                <td className={cementTdCls}>{info.booking.code}</td>
-                <td className={`${cementTdCls} font-bold`}>{info.booking.customerName}</td>
-                <td className={cementTdCls}>{info.product.name}</td>
-                <td className={`${cementTdCls} text-right`}><div className="font-bold">{fmtTons(d.kg)}</div><div className="text-[11px] text-slate-500">{fmtBags(d.kg, cs)}</div></td>
-                <td className={cementTdCls}>{[d.driverName, d.vehicleNumber].filter(Boolean).join(" · ") || d.staffName || "-"}</td>
-                <td className={cementTdCls}>{state.invoiceByDelivery.get(d.id)?.number || <span className="text-slate-400">{t("Not invoiced")}</span>}</td>
-                <td className={cementTdCls}><CementStatusBadge status={d.status === "Reversed" ? "Reversed" : "Active"} /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <CementPager pager={pager} />
-    </div>
-  );
-}
-
-
-/* ---------------- Booking form (new / edit) ---------------- */
-
-function cementNextBookingCode(settings, bookings) {
-  // Never re-use a number, even if two devices raced on the counter before.
-  const used = new Set((bookings || []).map((b) => b.code));
-  let n = Math.max(Number(settings?.bookingCounter) || 1, ...((bookings || []).map((b) => Number(String(b.code || "").replace(/^BK-/, "")) + 1).filter((x) => x > 0)));
-  while (used.has("BK-" + String(n).padStart(4, "0"))) n += 1;
-  return { code: "BK-" + String(n).padStart(4, "0"), next: n + 1 };
-}
-
-function CementBookingForm({ state, customers, products, bookings, currentUser, settings, editing, onClose, onSave }) {
-  const cs = state.cs;
-  const isEdit = !!editing;
-  const editInfo = isEdit ? state.bookings[editing.id] : null;
-  const hasDeliveries = !!editInfo && editInfo.deliveries.length > 0;
-  const cementProducts = products.filter((p) => p.isCement);
-  const firstProduct = cementProducts[0] || products[0];
-  const [form, setForm] = useState(() => isEdit ? {
-    customerId: editing.customerId, productId: editing.productId || "", qty: String(editing.qty ?? ""),
-    unit: cementUnitLabel(cementBookingUnit(editing)), rate: String(editing.rate ?? ""), date: editing.date,
-    expectedDeliveryDate: editing.expectedDeliveryDate || "", siteAddress: editing.siteAddress || "", notes: editing.notes || "",
-    advanceAmount: "", advanceMethod: "Cash",
-  } : {
-    customerId: customers[0]?.id || "", productId: firstProduct?.id || "", qty: "", unit: "Ton",
-    rate: firstProduct ? String(cementRateFor(firstProduct, "Ton", cs)) : "", date: todayISO(), expectedDeliveryDate: "",
-    siteAddress: customers[0]?.address || "", notes: "", advanceAmount: "", advanceMethod: "Cash",
-  });
-  const [allowOver, setAllowOver] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [requestId] = useState(() => uid("bk"));
-
-  const product = products.find((p) => p.id === form.productId) || null;
-  const isCement = !!product?.isCement;
-  const unitForMoney = isCement ? form.unit : product?.unit || "";
-  const kg = isCement ? cementToKg(form.qty, form.unit, cs) : 0;
-  const total = roundMoney((Number(form.qty) || 0) * (Number(form.rate) || 0));
-  const paidBefore = editInfo ? editInfo.paid : 0;
-  const advance = Number(form.advanceAmount) || 0;
-  const remainingPay = roundMoney(total - paidBefore - advance);
-  const deliveredKg = editInfo ? editInfo.deliveredKg : 0;
-  const newRemainingKg = roundQty(Math.max(0, kg - deliveredKg), 3);
-  const resv = isCement ? cementCheckReservation(state, form.productId, newRemainingKg, isEdit ? editing.id : null) : { ok: true };
-  const canOver = cementCan(currentUser, cs, "overReserve");
-  const { code: previewCode } = cementNextBookingCode(settings, bookings);
-  const customer = customers.find((c) => c.id === form.customerId);
-
-  function pickProduct(productId) {
-    const p = products.find((x) => x.id === productId);
-    const unit = p?.isCement ? form.unit : p?.unit || "";
-    setForm((f) => ({ ...f, productId, rate: p ? String(cementRateFor(p, unit, cs)) : f.rate }));
-  }
-  function changeQty(v) {
-    // Switching tons <-> bags keeps the same total: convert the rate too.
-    setForm((f) => {
-      if (cementUnitKind(v.unit) === cementUnitKind(f.unit) || !f.rate) return { ...f, ...v };
-      const perKg = (Number(f.rate) || 0) / cementToKg(1, f.unit, cs);
-      return { ...f, ...v, rate: String(roundMoney(perKg * cementToKg(1, v.unit, cs))) };
-    });
-  }
-
-  async function submit() {
-    setError("");
-    if (!customer) { setError(t("Select a customer from the Customers list.")); return; }
-    if (!(Number(form.qty) > 0)) { setError(t("Booking quantity must be more than zero.")); return; }
-    if (!(Number(form.rate) > 0)) { setError(t("Rate is required.")); return; }
-    if (!form.date) { setError(t("Booking date is required.")); return; }
-    if (form.expectedDeliveryDate && form.expectedDeliveryDate < form.date) { setError(t("Expected delivery date cannot be before the booking date.")); return; }
-    if (advance < 0) { setError(t("Advance cannot be negative.")); return; }
-    if (isEdit && isCement && kg < deliveredKg - CEMENT_EPS_KG) { setError(`${t("Booking quantity cannot be less than what is already delivered")} (${fmtCement(deliveredKg, cs)}).`); return; }
-    if (isEdit && hasDeliveries && (form.customerId !== editing.customerId || form.productId !== editing.productId)) { setError(t("Customer and product cannot be changed after a delivery has been recorded.")); return; }
-    if (isCement && !resv.ok) {
-      if (!canOver) { setError(`${t("Not enough available stock to reserve this booking.")} ${t("Required")} ${fmtCement(resv.requiredKg, cs)}, ${t("available")} ${fmtCement(Math.max(0, resv.availableKg), cs)}. ${t("Only an authorized user can allow over-reservation.")}`); return; }
-      if (!allowOver) { setError(`${t("Not enough available stock to reserve this booking.")} ${t("Required")} ${fmtCement(resv.requiredKg, cs)}, ${t("available")} ${fmtCement(Math.max(0, resv.availableKg), cs)}. ${t("Tick “Allow over-reservation” to save anyway.")}`); return; }
-    }
-    const data = {
-      customerId: customer.id, customerName: customer.name, customerPhone: customer.phone || "",
-      productId: product ? product.id : "", productName: product ? product.name : "Custom Item",
-      unit: isCement ? cementUnitLabel(cementUnitKind(form.unit)) : product?.unit || "",
-      qty: Number(form.qty), rate: Number(form.rate), date: form.date,
-      expectedDeliveryDate: form.expectedDeliveryDate, siteAddress: form.siteAddress.trim(), notes: form.notes.trim(),
-      ...(isCement ? { qtyUnit: cementUnitLabel(cementUnitKind(form.unit)), qtyKg: kg, bagWeightKgAtBooking: cementBagKg(cs), trackDeliveries: true } : {}),
-      overReserved: isCement && !resv.ok ? true : isEdit ? !!editing.overReserved && !resv.ok : false,
-    };
-    setBusy(true);
-    const res = await onSave(data, { requestId, advanceAmount: advance, advanceMethod: form.advanceMethod, overReserveApproved: isCement && !resv.ok });
-    setBusy(false);
-    if (res?.error) setError(res.error);
-  }
-
-  return (
-    <Modal title={isEdit ? `Edit Booking ${editing.code}` : "New Advance Booking"} onClose={onClose} wide>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4">
-        <div>
-          <div className="text-xs text-slate-500 mb-3">{t("Booking No.")}: <b className="text-slate-900">{isEdit ? editing.code : previewCode}</b>{!isEdit && <span className="text-slate-400"> ({t("assigned on save")})</span>}</div>
-          <Field label="Customer">
-            <select className={inputCls} value={form.customerId} disabled={hasDeliveries} data-cement="bk-customer"
-              onChange={(e) => { const c = customers.find((x) => x.id === e.target.value); setForm({ ...form, customerId: e.target.value, siteAddress: form.siteAddress || c?.address || "" }); }}>
-              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}{c.phone ? ` — ${c.phone}` : ""}</option>)}
-            </select>
-          </Field>
-          <Field label="Cement Brand / Product">
-            <select className={inputCls} value={form.productId} onChange={(e) => pickProduct(e.target.value)} disabled={hasDeliveries} data-cement="bk-product">
-              {cementProducts.length > 0 && <optgroup label={t("Cement (stock-tracked)")}>{cementProducts.map((p) => <option key={p.id} value={p.id}>{p.name}{p.brand ? ` — ${p.brand}` : ""}</option>)}</optgroup>}
-              <optgroup label={t("Other items (no stock tracking)")}>
-                <option value="">{t("Custom Item")}</option>
-                {products.filter((p) => !p.isCement).map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </optgroup>
-            </select>
-          </Field>
-          {isCement ? (
-            <CementQtyInput label="Booking Quantity" qty={form.qty} unit={form.unit} cs={cs} onChange={changeQty} />
-          ) : (
-            <Field label={`Quantity${product?.unit ? ` (${product.unit})` : ""}`}><input type="number" step="any" className={inputCls} value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} /></Field>
-          )}
-          <Field label={`Locked Rate (Rs per ${isCement ? (cementUnitKind(form.unit) === "ton" ? "ton" : "bag") : unitForMoney || "unit"})`}>
-            <input type="number" step="any" className={inputCls} value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} data-cement="bk-rate" />
-          </Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Booking Date"><input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
-            <Field label="Expected Delivery Date"><input type="date" className={inputCls} value={form.expectedDeliveryDate} onChange={(e) => setForm({ ...form, expectedDeliveryDate: e.target.value })} /></Field>
-          </div>
-        </div>
-        <div>
-          <Field label="Delivery Address / Site Location"><input className={inputCls} value={form.siteAddress} onChange={(e) => setForm({ ...form, siteAddress: e.target.value })} /></Field>
-          <Field label="Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label={isEdit ? "Additional Payment Now (Rs)" : "Advance Payment (Rs)"}><input type="number" step="any" className={inputCls} value={form.advanceAmount} onChange={(e) => setForm({ ...form, advanceAmount: e.target.value })} data-cement="bk-advance" /></Field>
-            <Field label="Payment Method">
-              <select className={inputCls} value={form.advanceMethod} onChange={(e) => setForm({ ...form, advanceMethod: e.target.value })}>
-                {CEMENT_PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
-              </select>
-            </Field>
-          </div>
-          <div className="bg-slate-50 border border-slate-200 p-3 text-sm space-y-1 mb-3">
-            <div className="flex justify-between"><span>{t("Total Booking Amount")}</span><b data-cement="bk-total">{fmtMoney(total)}</b></div>
-            {isEdit && <div className="flex justify-between"><span>{t("Already Paid")}</span><b className="text-emerald-600">{fmtMoney(paidBefore)}</b></div>}
-            <div className="flex justify-between"><span>{t(isEdit ? "Payment Now" : "Advance Payment")}</span><b className="text-emerald-600">{fmtMoney(advance)}</b></div>
-            <div className="flex justify-between border-t border-slate-300 pt-1"><b>{t("Remaining Payment Balance")}</b><b className="text-red-600" data-cement="bk-balance">{fmtMoney(remainingPay)}</b></div>
-            <div className="text-[11px] text-slate-400 pt-1">{t("Rate valid till")}: {fmtDate(addOneMonth(form.date))}</div>
-          </div>
-          {isCement && (
-            <div className={`border p-3 text-xs mb-3 ${resv.ok ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-red-50 border-red-300 text-red-700"}`} data-cement="bk-reservation">
-              {resv.untracked
-                ? t("Opening stock is not set for this product, so the reservation cannot be checked against stock.")
-                : resv.ok
-                  ? <>{t("Will reserve")} <b>{fmtCement(newRemainingKg, cs)}</b>. {t("Available for this booking")}: {fmtCement(resv.availableKg, cs)}.</>
-                  : <><b>{t("Insufficient stock")}:</b> {t("required")} {fmtCement(resv.requiredKg, cs)}, {t("available")} {fmtCement(Math.max(0, resv.availableKg), cs)}.</>}
-              {isEdit && deliveredKg > 0 && <div className="mt-1">{t("Already delivered")}: {fmtCement(deliveredKg, cs)}</div>}
-              {!resv.ok && canOver && (
-                <label className="flex items-center gap-2 mt-2 font-bold"><input type="checkbox" checked={allowOver} onChange={(e) => setAllowOver(e.target.checked)} data-cement="bk-allow-over" /> {t("Allow over-reservation (authorized)")}</label>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-      <CementSaving busy={busy} error={error} />
-      <div className="flex gap-2">
-        <Btn onClick={submit} disabled={busy}>{isEdit ? "Save Booking Changes" : "Save Advance Booking"}</Btn>
-        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
-      </div>
-    </Modal>
-  );
-}
-
-function cementRateFor(product, unit, cs) {
-  if (!product) return 0;
-  const price = Number(product.price) || 0;
-  if (!product.isCement) return price;
-  const perKg = price / (cementToKg(1, product.unit || "Bag", cs) || 1);
-  return roundMoney(perKg * cementToKg(1, unit, cs));
-}
-
-/* ---------------- Booking details ---------------- */
-
-function CementBookingDetail({ state, booking, drivers, currentUser, settings, loadError, onClose, onEdit, onCancelBooking, onSaveDelivery, onReverseDelivery, onRecordPayment, onDeliveryInvoice, onLegacyConvert, onLegacyStatus }) {
-  const cs = state.cs;
-  const info = state.bookings[booking.id];
-  const [modal, setModal] = useState(null); // delivery | payment | cancel | slip:<id> | reverse:<id>
-  if (!info) return null;
-  const b = info.booking;
-  const active = CEMENT_BOOKING_ACTIVE.includes(info.status);
-  const canDeliver = cementCan(currentUser, cs, "deliver");
-  const canCancel = cementCan(currentUser, cs, "cancelBooking");
-  const canReverse = cementCan(currentUser, cs, "reverse");
-  const q = (kg) => <><div className="text-lg font-black">{fmtTons(kg)}</div><div className="text-xs text-slate-500">{fmtBags(kg, cs)}</div></>;
-  const slip = modal && modal.startsWith("slip:") ? info.deliveries.find((d) => d.id === modal.slice(5)) : null;
-  const reversing = modal && modal.startsWith("reverse:") ? info.deliveries.find((d) => d.id === modal.slice(8)) : null;
-
-  return (
-    <Modal title={`Booking ${b.code}`} onClose={onClose} wide>
-      <div className="flex flex-wrap items-start justify-between gap-2 mb-3">
-        <div>
-          <div className="text-lg font-black">{b.customerName}</div>
-          <div className="text-xs text-slate-500">{b.customerPhone}{b.siteAddress ? ` · ${b.siteAddress}` : ""}</div>
-          <div className="text-sm mt-1">{info.product?.name || b.productName}{info.product?.brand ? ` — ${info.product.brand}` : ""} · {t("Rate")} {fmtMoney(b.rate)} / {t(info.isCement ? cementUnitLabel(info.unitKind) : b.unit || "unit")}</div>
-          <div className="text-xs text-slate-500 mt-1">
-            {t("Booked on")} {fmtDate(b.date)}{b.expectedDeliveryDate ? ` · ${t("Expected delivery")} ${fmtDate(b.expectedDeliveryDate)}` : ""}{b.expiryDate ? ` · ${t("Rate valid till")} ${fmtDate(b.expiryDate)}` : ""}
-          </div>
-          <div className="text-[11px] text-slate-400">{t("Created by")} {b.createdBy || "-"}{b.createdAt ? ` · ${fmtDateTime(b.createdAt)}` : ""}</div>
-        </div>
-        <div className="text-right"><CementStatusBadge status={info.status} />{b.overReserved && active && <div className="text-[10px] font-bold text-red-600 uppercase mt-1">{t("Over-reserved")}</div>}</div>
-      </div>
-      {b.notes && <div className="text-xs bg-slate-50 border border-slate-200 p-2 mb-3">{b.notes}</div>}
-      {b.cancelReason && <div className="text-xs bg-slate-100 border border-slate-300 p-2 mb-3">{t("Cancelled")} {b.cancelledAt ? fmtDateTime(b.cancelledAt) : ""} {b.cancelledBy ? `· ${b.cancelledBy}` : ""} — {b.cancelReason}</div>}
-
-      {info.isCement ? (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3" data-cement="bk-detail-qty">
-          <div className="border border-slate-200 p-2"><div className="text-[10px] uppercase font-bold text-slate-500">{t("Booked")}</div>{q(info.bookedKg)}</div>
-          <div className="border border-slate-200 p-2"><div className="text-[10px] uppercase font-bold text-slate-500">{t("Delivered")}</div>{q(info.deliveredKg)}</div>
-          <div className="border border-slate-200 p-2 bg-blue-50"><div className="text-[10px] uppercase font-bold text-blue-700">{t("Remaining")}</div>{q(info.remainingKg)}</div>
-          <div className="border border-slate-200 p-2"><div className="text-[10px] uppercase font-bold text-amber-700">{t("Reserved")}</div>{q(info.reservedKg)}</div>
-        </div>
-      ) : (
-        <div className="text-sm border border-slate-200 p-2 mb-3">{t("Quantity")}: <b>{fmtQty(b.qty)} {b.unit}</b> · {t("This item is not stock-tracked (old booking flow).")}</div>
-      )}
-
-      <div className="grid grid-cols-3 gap-2 mb-4 text-sm">
-        <div className="border border-slate-200 p-2"><div className="text-[10px] uppercase font-bold text-slate-500">{t(info.status === "Cancelled" ? "Payable (delivered)" : "Total Booking Amount")}</div><b>{fmtMoney(info.payable)}</b></div>
-        <div className="border border-slate-200 p-2"><div className="text-[10px] uppercase font-bold text-slate-500">{t("Paid")}</div><b className="text-emerald-700">{fmtMoney(info.paid)}</b></div>
-        <div className="border border-slate-200 p-2"><div className="text-[10px] uppercase font-bold text-slate-500">{t(info.balance < 0 ? "Advance to refund / adjust" : "Remaining Payment Balance")}</div><b className={info.balance > 0 ? "text-red-600" : "text-emerald-700"} data-cement="bk-detail-balance">{fmtMoney(Math.abs(info.balance))}</b></div>
-      </div>
-
-      <div className="flex flex-wrap gap-2 mb-4">
-        {info.isCement && active && canDeliver && <Btn onClick={() => setModal("delivery")} disabled={!!loadError}>Record Delivery</Btn>}
-        {info.status !== "Cancelled" && <Btn variant="ghost" onClick={() => setModal("payment")}>Record Payment</Btn>}
-        {info.status !== "Cancelled" && info.status !== "Completed" && <Btn variant="ghost" onClick={onEdit}>Edit Booking</Btn>}
-        {active && canCancel && <Btn variant="danger" onClick={() => setModal("cancel")}>Cancel Booking</Btn>}
-        {!info.isCement && active && <Btn variant="ghost" onClick={() => onLegacyConvert(b)}>Convert to Invoice</Btn>}
-        {(!info.isCement || info.legacy) && info.status !== "Cancelled" && (
-          <select className="text-xs border border-slate-300 px-2" value={b.status} onChange={(e) => onLegacyStatus(b, e.target.value)} title="Status (old booking flow)">
-            {BOOKING_STATUSES.filter((s) => s !== "Cancelled").map((s) => <option key={s}>{s}</option>)}
-          </select>
-        )}
-      </div>
-      {info.isCement && info.legacy && <div className="text-xs text-slate-500 mb-3">{t("This booking was created before delivery tracking. Recording a delivery switches it to delivery tracking.")}</div>}
-
-      {info.isCement && (
-        <>
-          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Deliveries")}</div>
-          <div className="border border-slate-200 overflow-x-auto mb-4">
-            <table className="w-full text-sm" data-cement="bk-deliveries">
-              <thead><tr className={cementTableHead}>
-                <th className={cementThCls}>Delivery No.</th><th className={cementThCls}>Date / Time</th><th className={`${cementThCls} text-right`}>Quantity</th>
-                <th className={cementThCls}>Driver / Staff</th><th className={cementThCls}>Invoice</th><th className={cementThCls}>Status</th><th></th>
-              </tr></thead>
-              <tbody>
-                {info.deliveries.length === 0 && <tr><td colSpan={7} className="px-3 py-4 text-center text-slate-400">{t("No deliveries yet.")}</td></tr>}
-                {info.deliveries.map((d) => {
-                  const inv = state.invoiceByDelivery.get(d.id);
-                  return (
-                    <tr key={d.id} className={`border-t border-slate-100 ${d.status === "Reversed" ? "opacity-50" : ""}`}>
-                      <td className={`${cementTdCls} font-bold text-blue-700`}>{d.code}</td>
-                      <td className={cementTdCls}>{fmtDate(d.date)} <span className="text-xs text-slate-400">{d.time}</span></td>
-                      <td className={`${cementTdCls} text-right`}><b>{fmtTons(d.kg)}</b><div className="text-[11px] text-slate-500">{fmtBags(d.kg, cs)}</div></td>
-                      <td className={cementTdCls}>{[d.driverName, d.vehicleNumber].filter(Boolean).join(" · ") || d.staffName || "-"}{d.notes && <div className="text-[11px] text-slate-400">{d.notes}</div>}</td>
-                      <td className={cementTdCls}>
-                        {inv ? <b>{inv.number}</b> : d.status !== "Reversed" ? <button className="text-xs font-bold text-blue-700 hover:underline" onClick={() => onDeliveryInvoice(d)}>{t("Create Invoice")}</button> : "-"}
-                      </td>
-                      <td className={cementTdCls}><CementStatusBadge status={d.status === "Reversed" ? "Reversed" : "Active"} /></td>
-                      <td className={`${cementTdCls} text-right`}>
-                        <button className="text-xs font-bold text-slate-600 hover:underline mr-3" onClick={() => setModal("slip:" + d.id)}>{t("Slip")}</button>
-                        {canReverse && d.status !== "Reversed" && <button className="text-xs font-bold text-red-600 hover:underline" onClick={() => setModal("reverse:" + d.id)}>{t("Reverse")}</button>}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </>
-      )}
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div>
-          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Payments")}</div>
-          <div className="border border-slate-200 text-sm">
-            {!b.advancePaymentId && Number(b.advanceAmount) > 0 && <div className="flex justify-between px-3 py-1.5 border-b border-slate-100"><span>{fmtDate(b.date)} · {t("Advance (recorded on booking)")}</span><b>{fmtMoney(b.advanceAmount)}</b></div>}
-            {info.payments.map((p) => <div key={p.id} className="flex justify-between px-3 py-1.5 border-b border-slate-100"><span>{fmtDate(p.date)} · {p.method} · {p.note}</span><b>{fmtMoney(p.amount)}</b></div>)}
-            {info.payments.length === 0 && !(Number(b.advanceAmount) > 0 && !b.advancePaymentId) && <div className="px-3 py-2 text-slate-400">{t("No payments yet.")}</div>}
-          </div>
-        </div>
-        <div>
-          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Invoices")}</div>
-          <div className="border border-slate-200 text-sm">
-            {info.invoices.map((i) => <div key={i.id} className={`flex justify-between px-3 py-1.5 border-b border-slate-100 ${isInvoiceCancelled(i) ? "line-through text-slate-400" : ""}`}><span>{i.number} · {fmtDate(i.date)}</span><b>{fmtMoney(i.total)}</b></div>)}
-            {info.invoices.length === 0 && <div className="px-3 py-2 text-slate-400">{t("No invoices yet.")}</div>}
-          </div>
-        </div>
-      </div>
-      {(b.editHistory || []).length > 0 && (
-        <div className="mt-4 text-xs text-slate-500">
-          <div className="text-[11px] uppercase tracking-wide font-bold mb-1">{t("Edit History")}</div>
-          {b.editHistory.map((h, i) => <div key={i}>{fmtDateTime(h.at)} · {h.by} · {h.summary}</div>)}
-        </div>
-      )}
-
-      {modal === "delivery" && <CementDeliveryForm state={state} info={info} drivers={drivers} currentUser={currentUser} onClose={() => setModal(null)} onSave={onSaveDelivery} onInvoice={onDeliveryInvoice} onSlip={(id) => setModal("slip:" + id)} />}
-      {modal === "payment" && <CementPaymentForm info={info} onClose={() => setModal(null)} onSave={onRecordPayment} />}
-      {modal === "cancel" && <CementCancelForm state={state} info={info} onClose={() => setModal(null)} onSave={onCancelBooking} />}
-      {slip && <CementDeliverySlip state={state} info={info} delivery={slip} settings={settings} onClose={() => setModal(null)} />}
-      {reversing && <CementReverseDelivery state={state} info={info} delivery={reversing} onClose={() => setModal(null)} onSave={onReverseDelivery} />}
-    </Modal>
-  );
-}
-
-function cementNowTime() {
-  const d = new Date();
-  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
-}
-
-function CementDeliveryForm({ state, info, drivers, currentUser, onClose, onSave, onInvoice, onSlip }) {
-  const cs = state.cs;
-  const b = info.booking;
-  const [opened] = useState(() => ({ date: todayISO(), time: cementNowTime() }));
-  const [form, setForm] = useState(() => ({
-    id: uid("dlv"), qty: "", unit: cementUnitLabel(info.unitKind === "kg" ? "bag" : info.unitKind), date: opened.date, time: opened.time,
-    driverId: "", driverName: "", vehicleNumber: "", staffName: currentUser?.name || currentUser?.username || "", notes: "", createInvoice: true,
-  }));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const kg = cementToKg(form.qty, form.unit, cs);
-  const after = roundQty(info.remainingKg - kg, 3);
-  const s = state.products[info.productId];
-  const problem = form.qty === "" ? "" : cementCheckDelivery(state, b.id, kg);
-
-  function pickDriver(code) {
-    const d = (drivers || []).find((x) => x.code === code);
-    setForm((f) => ({ ...f, driverId: code, driverName: d ? d.name : f.driverName, vehicleNumber: d ? d.vehicleNumber || "" : f.vehicleNumber }));
-  }
-
-  async function submit() {
-    setError("");
-    const msg = cementCheckDelivery(state, b.id, kg);
-    if (msg) { setError(msg); return; }
-    if (!form.date) { setError(t("Delivery date is required.")); return; }
-    if (form.date < b.date) { setError(t("Delivery date cannot be before the booking date.")); return; }
-    if (form.date < s.openingDate) { setError(`${t("Delivery date cannot be before the opening stock date")} (${fmtDate(s.openingDate)}).`); return; }
-    const record = {
-      id: form.id, code: cementCode("DLV", form.id), bookingId: b.id, bookingCode: b.code, customerId: b.customerId, customerName: b.customerName,
-      productId: b.productId, productName: info.product.name, qtyEntered: Number(form.qty), unitEntered: cementUnitLabel(cementUnitKind(form.unit)), kg,
-      // Exact save time when the default date/time was kept, otherwise the time the user entered.
-      date: form.date, time: form.time,
-      at: form.date === opened.date && form.time === opened.time ? new Date().toISOString() : new Date(`${form.date}T${form.time || "00:00"}`).toISOString(),
-      seq: info.deliveries.length + 1,
-      driverId: form.driverId, driverName: form.driverName.trim(), vehicleNumber: form.vehicleNumber.trim(), staffName: form.staffName.trim(),
-      notes: form.notes.trim(), status: "Active", createdBy: currentUser?.name || currentUser?.username || "", createdAt: new Date().toISOString(),
-    };
-    if (!confirm(`${t("Confirm delivery")} ${b.code} → ${b.customerName}: ${fmtCement(kg, cs)}?\n${t("Physical stock will decrease by this quantity.")}`)) return;
-    setBusy(true);
-    const res = await onSave(record);
-    setBusy(false);
-    if (res?.error) { setError(res.error); return; }
-    if (form.createInvoice) onInvoice(record);
-    else onSlip(record.id);
-  }
-
-  return (
-    <Modal title={`Record Delivery — ${b.code}`} onClose={onClose}>
-      <div className="grid grid-cols-3 gap-2 text-xs mb-3" data-cement="dlv-summary">
-        <div className="border border-slate-200 p-2"><div className="font-bold text-slate-500 uppercase text-[10px]">{t("Booked")}</div><b>{fmtTons(info.bookedKg)}</b><div>{fmtBags(info.bookedKg, cs)}</div></div>
-        <div className="border border-slate-200 p-2"><div className="font-bold text-slate-500 uppercase text-[10px]">{t("Already Delivered")}</div><b>{fmtTons(info.deliveredKg)}</b><div>{fmtBags(info.deliveredKg, cs)}</div></div>
-        <div className="border border-slate-200 p-2 bg-blue-50"><div className="font-bold text-blue-700 uppercase text-[10px]">{t("Remaining")}</div><b>{fmtTons(info.remainingKg)}</b><div>{fmtBags(info.remainingKg, cs)}</div></div>
-      </div>
-      <CementQtyInput label="Delivery Quantity (this trip)" qty={form.qty} unit={form.unit} cs={cs} onChange={(v) => setForm({ ...form, ...v })} autoFocus />
-      <div className={`text-xs p-2 border mb-3 ${problem ? "bg-red-50 border-red-300 text-red-700" : "bg-slate-50 border-slate-200"}`} data-cement="dlv-after">
-        {problem || <>{t("Remaining after this delivery")}: <b>{fmtCement(Math.max(0, after), cs)}</b> · {t("Physical stock after")}: <b>{fmtCement(roundQty(s.physicalKg - kg, 3), cs)}</b></>}
-      </div>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Delivery Date"><input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
-        <Field label="Time"><input type="time" className={inputCls} value={form.time} onChange={(e) => setForm({ ...form, time: e.target.value })} /></Field>
-      </div>
-      {(drivers || []).length > 0 && (
-        <Field label="Driver">
-          <select className={inputCls} value={form.driverId} onChange={(e) => pickDriver(e.target.value)}>
-            <option value="">{t("— Select driver —")}</option>
-            {drivers.map((d) => <option key={d.code} value={d.code}>{d.code} — {d.name}{d.vehicleNumber ? ` (${d.vehicleNumber})` : ""}</option>)}
-          </select>
-        </Field>
-      )}
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Driver Name"><input className={inputCls} value={form.driverName} onChange={(e) => setForm({ ...form, driverName: e.target.value })} /></Field>
-        <Field label="Vehicle No."><input className={inputCls} value={form.vehicleNumber} onChange={(e) => setForm({ ...form, vehicleNumber: e.target.value })} /></Field>
-      </div>
-      <Field label="Responsible Staff"><input className={inputCls} value={form.staffName} onChange={(e) => setForm({ ...form, staffName: e.target.value })} /></Field>
-      <Field label="Delivery Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
-      <label className="flex items-center gap-2 text-sm mb-3"><input type="checkbox" checked={form.createInvoice} onChange={(e) => setForm({ ...form, createInvoice: e.target.checked })} data-cement="dlv-invoice" /> {t("Create the invoice for this delivery now (at the locked booking rate)")}</label>
-      <CementSaving busy={busy} error={error} />
-      <div className="flex gap-2"><Btn onClick={submit} disabled={busy || !!problem}>Save Delivery</Btn><Btn variant="ghost" onClick={onClose}>Cancel</Btn></div>
-    </Modal>
-  );
-}
-
-function CementPaymentForm({ info, onClose, onSave }) {
-  const b = info.booking;
-  const [form, setForm] = useState({ amount: info.balance > 0 ? String(info.balance) : "", date: todayISO(), method: "Cash", note: "" });
-  const [requestId] = useState(() => uid("pay"));
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  async function submit() {
-    const amount = Number(form.amount);
-    if (!(amount > 0)) { setError(t("Amount must be more than zero.")); return; }
-    setBusy(true);
-    const res = await onSave(b, { id: requestId, amount: roundMoney(amount), date: form.date, method: form.method, note: form.note.trim() });
-    setBusy(false);
-    if (res?.error) { setError(res.error); return; }
-    onClose();
-  }
-  return (
-    <Modal title={`Record Payment — ${b.code}`} onClose={onClose}>
-      <div className="text-sm mb-3">{t("Remaining Payment Balance")}: <b>{fmtMoney(info.balance)}</b></div>
-      <Field label="Amount (Rs)"><input type="number" step="any" className={inputCls} value={form.amount} onChange={(e) => setForm({ ...form, amount: e.target.value })} autoFocus /></Field>
-      <div className="grid grid-cols-2 gap-3">
-        <Field label="Date"><input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
-        <Field label="Method"><select className={inputCls} value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })}>{CEMENT_PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}</select></Field>
-      </div>
-      <Field label="Note"><input className={inputCls} value={form.note} onChange={(e) => setForm({ ...form, note: e.target.value })} /></Field>
-      <div className="text-xs text-slate-500 mb-3">{t("Saved in Payments and the customer's Ledger, linked to this booking.")}</div>
-      <CementSaving busy={busy} error={error} />
-      <div className="flex gap-2"><Btn onClick={submit} disabled={busy}>Save Payment</Btn><Btn variant="ghost" onClick={onClose}>Cancel</Btn></div>
-    </Modal>
-  );
-}
-
-function CementCancelForm({ state, info, onClose, onSave }) {
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  async function submit() {
-    if (!reason.trim()) { setError(t("Reason is required.")); return; }
-    if (!confirm(`${t("Cancel booking")} ${info.booking.code}?`)) return;
-    setBusy(true);
-    const res = await onSave(info.booking, reason.trim());
-    setBusy(false);
-    if (res?.error) { setError(res.error); return; }
-    onClose();
-  }
-  return (
-    <Modal title={`Cancel Booking ${info.booking.code}`} onClose={onClose}>
-      <div className="text-sm mb-3 space-y-1">
-        {info.isCement && <div>{t("Undelivered quantity released from reservation")}: <b>{fmtCement(info.remainingKg, state.cs)}</b></div>}
-        {info.isCement && info.deliveredKg > 0 && <div>{t("Already delivered (stays delivered)")}: <b>{fmtCement(info.deliveredKg, state.cs)}</b></div>}
-        <div>{t("Paid so far")}: <b>{fmtMoney(info.paid)}</b> · {t("Payable for delivered cement")}: <b>{fmtMoney(info.deliveredValue)}</b></div>
-        <div className="text-xs text-slate-500">{t("The booking and its deliveries stay in history and reports. Any refund is recorded separately.")}</div>
-      </div>
-      <Field label="Cancellation Reason (required)"><input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus /></Field>
-      <CementSaving busy={busy} error={error} />
-      <div className="flex gap-2"><Btn variant="danger" onClick={submit} disabled={busy}>Confirm Cancel Booking</Btn><Btn variant="ghost" onClick={onClose}>Back</Btn></div>
-    </Modal>
-  );
-}
-
-function CementReverseDelivery({ state, info, delivery, onClose, onSave }) {
-  const [reason, setReason] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const inv = state.invoiceByDelivery.get(delivery.id);
-  async function submit() {
-    if (inv) { setError(`${t("Cancel invoice")} ${inv.number} ${t("first.")}`); return; }
-    if (!reason.trim()) { setError(t("Reason is required.")); return; }
-    setBusy(true);
-    const res = await onSave(delivery, reason.trim());
-    setBusy(false);
-    if (res?.error) { setError(res.error); return; }
-    onClose();
-  }
-  return (
-    <Modal title={`Reverse Delivery ${delivery.code}`} onClose={onClose}>
-      <div className="text-sm mb-3">{t("Use only when cement was recorded as delivered by mistake.")} {fmtCement(delivery.kg, state.cs)} {t("goes back to physical stock and to this booking's remaining quantity.")}</div>
-      {inv && <div className="text-sm text-red-600 mb-3">{t("This delivery is billed on invoice")} {inv.number}. {t("Cancel that invoice first.")}</div>}
-      <Field label="Reason (required)"><input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus /></Field>
-      <CementSaving busy={busy} error={error} />
-      <div className="flex gap-2"><Btn variant="danger" onClick={submit} disabled={busy || !!inv}>Reverse Delivery</Btn><Btn variant="ghost" onClick={onClose}>Back</Btn></div>
-    </Modal>
-  );
-}
-
-function CementDeliverySlip({ state, info, delivery, settings, onClose }) {
-  const cs = state.cs;
-  const b = info.booking;
-  // info.deliveries is in delivery order; everything active before this one counts as "delivered before".
-  const position = info.deliveries.findIndex((d) => d.id === delivery.id);
-  const before = roundQty(info.deliveries.slice(0, Math.max(0, position)).filter((d) => d.status !== "Reversed").reduce((s, d) => s + d.kg, 0), 3);
-  const afterRemaining = roundQty(Math.max(0, info.bookedKg - before - (delivery.status === "Reversed" ? 0 : delivery.kg)), 3);
-  const row = (label, value) => <tr><td className="py-1 pr-3 text-slate-500 align-top">{t(label)}</td><td className="py-1 font-bold">{value}</td></tr>;
-  return (
-    <Modal title={`Delivery Slip ${delivery.code}`} onClose={onClose}>
-      <div className="print-area bg-white text-sm" data-cement="slip">
-        <div className="flex justify-between items-start border-b-2 border-slate-900 pb-2 mb-3">
-          <div>
-            {settings?.logoUrl && <img src={settings.logoUrl} alt="" className="w-10 h-10 object-contain mb-1" />}
-            <div className="text-lg font-black uppercase">{settings?.companyName}</div>
-            <div className="text-xs text-slate-500">{settings?.companyAddress} {settings?.companyPhone}</div>
-          </div>
-          <div className="text-right">
-            <div className="text-xs uppercase tracking-wide font-bold text-slate-500">{t("Cement Delivery Slip")}</div>
-            <div className="text-lg font-black">{delivery.code}</div>
-            <div className="text-xs text-slate-500">{t("Trip")} {position + 1} {t("of booking")} {b.code}</div>
-            {delivery.status === "Reversed" && <div className="text-xs font-black text-red-600">{t("REVERSED")}</div>}
-          </div>
-        </div>
-        <table className="w-full mb-3"><tbody>
-          {row("Date / Time", `${fmtDate(delivery.date)} ${delivery.time || ""}`)}
-          {row("Booking No.", b.code)}
-          {row("Customer", `${b.customerName}${b.customerPhone ? " · " + b.customerPhone : ""}`)}
-          {row("Site / Address", b.siteAddress || "-")}
-          {row("Cement", `${info.product.name}${info.product.brand ? " — " + info.product.brand : ""}`)}
-          {row("Delivered Now", `${fmtTons(delivery.kg)} = ${fmtBags(delivery.kg, cs)}`)}
-          {row("Booked", fmtCement(info.bookedKg, cs))}
-          {row("Delivered Before", fmtCement(before, cs))}
-          {row("Remaining After", fmtCement(afterRemaining, cs))}
-          {row("Driver / Vehicle", [delivery.driverName, delivery.vehicleNumber].filter(Boolean).join(" · ") || "-")}
-          {row("Staff", delivery.staffName || delivery.createdBy || "-")}
-          {delivery.notes ? row("Notes", delivery.notes) : null}
-        </tbody></table>
-        <div className="grid grid-cols-2 gap-8 mt-10 text-xs text-center">
-          <div className="border-t border-slate-400 pt-1">{t("Driver Signature")}</div>
-          <div className="border-t border-slate-400 pt-1">{t("Customer / Receiver Signature")}</div>
-        </div>
-      </div>
-      <div className="flex gap-2 mt-4 print:hidden"><Btn onClick={() => window.print()}>Print / Save as PDF</Btn><Btn variant="ghost" onClick={onClose}>Close</Btn></div>
-    </Modal>
-  );
-}
-
-
-/* ---------------- Settings: cement units and permissions ---------------- */
-
-function CementSettingsSection({ cementSettings, onSave }) {
-  const [form, setForm] = useState(() => cementSettingsOf(cementSettings));
-  const [msg, setMsg] = useState("");
-  const bagKg = Number(form.bagWeightKg);
-  function save() {
-    if (!(bagKg > 0) || bagKg > 1000) { setMsg(t("Bag weight must be between 0 and 1000 kg.")); return; }
-    const before = cementBagKg(cementSettings);
-    if (bagKg !== before && !confirm(t("Changing the bag weight changes how bag quantities are converted from now on. Quantities already saved keep their kilograms. Continue?"))) return;
-    onSave({ ...form, bagWeightKg: bagKg });
-    setMsg(t("Cement settings saved."));
-  }
-  const perm = (key, label) => (
-    <label className="flex items-center gap-2 text-sm mb-1.5"><input type="checkbox" checked={!!form[key]} onChange={(e) => setForm({ ...form, [key]: e.target.checked })} data-cement={key} /> {t(label)}</label>
-  );
-  return (
-    <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6" data-cement="settings">
-      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-3">{t("Cement Stock Settings")}</div>
-      <Field label="Cement bag weight (kg)">
-        <input type="number" step="any" className={inputCls} value={form.bagWeightKg} onChange={(e) => setForm({ ...form, bagWeightKg: e.target.value })} data-cement="bag-kg" />
-      </Field>
-      <div className="text-xs text-slate-500 mb-4">1 {t("metric ton")} = 1,000 kg = {bagKg > 0 ? fmtQty(roundQty(1000 / bagKg, 3)) : "-"} {t("bags")}</div>
-      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2">{t("Staff permissions (admins can always do everything)")}</div>
-      {perm("staffCanViewStock", "Staff can view cement stock")}
-      {perm("staffCanStockIn", "Staff can enter opening stock and purchases")}
-      {perm("staffCanDeliver", "Staff can confirm booking deliveries")}
-      {perm("staffCanAdjust", "Staff can make stock adjustments and damage entries")}
-      {perm("staffCanCancelBooking", "Staff can cancel bookings")}
-      {perm("staffCanOverReserve", "Staff can allow over-reservation beyond available stock")}
-      <div className="text-xs text-slate-500 mt-2 mb-3">{t("Reversing a stock entry or a delivery is admin-only.")}</div>
-      {msg && <div className="text-sm font-bold text-slate-700 mb-2">{msg}</div>}
-      <Btn onClick={save}>Save Cement Settings</Btn>
-    </div>
-  );
-}
-
-// Urdu labels for the new screens. Only ADDED to the dictionary — an existing
-// translation is never replaced, so current wording elsewhere cannot change.
-const CEMENT_URDU = {
-  "Cement Stock": "سیمنٹ اسٹاک",
-  "Stock Dashboard": "اسٹاک ڈیش بورڈ",
-  "Stock In / Purchase": "اسٹاک اِن / خریداری",
-  "Adjustment / Damage": "ایڈجسٹمنٹ / خراب مال",
-  "Stock Movement History": "اسٹاک کی نقل و حرکت",
-  "Stock Movement Ledger": "اسٹاک موومنٹ لیجر",
-  "Stock & Booking Reports": "اسٹاک اور بکنگ رپورٹس",
-  "Total Physical Stock": "کل موجود اسٹاک",
-  "Reserved Stock": "محفوظ (بک شدہ) اسٹاک",
-  "Available Stock": "دستیاب اسٹاک",
-  "Today's Stock In": "آج آنے والا اسٹاک",
-  "Today's Stock Out": "آج جانے والا اسٹاک",
-  "Low Stock Alerts": "کم اسٹاک الرٹس",
-  "Damaged Stock": "خراب اسٹاک",
-  "Metric Tons": "میٹرک ٹن",
-  "Bags": "بوریاں",
-  "metric ton": "میٹرک ٹن",
-  "Opening Stock": "ابتدائی اسٹاک",
-  "Purchase / Stock In": "خریداری / اسٹاک اِن",
-  "Save Opening Stock": "ابتدائی اسٹاک محفوظ کریں",
-  "Save Purchase": "خریداری محفوظ کریں",
-  "Supplier": "سپلائر",
-  "Supplier Invoice No.": "سپلائر انوائس نمبر",
-  "Total Purchase Cost": "کل خریداری لاگت",
-  "Stock Adjustment / Damage": "اسٹاک ایڈجسٹمنٹ / خراب مال",
-  "Save Adjustment": "ایڈجسٹمنٹ محفوظ کریں",
-  "Reason (required)": "وجہ (ضروری)",
-  "Booking Dashboard": "بکنگ ڈیش بورڈ",
-  "Customer-wise Booking List": "گاہک وار بکنگ فہرست",
-  "Delivery Management": "ڈیلیوری مینجمنٹ",
-  "Customer-wise Booking Summary": "گاہک وار بکنگ خلاصہ",
-  "Brand-wise Booking Summary": "برانڈ وار بکنگ خلاصہ",
-  "Pending and Partially Delivered Bookings": "زیر التواء اور جزوی ڈیلیور شدہ بکنگز",
-  "Today's Total Bookings": "آج کی کل بکنگز",
-  "Today's Booked Tons": "آج بک شدہ ٹن",
-  "Today's Booked Bags": "آج بک شدہ بوریاں",
-  "Total Active Bookings": "کل فعال بکنگز",
-  "Total Active Booked": "کل فعال بک شدہ",
-  "Total Delivered": "کل ڈیلیور شدہ",
-  "Remaining To Deliver": "باقی ڈیلیوری",
-  "Total Reserved Cement Stock": "کل محفوظ سیمنٹ اسٹاک",
-  "Grand Total": "مجموعی کل",
-  "Booked": "بک شدہ",
-  "Delivered": "ڈیلیور شدہ",
-  "Remaining": "باقی",
-  "Reserved": "محفوظ",
-  "Record Delivery": "ڈیلیوری درج کریں",
-  "Save Delivery": "ڈیلیوری محفوظ کریں",
-  "Record Payment": "ادائیگی درج کریں",
-  "Edit Booking": "بکنگ میں ترمیم",
-  "Cancel Booking": "بکنگ منسوخ کریں",
-  "Create Invoice": "انوائس بنائیں",
-  "Delivery Slip": "ڈیلیوری سلپ",
-  "Cement Delivery Slip": "سیمنٹ ڈیلیوری سلپ",
-  "Booking No.": "بکنگ نمبر",
-  "Delivery No.": "ڈیلیوری نمبر",
-  "Expected Delivery Date": "متوقع ڈیلیوری تاریخ",
-  "Delivery Address / Site Location": "ڈیلیوری پتہ / سائٹ",
-  "Total Booking Amount": "کل بکنگ رقم",
-  "Advance Payment (Rs)": "پیشگی ادائیگی (روپے)",
-  "Remaining Payment Balance": "باقی ادائیگی",
-  "Cement Stock Settings": "سیمنٹ اسٹاک سیٹنگز",
-  "Save Cement Settings": "سیمنٹ سیٹنگز محفوظ کریں",
-  "Driver Signature": "ڈرائیور کے دستخط",
-  "Customer / Receiver Signature": "گاہک / وصول کنندہ کے دستخط",
-  "Physical": "موجود",
-  "Damaged": "خراب",
-  "Not Set": "سیٹ نہیں",
-  "Low": "کم",
-  "OK": "ٹھیک",
-  "Reversal": "واپسی اندراج",
-  "Delivery": "ڈیلیوری",
-  "Purchase": "خریداری",
-  "Sale": "فروخت",
-  "Opening": "ابتدائی",
-  "Booking Reservation": "بکنگ ریزرویشن",
-  "Reservation Release": "ریزرویشن ختم",
-  "Reservation Change": "ریزرویشن تبدیلی",
-  "Print / PDF": "پرنٹ / پی ڈی ایف",
-  "Export CSV (Excel)": "سی ایس وی (ایکسل)",
-  "Current Cement Stock": "موجودہ سیمنٹ اسٹاک",
-  "Stock Valuation": "اسٹاک کی مالیت",
-  "Pending Deliveries": "زیر التواء ڈیلیوریز",
-  "Partial Deliveries": "جزوی ڈیلیوریز",
-  "Completed Bookings": "مکمل بکنگز",
-  "Cancelled Bookings": "منسوخ بکنگز",
-  "Delivery History": "ڈیلیوری ہسٹری",
-};
-Object.entries(CEMENT_URDU).forEach(([en, ur]) => {
-  if (translations.ur[en] == null) translations.ur[en] = ur;
-});
 
 export default App;
