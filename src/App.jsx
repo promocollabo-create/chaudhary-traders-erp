@@ -10163,6 +10163,33 @@ async function pproofPrepareImage(file) {
   };
 }
 
+// Data URL of the image that fits in maxChars (re-encodes smaller if needed).
+async function pproofFitDataUrl(blob, maxChars) {
+  let dataUrl = await pproofBlobToDataUrl(blob);
+  if (/^data:image\/jpeg;base64,/.test(dataUrl) && dataUrl.length <= maxChars) return dataUrl;
+  let img;
+  try { img = await pproofDecode(blob); } catch { throw pproofError("Could not read this image."); }
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  const canvas = document.createElement("canvas");
+  let edge = Math.min(PPROOF_CONFIG.maxEdge, Math.max(w, h));
+  let quality = 0.82;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    edge = Math.round(edge * 0.82);
+    quality = Math.max(0.55, quality - 0.05);
+    const scale = Math.min(1, edge / Math.max(w, h));
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    dataUrl = canvas.toDataURL("image/jpeg", quality);
+    if (dataUrl.length <= maxChars) return dataUrl;
+  }
+  throw pproofError("Image is too large to store. Please use a smaller screenshot.");
+}
+
 function pproofFmtBytes(n) {
   const v = Number(n) || 0;
   return v >= 1024 * 1024 ? (v / 1024 / 1024).toFixed(1) + " MB" : Math.max(1, Math.round(v / 1024)) + " KB";
@@ -10320,10 +10347,21 @@ async function pproofUpload(user, payment, prepared, invoice) {
     try {
       res = await supabase.storage.from(PPROOF_BUCKET).upload(path, prepared.blob, { contentType: "image/jpeg", upsert: false, cacheControl: "3600" });
     } catch (e) {
-      throw pproofError("Upload failed. Please check your internet and try again.", e);
+      res = { error: e };
     }
-    if (res.error) throw pproofError("Upload failed. Please check your internet and try again.", res.error);
-    stored = { storage: "supabase", path, data_url: null };
+    if (!res.error) {
+      stored = { storage: "supabase", path, data_url: null };
+    } else {
+      // Storage bucket missing / blocked by a policy / not reachable.
+      // Fall back to the same place the ERP already keeps Receiving Proof
+      // images: a compressed image inside this proof's own kv_store record.
+      // If the database is also unreachable, saving the record below fails
+      // and staff see "Could not save" — never a fake success.
+      const reason = String((res.error && (res.error.message || res.error.error || res.error.statusCode)) || "storage error");
+      console.warn("payment proof: Storage upload failed, saving image in the database record instead —", reason, res.error);
+      const dataUrl = await pproofFitDataUrl(prepared.blob, PPROOF_CONFIG.localMaxChars);
+      stored = { storage: "database", path: null, data_url: dataUrl, storage_fallback_reason: reason.slice(0, 200) };
+    }
   } else {
     const dataUrl = await pproofBlobToDataUrl(prepared.blob);
     if (!/^data:image\/jpeg;base64,/.test(dataUrl) || dataUrl.length > PPROOF_CONFIG.localMaxChars) {
@@ -10331,6 +10369,7 @@ async function pproofUpload(user, payment, prepared, invoice) {
     }
     stored = { storage: "local", path: null, data_url: dataUrl };
   }
+  if (stored.storage !== "database") stored.storage_fallback_reason = "";
 
   const now = new Date().toISOString();
   const record = {
@@ -10426,7 +10465,7 @@ async function pproofSetVerification(user, paymentId, status, reason) {
 // A URL the browser can show / download. Supabase: signed, short-lived.
 async function pproofImageUrl(record, downloadName) {
   if (!record || !record.active) throw pproofError("The image could not be loaded.");
-  if (record.storage === "local") {
+  if (record.storage === "local" || record.storage === "database") {
     if (!/^data:image\/jpeg;base64,/.test(record.data_url || "")) throw pproofError("The image could not be loaded.");
     return record.data_url;
   }
