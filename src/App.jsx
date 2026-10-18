@@ -3623,7 +3623,7 @@ function PaymentReceiptBody({ payment, customer, settings, balances }) {
   );
 }
 
-function PaymentReceipt({ payment, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, settings, onClose }) {
+function PaymentReceipt({ payment, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, settings, onClose, proofRecord, showProof, onViewProof }) {
   const linkedInvoice = findInvoiceForPayment(payment, invoices);
   // Cash / walk-in invoice payments have no customer account, so fall back
   // to the details saved on the payment and its invoice.
@@ -3659,6 +3659,7 @@ function PaymentReceipt({ payment, customers, invoices, payments, returns, excha
     <>
       <Modal title="Payment Receipt" onClose={onClose}>
         <PaymentReceiptBody {...bodyProps} />
+        {showProof && <PaymentProofReceiptLine record={proofRecord} onView={onViewProof} />}
         <div className="mt-4 flex gap-2 flex-wrap">
           <Btn onClick={() => printReceipt(false)}>Print</Btn>
           <Btn variant="dark" onClick={() => printReceipt(true)}>Save as PDF</Btn>
@@ -3676,8 +3677,16 @@ function PaymentReceipt({ payment, customers, invoices, payments, returns, excha
   );
 }
 
-function Payments({ customers, payments, promises, savePayment, updatePayment, invoices = [], returns = [], exchanges = [], transfers = [], adjustments = [], settings = {} }) {
-  const [form, setForm] = useState({ customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "" });
+function Payments({ customers, payments, promises, savePayment, updatePayment, invoices = [], returns = [], exchanges = [], transfers = [], adjustments = [], settings = {}, currentUser = null, logProofAudit }) {
+  const [form, setForm] = useState({ customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "", reference: "" });
+  // Payment Proof (screenshot) — see the "PAYMENT PROOF" block near the end of this file.
+  const proofs = usePaymentProofs();
+  const [proofFile, setProofFile] = useState(null);
+  const [proofBusy, setProofBusy] = useState(false);
+  const [proofFlash, setProofFlash] = useState(null); // { tone: "ok" | "error", text }
+  const [proofPaymentId, setProofPaymentId] = useState(null);
+  const canUploadProof = pproofCan(currentUser, "upload");
+  const proofPayment = proofPaymentId ? payments.find((p) => p.id === proofPaymentId) : null;
   const [editing, setEditing] = useState(null);
   const [receiptId, setReceiptId] = useState(null);
   const formRef = React.useRef(null);
@@ -3706,7 +3715,7 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
     .filter((p) => (p.remainingAmount > 0 && p.status !== "Cancelled") || (editing && editing.promiseId === p.id));
 
   function blankForm() {
-    return { customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "" };
+    return { customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "", reference: "" };
   }
 
   function startEdit(p) {
@@ -3715,6 +3724,7 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
     setForm({
       customerId: p.customerId || "", date: p.date || todayISO(), amount: String(p.amount ?? ""),
       method: p.method || "Cash", note: linked ? (p.note || "") : paymentUserNote(p), promiseId: p.promiseId || "",
+      reference: p.reference || "",
     });
     if (formRef.current && formRef.current.scrollIntoView) formRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
   }
@@ -3724,7 +3734,8 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
     setForm(blankForm());
   }
 
-  function submit() {
+  async function submit() {
+    if (proofBusy) return; // a screenshot is still uploading for the previous payment
     if (!form.customerId || !Number(form.amount)) { alert("Customer aur amount zaroori hai."); return; }
     const customer = customers.find((c) => c.id === form.customerId);
     if (editing) {
@@ -3738,6 +3749,7 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
         amount: Number(form.amount),
         method: form.method,
         promiseId,
+        reference: String(form.reference || "").trim(),
         note: editingLinked
           ? (editing.note || "")
           : (promiseId ? `Payment against Promise ${customerPromises.find((p) => p.id === promiseId)?.code || ""}${form.note ? " — " + form.note : ""}` : form.note),
@@ -3746,12 +3758,32 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
       setForm(blankForm());
       return;
     }
-    savePayment({
+    const newPayment = {
       id: uid("pay"), ...form, amount: Number(form.amount), customerName: customer.name,
       promiseId: form.promiseId || "",
+      reference: String(form.reference || "").trim(),
       note: form.promiseId ? `Payment against Promise ${customerPromises.find((p) => p.id === form.promiseId)?.code || ""}${form.note ? " — " + form.note : ""}` : form.note,
-    });
-    setForm({ ...form, amount: "", note: "", promiseId: "" });
+    };
+    savePayment(newPayment);
+    setForm({ ...form, amount: "", note: "", promiseId: "", reference: "" });
+    // Screenshot (optional): uploaded AFTER the payment is saved and linked to
+    // that payment's id. It never changes the payment. If the upload fails the
+    // payment stays recorded and staff are told plainly so they can retry.
+    const picked = proofFile;
+    if (!picked) { setProofFlash({ tone: "ok", text: "Payment recorded." }); return; }
+    setProofFile(null);
+    setProofBusy(true);
+    setProofFlash(null);
+    try {
+      await pproofUpload(currentUser, newPayment, picked, null);
+      setProofFlash({ tone: "ok", text: "Payment recorded. Screenshot uploaded — Pending Verification." });
+      if (logProofAudit) logProofAudit("Payment Proof Uploaded", `${paymentReceiptNo(newPayment)} — ${newPayment.customerName}`, "");
+    } catch (e) {
+      setProofFlash({ tone: "error", text: [t("Payment recorded, but the screenshot was NOT uploaded:"), t(pproofMessage(e, "Upload failed. Please check your internet and try again.")), t("Use Upload Proof in the Payment Proof column to try again.")].join(" ") });
+    } finally {
+      if (picked.previewUrl) URL.revokeObjectURL(picked.previewUrl);
+      setProofBusy(false);
+    }
   }
 
   return (
@@ -3796,9 +3828,21 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
             </select>
           </Field>
         )}
+        <Field label="Transaction Reference (optional)">
+          <input className={inputCls} value={form.reference || ""} placeholder="e.g. TID / cheque no." onChange={(e) => setForm({ ...form, reference: e.target.value })} data-pproof="reference" />
+        </Field>
         <Field label="Note">
           <input className={inputCls} value={form.note} disabled={editingLinked} onChange={(e) => setForm({ ...form, note: e.target.value })} />
         </Field>
+        {!editing && canUploadProof && (
+          <div className="mb-3">
+            <span className="block text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Upload Payment Screenshot")}</span>
+            <PaymentProofPicker value={proofFile} onChange={setProofFile} disabled={proofBusy} />
+          </div>
+        )}
+        {editing && (
+          <div className="text-[11px] text-slate-400 mb-3">{t("Payment Proof")}: {proofs.recordFor(editing.id) ? t("Proof attached") : t("No proof attached")}</div>
+        )}
         {editingLinked && (
           <div className="text-xs text-slate-500 mb-3">
             Ye payment Invoice {editingInvoice?.number || ""} par record hui thi, is liye customer aur note yahan change nahi ho sakte.
@@ -3813,16 +3857,22 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
             <Btn variant="ghost" onClick={cancelEdit}>Cancel</Btn>
           </div>
         ) : (
-          <Btn onClick={submit}>Record Payment</Btn>
+          <Btn onClick={submit} disabled={proofBusy}>{proofBusy ? "Uploading..." : "Record Payment"}</Btn>
+        )}
+        {proofBusy && <div className="mt-2 text-xs font-bold text-blue-700" data-pproof="form-busy">{t("Uploading...")}</div>}
+        {proofFlash && (
+          <div className={`mt-3 text-xs font-bold border px-3 py-2 ${proofFlash.tone === "ok" ? "text-emerald-700 bg-emerald-50 border-emerald-200" : "text-red-700 bg-red-50 border-red-200"}`} data-pproof="flash" data-tone={proofFlash.tone}>
+            {t(proofFlash.text)}
+          </div>
         )}
       </div>
       <div className="bg-white border border-slate-200 overflow-x-auto">
         <table className="w-full text-sm">
           <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-            <th className="px-4 py-2">Date</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Method</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Note</th><th className="px-4 py-2 text-right">Actions</th>
+            <th className="px-4 py-2">Date</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Method</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Note</th><th className="px-4 py-2">{t("Payment Proof")}</th><th className="px-4 py-2 text-right">Actions</th>
           </tr></thead>
           <tbody>
-            {sorted.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-slate-400">Koi payment record nahi.</td></tr>}
+            {sorted.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-slate-400">Koi payment record nahi.</td></tr>}
             {sorted.map((p) => {
               const reversed = isPaymentLinkedToCancelledInvoice(p, invoices);
               return (
@@ -3831,7 +3881,13 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
                   <td className="px-4 py-2 font-bold">{p.customerName}</td>
                   <td className="px-4 py-2 text-slate-500">{p.method}</td>
                   <td className={`px-4 py-2 text-right font-bold ${p.kind === "Refund" ? "text-red-600" : "text-emerald-600"}`}>{p.kind === "Refund" ? "-" : ""}{fmtMoney(p.amount)}</td>
-                  <td className="px-4 py-2 text-slate-500 text-xs">{p.note || "-"}</td>
+                  <td className="px-4 py-2 text-slate-500 text-xs">
+                    {p.note || "-"}
+                    {p.reference && <div className="text-[10px] text-slate-400" dir="ltr">Ref: {p.reference}</div>}
+                  </td>
+                  <td className="px-4 py-2" data-payment-row={p.id}>
+                    <PaymentProofCell record={proofs.recordFor(p.id)} loaded={proofs.loaded} failed={proofs.failed} canUpload={canUploadProof} onOpen={() => setProofPaymentId(p.id)} />
+                  </td>
                   <td className="px-4 py-2 text-right whitespace-nowrap">
                     {p.kind === "Refund" ? (
                       <span className="text-xs font-bold text-red-600">Refund</span>
@@ -3856,6 +3912,15 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
           payment={receiptPayment} customers={customers} invoices={invoices} payments={payments}
           returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
           settings={settings} onClose={() => setReceiptId(null)}
+          showProof proofRecord={proofs.recordFor(receiptPayment.id)}
+          onViewProof={() => { setReceiptId(null); setProofPaymentId(receiptPayment.id); }}
+        />
+      )}
+      {proofPayment && (
+        <PaymentProofModal
+          payment={proofPayment} invoice={findInvoiceForPayment(proofPayment, invoices)}
+          record={proofs.recordFor(proofPayment.id)} currentUser={currentUser}
+          onClose={() => setProofPaymentId(null)} onAudit={logProofAudit}
         />
       )}
     </div>
@@ -9067,6 +9132,7 @@ function App() {
         customers={visibleCustomers} payments={visiblePayments} promises={promises} savePayment={savePayment}
         updatePayment={updatePayment} invoices={visibleInvoices} returns={returns} exchanges={exchanges}
         transfers={transfers} adjustments={adjustments} settings={settings}
+        currentUser={currentUser} logProofAudit={logAudit}
       />
     ),
     outstandingTransfer: (
@@ -9866,6 +9932,866 @@ function RecvInvoicePrintProof({ invoice }) {
           {recvT("Proof")} #{idx + 1} · <span dir="ltr">{fmtDate(p.uploaded_at)}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+/* ============================================================
+   PAYMENT PROOF  —  payment screenshot / proof upload
+   ------------------------------------------------------------
+   Part of the existing Payments page (Add Payment form, Payments
+   table, Payment Receipt). It never creates, edits or deletes a
+   payment, and never touches invoices, ledger, promises, bookings or
+   commission. A screenshot is supporting evidence only: uploading,
+   verifying or rejecting it does not change any amount or status
+   anywhere else.
+
+   Where things are stored
+   - The image file:
+       Supabase configured  -> private Storage bucket "payment-proofs"
+                               (path payments/<paymentId>/<time>-<rand>.jpg),
+                               viewed through short-lived signed URLs.
+       Supabase not set up  -> this browser's localStorage only (same
+                               device-only fallback the ERP already uses
+                               for all of its data).
+   - The link to the payment: one kv_store record per payment,
+       key  "ct-payment-proof:<paymentId>"
+       { payment_id, receipt_no, storage, path, uploaded_by, uploaded_at,
+         verification_status, verified_by, verified_at, reject_reason,
+         active, history[], ... }
+     It is kept out of the shared "ct-payments" array on purpose: that
+     array is rewritten whole on every payment save, so writing proof
+     data into it could overwrite a payment saved at the same moment on
+     another device. A separate record per payment id cannot.
+   - Transaction reference: saved on the payment itself (payment.reference)
+     because it is entered with the payment, even when no image is added.
+
+   Verification status ("Pending Verification" / "Verified" / "Rejected")
+   lives only on the proof record and is shown only next to the proof.
+   ============================================================ */
+
+const PPROOF_KEY_PREFIX = "ct-payment-proof:";
+const PPROOF_BUCKET = "payment-proofs";
+const PPROOF_STATUS = { PENDING: "Pending Verification", VERIFIED: "Verified", REJECTED: "Rejected" };
+const PPROOF_STATUS_TONE = {
+  "Pending Verification": "bg-amber-100 text-amber-700",
+  Verified: "bg-emerald-100 text-emerald-700",
+  Rejected: "bg-red-100 text-red-700",
+};
+const PPROOF_CONFIG = {
+  allowedTypes: ["image/jpeg", "image/png", "image/webp"],
+  maxUploadBytes: 10 * 1024 * 1024,    // largest file staff may pick
+  maxEdge: 2000,                        // stored image long edge (px) — keeps small print readable
+  maxStoredBytes: 4.5 * 1024 * 1024,    // must stay under the bucket's 5 MB limit
+  localMaxChars: 1200000,               // localStorage fallback: about 0.9 MB per image
+  signedUrlSeconds: 600,                // view / download links expire after 10 minutes
+};
+// Which roles may do what. Customers never reach the Payments page at all.
+const PPROOF_PERMS = {
+  upload: ["admin", "staff"],          // upload missing proof, replace an unverified proof
+  replaceVerified: ["admin"],
+  delete: ["admin"],
+  verify: ["admin"],                   // verify or reject
+};
+
+const PPROOF_URDU = {
+  "Payment Proof": "ادائیگی کا ثبوت",
+  "Upload Payment Screenshot": "ادائیگی کا اسکرین شاٹ اپ لوڈ کریں",
+  "Choose Image": "تصویر منتخب کریں",
+  "Take Photo": "تصویر کھینچیں",
+  "Replace Image": "تصویر تبدیل کریں",
+  "Remove Image": "تصویر ہٹائیں",
+  "Checking image...": "تصویر چیک ہو رہی ہے...",
+  "JPG, PNG or WEBP · up to 10 MB": "JPG، PNG یا WEBP · زیادہ سے زیادہ 10 MB",
+  "Transaction Reference (optional)": "ٹرانزیکشن حوالہ (اختیاری)",
+  "Transaction Reference": "ٹرانزیکشن حوالہ",
+  "View Screenshot": "اسکرین شاٹ دیکھیں",
+  "View Payment Proof": "ادائیگی کا ثبوت دیکھیں",
+  "No Proof Uploaded": "کوئی ثبوت اپ لوڈ نہیں ہوا",
+  "Upload Proof": "ثبوت اپ لوڈ کریں",
+  "Save Replacement": "تبدیلی محفوظ کریں",
+  "Replace Proof": "ثبوت تبدیل کریں",
+  "Delete Proof": "ثبوت حذف کریں",
+  "Verify": "تصدیق کریں",
+  "Reject": "مسترد کریں",
+  "Confirm Reject": "مسترد کرنے کی تصدیق",
+  "Rejection Reason": "مسترد کرنے کی وجہ",
+  "Pending Verification": "تصدیق زیرِ التوا",
+  "Verified": "تصدیق شدہ",
+  "Rejected": "مسترد",
+  "Verification": "تصدیق",
+  "Uploading...": "اپ لوڈ ہو رہا ہے...",
+  "Saving...": "محفوظ ہو رہا ہے...",
+  "Loading image...": "تصویر لوڈ ہو رہی ہے...",
+  "Open": "کھولیں",
+  "Retry": "دوبارہ کوشش کریں",
+  "Uploaded By": "اپ لوڈ کنندہ",
+  "Uploaded At": "اپ لوڈ کا وقت",
+  "Verified By": "تصدیق کنندہ",
+  "Rejected By": "مسترد کنندہ",
+  "Proof History": "ثبوت کی ہسٹری",
+  "Proof attached": "ثبوت منسلک ہے",
+  "No proof attached": "کوئی ثبوت منسلک نہیں",
+  "Payment Proof Details": "ادائیگی کے ثبوت کی تفصیلات",
+  "A screenshot is supporting evidence only. Uploading, verifying or rejecting it does not change the payment amount, the invoice or the customer ledger.":
+    "اسکرین شاٹ صرف معاون ثبوت ہے۔ اسے اپ لوڈ، تصدیق یا مسترد کرنے سے ادائیگی کی رقم، انوائس یا گاہک کا لیجر تبدیل نہیں ہوتا۔",
+  "Delete this payment proof? The payment itself will not be deleted.": "کیا یہ ادائیگی کا ثبوت حذف کریں؟ ادائیگی خود حذف نہیں ہوگی۔",
+  "Payment recorded. Screenshot uploaded — Pending Verification.": "ادائیگی درج ہو گئی۔ اسکرین شاٹ اپ لوڈ ہو گیا — تصدیق زیرِ التوا۔",
+  "Payment recorded, but the screenshot was NOT uploaded:": "ادائیگی درج ہو گئی، لیکن اسکرین شاٹ اپ لوڈ نہیں ہوا:",
+  "Use Upload Proof in the Payment Proof column to try again.": "دوبارہ کوشش کے لیے ادائیگی کے ثبوت والے کالم میں ثبوت اپ لوڈ کریں۔",
+  "Payment recorded.": "ادائیگی درج ہو گئی۔",
+  "Proof uploaded — Pending Verification.": "ثبوت اپ لوڈ ہو گیا — تصدیق زیرِ التوا۔",
+  "Proof replaced — Pending Verification.": "ثبوت تبدیل ہو گیا — تصدیق زیرِ التوا۔",
+  "Proof deleted. The payment was not changed.": "ثبوت حذف ہو گیا۔ ادائیگی میں کوئی تبدیلی نہیں ہوئی۔",
+  "Proof marked as Verified.": "ثبوت کی تصدیق ہو گئی۔",
+  "Proof marked as Rejected.": "ثبوت مسترد کر دیا گیا۔",
+  "Only JPG, PNG or WEBP images are allowed.": "صرف JPG، PNG یا WEBP تصاویر کی اجازت ہے۔",
+  "Image is larger than 10 MB.": "تصویر 10 MB سے بڑی ہے۔",
+  "Image is too large to store. Please use a smaller screenshot.": "تصویر محفوظ کرنے کے لیے بہت بڑی ہے۔ براہِ کرم چھوٹا اسکرین شاٹ استعمال کریں۔",
+  "Could not read this image.": "یہ تصویر پڑھی نہیں جا سکی۔",
+  "The image could not be loaded.": "تصویر لوڈ نہیں ہو سکی۔",
+  "Upload failed. Please check your internet and try again.": "اپ لوڈ ناکام ہو گیا۔ براہِ کرم انٹرنیٹ چیک کر کے دوبارہ کوشش کریں۔",
+  "Could not save. Please check your internet and try again.": "محفوظ نہیں ہو سکا۔ براہِ کرم انٹرنیٹ چیک کر کے دوبارہ کوشش کریں۔",
+  "Could not load payment proofs.": "ادائیگی کے ثبوت لوڈ نہیں ہو سکے۔",
+  "Browser storage is full. Delete old proofs or set up Supabase.": "براؤزر اسٹوریج بھر گئی ہے۔ پرانے ثبوت حذف کریں یا Supabase سیٹ اپ کریں۔",
+  "You do not have permission to do this.": "آپ کو یہ کام کرنے کی اجازت نہیں ہے۔",
+  "Only admin can replace a verified proof.": "تصدیق شدہ ثبوت صرف ایڈمن تبدیل کر سکتا ہے۔",
+  "Rejection reason is required.": "مسترد کرنے کی وجہ درج کرنا ضروری ہے۔",
+  "This payment has no proof.": "اس ادائیگی کا کوئی ثبوت نہیں ہے۔",
+  "Select an image first.": "پہلے تصویر منتخب کریں۔",
+  "Images on this device only (Supabase not configured).": "تصاویر صرف اسی ڈیوائس پر ہیں (Supabase سیٹ اپ نہیں)۔",
+  "Uploaded": "اپ لوڈ ہوا",
+  "Replaced": "تبدیل ہوا",
+};
+Object.entries(PPROOF_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
+
+// Error whose message is a translatable sentence that can be shown to staff.
+function pproofError(message, cause) {
+  const e = new Error(message);
+  e.pproofUser = true;
+  if (cause) { e.cause = cause; console.error("payment proof:", message, cause); }
+  return e;
+}
+function pproofMessage(e, fallback) {
+  return e && e.pproofUser ? e.message : fallback;
+}
+
+function pproofCan(user, action) {
+  return !!user && user.role !== "customer" && (PPROOF_PERMS[action] || []).includes(user.role);
+}
+function pproofRequire(user, action) {
+  if (!pproofCan(user, action)) throw pproofError("You do not have permission to do this.");
+}
+function pproofActor(user) {
+  return (user && (user.name || user.username)) || "Staff";
+}
+
+/* ---------------- Image checks + re-encode ----------------
+   Type is checked twice (the browser's file type AND the file's first
+   bytes), then the browser decodes it and a fresh JPEG is drawn. The
+   original file is never stored, so anything that is not a real image
+   cannot get through. */
+
+async function pproofSniffType(file) {
+  const h = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  if (h[0] === 0xff && h[1] === 0xd8 && h[2] === 0xff) return "image/jpeg";
+  if (h[0] === 0x89 && h[1] === 0x50 && h[2] === 0x4e && h[3] === 0x47) return "image/png";
+  if (h[0] === 0x52 && h[1] === 0x49 && h[2] === 0x46 && h[3] === 0x46 &&
+      h[8] === 0x57 && h[9] === 0x45 && h[10] === 0x42 && h[11] === 0x50) return "image/webp";
+  return "";
+}
+
+function pproofDecode(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("decode")); };
+    img.src = url;
+  });
+}
+
+function pproofCanvasBlob(canvas, quality) {
+  return new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", quality));
+}
+
+function pproofBlobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+// Returns { blob, previewUrl, width, height, bytes, originalName }.
+async function pproofPrepareImage(file) {
+  if (!file) throw pproofError("Could not read this image.");
+  if (!PPROOF_CONFIG.allowedTypes.includes(file.type)) throw pproofError("Only JPG, PNG or WEBP images are allowed.");
+  if (file.size > PPROOF_CONFIG.maxUploadBytes) throw pproofError("Image is larger than 10 MB.");
+  const sniffed = await pproofSniffType(file);
+  if (!PPROOF_CONFIG.allowedTypes.includes(sniffed)) throw pproofError("Only JPG, PNG or WEBP images are allowed.");
+  let img;
+  try { img = await pproofDecode(file); } catch { throw pproofError("Could not read this image."); }
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (!w || !h) throw pproofError("Could not read this image.");
+  const limit = supabase ? PPROOF_CONFIG.maxStoredBytes : Math.floor(PPROOF_CONFIG.localMaxChars * 0.74);
+  const canvas = document.createElement("canvas");
+  let edge = PPROOF_CONFIG.maxEdge;
+  let quality = 0.88;
+  let blob = null;
+  for (let attempt = 0; attempt < 7; attempt++) {
+    const scale = Math.min(1, edge / Math.max(w, h));
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    blob = await pproofCanvasBlob(canvas, quality);
+    if (blob && blob.size <= limit) break;
+    edge = Math.round(edge * 0.82);
+    quality = Math.max(0.6, quality - 0.06);
+  }
+  if (!blob || blob.size > limit) throw pproofError("Image is too large to store. Please use a smaller screenshot.");
+  return {
+    blob, previewUrl: URL.createObjectURL(blob), width: canvas.width, height: canvas.height,
+    bytes: blob.size, originalName: String(file.name || "").slice(0, 120),
+  };
+}
+
+function pproofFmtBytes(n) {
+  const v = Number(n) || 0;
+  return v >= 1024 * 1024 ? (v / 1024 / 1024).toFixed(1) + " MB" : Math.max(1, Math.round(v / 1024)) + " KB";
+}
+
+/* ---------------- kv record storage (throws on failure) ---------------- */
+
+function pproofKey(paymentId) { return PPROOF_KEY_PREFIX + paymentId; }
+
+async function pproofKvGet(paymentId) {
+  const key = pproofKey(paymentId);
+  if (supabase) {
+    const { data, error } = await supabase.from("kv_store").select("value").eq("key", key).maybeSingle();
+    if (error) throw pproofError("Could not save. Please check your internet and try again.", error);
+    return data ? data.value : null;
+  }
+  const raw = window.localStorage.getItem(LS_PREFIX + key);
+  return raw ? JSON.parse(raw) : null;
+}
+
+async function pproofKvPut(record) {
+  const key = pproofKey(record.payment_id);
+  if (supabase) {
+    const { error } = await supabase.from("kv_store").upsert({ key, value: record, updated_at: new Date().toISOString() });
+    if (error) throw pproofError("Could not save. Please check your internet and try again.", error);
+    return;
+  }
+  try {
+    window.localStorage.setItem(LS_PREFIX + key, JSON.stringify(record));
+  } catch (e) {
+    throw pproofError("Browser storage is full. Delete old proofs or set up Supabase.", e);
+  }
+}
+
+async function pproofKvListAll() {
+  const out = {};
+  if (supabase) {
+    const { data, error } = await supabase.from("kv_store").select("key,value").like("key", PPROOF_KEY_PREFIX + "%");
+    if (error) throw error;
+    (data || []).forEach((row) => {
+      const v = row.value;
+      if (String(row.key).startsWith(PPROOF_KEY_PREFIX) && v && v.payment_id && row.key === pproofKey(v.payment_id)) out[v.payment_id] = v;
+    });
+    return out;
+  }
+  const full = LS_PREFIX + PPROOF_KEY_PREFIX;
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const k = window.localStorage.key(i);
+    if (!k || !k.startsWith(full)) continue;
+    try {
+      const v = JSON.parse(window.localStorage.getItem(k));
+      if (v && v.payment_id && k === LS_PREFIX + pproofKey(v.payment_id)) out[v.payment_id] = v;
+    } catch {}
+  }
+  return out;
+}
+
+/* ---------------- shared cache + live updates ---------------- */
+
+const pproofState = { loaded: false, failed: false, records: {} };
+const pproofListeners = new Set();
+let pproofInFlight = null;
+let pproofChannel = null;
+let pproofSubscribers = 0;
+
+function pproofEmit() { pproofListeners.forEach((l) => l()); }
+
+function pproofRefreshAll() {
+  if (pproofInFlight) return pproofInFlight;
+  pproofInFlight = (async () => {
+    try {
+      pproofState.records = await pproofKvListAll();
+      pproofState.failed = false;
+    } catch (e) {
+      console.error("payment proof load failed", e);
+      pproofState.failed = true;
+    } finally {
+      pproofState.loaded = true;
+      pproofInFlight = null;
+      pproofEmit();
+    }
+  })();
+  return pproofInFlight;
+}
+
+function pproofSetRecord(record) {
+  pproofState.records = { ...pproofState.records, [record.payment_id]: record };
+  pproofEmit();
+}
+
+// The active (not deleted) proof record of one payment, or null.
+function pproofActiveRecord(paymentId) {
+  const r = pproofState.records[paymentId];
+  return r && r.active && r.payment_id === paymentId && (r.path || r.data_url) ? r : null;
+}
+
+function usePaymentProofs() {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const listener = () => bump((n) => n + 1);
+    pproofListeners.add(listener);
+    pproofSubscribers += 1;
+    pproofRefreshAll();
+    if (supabase && !pproofChannel && typeof supabase.channel === "function") {
+      pproofChannel = supabase
+        .channel("payment_proof_changes")
+        .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, (payload) => {
+          const row = payload.new;
+          if (!row || !String(row.key || "").startsWith(PPROOF_KEY_PREFIX)) return;
+          const v = row.value;
+          if (v && v.payment_id && row.key === pproofKey(v.payment_id)) pproofSetRecord(v);
+        })
+        .subscribe();
+    }
+    return () => {
+      pproofListeners.delete(listener);
+      pproofSubscribers -= 1;
+      if (pproofSubscribers <= 0 && pproofChannel) {
+        try { supabase.removeChannel(pproofChannel); } catch {}
+        pproofChannel = null;
+      }
+    };
+  }, []);
+  return { loaded: pproofState.loaded, failed: pproofState.failed, recordFor: pproofActiveRecord };
+}
+
+/* ---------------- actions ---------------- */
+
+function pproofHistory(user, action, details) {
+  return { action, details: details || "", by: pproofActor(user), role: user?.role || "", at: new Date().toISOString() };
+}
+
+function pproofRandom() {
+  return Math.random().toString(36).slice(2, 8);
+}
+
+// Upload proof for a payment (new or missing) — or replace the current one.
+// Never touches the payment record itself.
+async function pproofUpload(user, payment, prepared, invoice) {
+  pproofRequire(user, "upload");
+  if (!payment || !payment.id) throw pproofError("Could not save. Please check your internet and try again.");
+  if (!prepared || !prepared.blob) throw pproofError("Select an image first.");
+  const existing = await pproofKvGet(payment.id);
+  if (existing && existing.payment_id !== payment.id) throw pproofError("Could not save. Please check your internet and try again.");
+  const replacing = !!(existing && existing.active && (existing.path || existing.data_url));
+  if (replacing && existing.verification_status === PPROOF_STATUS.VERIFIED && !pproofCan(user, "replaceVerified")) {
+    throw pproofError("Only admin can replace a verified proof.");
+  }
+
+  let stored;
+  if (supabase) {
+    const safeId = String(payment.id).replace(/[^A-Za-z0-9_-]/g, "");
+    const path = `payments/${safeId}/${Date.now()}-${pproofRandom()}.jpg`;
+    let res;
+    try {
+      res = await supabase.storage.from(PPROOF_BUCKET).upload(path, prepared.blob, { contentType: "image/jpeg", upsert: false, cacheControl: "3600" });
+    } catch (e) {
+      throw pproofError("Upload failed. Please check your internet and try again.", e);
+    }
+    if (res.error) throw pproofError("Upload failed. Please check your internet and try again.", res.error);
+    stored = { storage: "supabase", path, data_url: null };
+  } else {
+    const dataUrl = await pproofBlobToDataUrl(prepared.blob);
+    if (!/^data:image\/jpeg;base64,/.test(dataUrl) || dataUrl.length > PPROOF_CONFIG.localMaxChars) {
+      throw pproofError("Image is too large to store. Please use a smaller screenshot.");
+    }
+    stored = { storage: "local", path: null, data_url: dataUrl };
+  }
+
+  const now = new Date().toISOString();
+  const record = {
+    ...(existing || {}),
+    payment_id: payment.id,
+    receipt_no: paymentReceiptNo(payment),
+    customer_id: payment.customerId || "",
+    customer_name: payment.customerName || "",
+    invoice_id: invoice ? invoice.id : (payment.invoiceId || ""),
+    invoice_number: invoice ? invoice.number : "",
+    ...stored,
+    mime: "image/jpeg",
+    bytes: prepared.bytes, width: prepared.width, height: prepared.height,
+    original_name: prepared.originalName || "",
+    uploaded_by: pproofActor(user), uploaded_by_role: user.role, uploaded_at: now,
+    // A new / replaced image always needs to be checked again.
+    verification_status: PPROOF_STATUS.PENDING,
+    verified_by: "", verified_at: "", reject_reason: "",
+    deleted_by: "", deleted_at: "",
+    active: true,
+    version: (Number(existing?.version) || 0) + 1,
+    history: [
+      ...((existing && existing.history) || []),
+      pproofHistory(user, replacing ? "Replaced" : "Uploaded", `${pproofFmtBytes(prepared.bytes)} · ${prepared.width}×${prepared.height}`),
+    ],
+  };
+
+  try {
+    await pproofKvPut(record);
+  } catch (e) {
+    // The link was not saved, so the new file would be unreachable: remove it.
+    if (stored.storage === "supabase") {
+      try { await supabase.storage.from(PPROOF_BUCKET).remove([stored.path]); } catch {}
+    }
+    throw e;
+  }
+  if (replacing && existing.storage === "supabase" && existing.path && existing.path !== record.path) {
+    try {
+      const { error } = await supabase.storage.from(PPROOF_BUCKET).remove([existing.path]);
+      if (error) console.warn("old payment proof file was not removed", existing.path, error);
+    } catch (e) { console.warn("old payment proof file was not removed", existing.path, e); }
+  }
+  pproofSetRecord(record);
+  return { record, replaced: replacing };
+}
+
+// Delete the proof only — the payment stays exactly as it is.
+async function pproofDelete(user, paymentId) {
+  pproofRequire(user, "delete");
+  const existing = await pproofKvGet(paymentId);
+  if (!existing || !existing.active || existing.payment_id !== paymentId) throw pproofError("This payment has no proof.");
+  const oldPath = existing.storage === "supabase" ? existing.path : null;
+  const record = {
+    ...existing,
+    active: false, path: null, data_url: null,
+    verification_status: "", deleted_by: pproofActor(user), deleted_at: new Date().toISOString(),
+    version: (Number(existing.version) || 0) + 1,
+    history: [...(existing.history || []), pproofHistory(user, "Deleted", "")],
+  };
+  // Unlink first, then remove the file: if the file removal fails, the proof
+  // is still gone from the ERP (an unreachable file, never a broken link).
+  await pproofKvPut(record);
+  if (oldPath) {
+    try {
+      const { error } = await supabase.storage.from(PPROOF_BUCKET).remove([oldPath]);
+      if (error) console.warn("payment proof file was not removed", oldPath, error);
+    } catch (e) { console.warn("payment proof file was not removed", oldPath, e); }
+  }
+  pproofSetRecord(record);
+  return record;
+}
+
+async function pproofSetVerification(user, paymentId, status, reason) {
+  pproofRequire(user, "verify");
+  if (status !== PPROOF_STATUS.VERIFIED && status !== PPROOF_STATUS.REJECTED) throw pproofError("You do not have permission to do this.");
+  const why = String(reason || "").trim();
+  if (status === PPROOF_STATUS.REJECTED && !why) throw pproofError("Rejection reason is required.");
+  const existing = await pproofKvGet(paymentId);
+  if (!existing || !existing.active || existing.payment_id !== paymentId) throw pproofError("This payment has no proof.");
+  const record = {
+    ...existing,
+    verification_status: status,
+    verified_by: pproofActor(user), verified_at: new Date().toISOString(),
+    reject_reason: status === PPROOF_STATUS.REJECTED ? why : "",
+    version: (Number(existing.version) || 0) + 1,
+    history: [...(existing.history || []), pproofHistory(user, status, why)],
+  };
+  await pproofKvPut(record);
+  pproofSetRecord(record);
+  return record;
+}
+
+// A URL the browser can show / download. Supabase: signed, short-lived.
+async function pproofImageUrl(record, downloadName) {
+  if (!record || !record.active) throw pproofError("The image could not be loaded.");
+  if (record.storage === "local") {
+    if (!/^data:image\/jpeg;base64,/.test(record.data_url || "")) throw pproofError("The image could not be loaded.");
+    return record.data_url;
+  }
+  if (!supabase || !record.path) throw pproofError("The image could not be loaded.");
+  const { data, error } = await supabase.storage.from(PPROOF_BUCKET)
+    .createSignedUrl(record.path, PPROOF_CONFIG.signedUrlSeconds, downloadName ? { download: downloadName } : undefined);
+  if (error || !data || !data.signedUrl) throw pproofError("The image could not be loaded.", error);
+  return data.signedUrl;
+}
+
+/* ---------------- UI: image picker (Add Payment form + modal) ---------------- */
+
+function PaymentProofPicker({ value, onChange, disabled }) {
+  const fileRef = React.useRef(null);
+  const camRef = React.useRef(null);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState("");
+
+  async function pick(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setChecking(true);
+    setError("");
+    try {
+      const prepared = await pproofPrepareImage(file);
+      if (value && value.previewUrl) URL.revokeObjectURL(value.previewUrl);
+      onChange(prepared);
+    } catch (err) {
+      setError(pproofMessage(err, "Could not read this image."));
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  function remove() {
+    if (value && value.previewUrl) URL.revokeObjectURL(value.previewUrl);
+    onChange(null);
+    setError("");
+  }
+
+  const smallBtn = "px-3 py-1.5 text-xs font-bold uppercase tracking-wide border transition-colors";
+  return (
+    <div data-pproof="picker">
+      <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" data-pproof="file-input" onChange={pick} disabled={disabled} />
+      <input ref={camRef} type="file" accept="image/*" capture="environment" className="hidden" data-pproof="camera-input" onChange={pick} disabled={disabled} />
+      {value ? (
+        <div className="flex items-start gap-3 border border-slate-200 bg-slate-50 p-2" data-pproof="preview">
+          <img src={value.previewUrl} alt={t("Payment Proof")} className="w-24 h-24 object-contain bg-white border border-slate-300 shrink-0" data-pproof="preview-img" />
+          <div className="min-w-0 flex-1 text-xs">
+            <div className="font-bold text-slate-700 truncate">{value.originalName || "image"}</div>
+            <div className="text-slate-500" dir="ltr">{pproofFmtBytes(value.bytes)} · {value.width}×{value.height}</div>
+            <div className="mt-2 flex gap-2 flex-wrap">
+              <button type="button" disabled={disabled || checking} className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-white`} onClick={() => fileRef.current && fileRef.current.click()} data-pproof="replace-picked">{t("Replace Image")}</button>
+              <button type="button" disabled={disabled || checking} className={`${smallBtn} border-red-200 text-red-600 hover:bg-red-50`} onClick={remove} data-pproof="remove-picked">{t("Remove Image")}</button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2 flex-wrap">
+          <button type="button" disabled={disabled || checking} className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-slate-100`} onClick={() => fileRef.current && fileRef.current.click()} data-pproof="choose">📎 {t("Choose Image")}</button>
+          <button type="button" disabled={disabled || checking} className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-slate-100 sm:hidden`} onClick={() => camRef.current && camRef.current.click()} data-pproof="camera">📷 {t("Take Photo")}</button>
+        </div>
+      )}
+      {checking && <div className="text-xs text-slate-500 mt-1">{t("Checking image...")}</div>}
+      {error && <div className="text-xs font-bold text-red-600 mt-1" data-pproof="picker-error">{t(error)}</div>}
+      <div className="text-[10px] text-slate-400 mt-1">{t("JPG, PNG or WEBP · up to 10 MB")}{!supabase ? " · " + t("Images on this device only (Supabase not configured).") : ""}</div>
+    </div>
+  );
+}
+
+function PaymentProofBadge({ status }) {
+  if (!status) return null;
+  return <span className={`text-[10px] font-bold uppercase px-2 py-0.5 whitespace-nowrap ${PPROOF_STATUS_TONE[status] || "bg-slate-100 text-slate-500"}`} data-pproof="status">{t(status)}</span>;
+}
+
+/* ---------------- UI: cell in the Payments table ---------------- */
+
+function PaymentProofCell({ record, loaded, failed, canUpload, onOpen }) {
+  if (!loaded) return <span className="text-xs text-slate-400">{t("Loading...")}</span>;
+  if (record) {
+    return (
+      <div className="flex flex-col items-start gap-1" data-pproof="cell" data-pproof-has="1">
+        <PaymentProofBadge status={record.verification_status} />
+        <button type="button" className="text-xs font-bold text-blue-700 hover:underline whitespace-nowrap" onClick={onOpen} data-pproof="view">📎 {t("View Screenshot")}</button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col items-start gap-1" data-pproof="cell" data-pproof-has="0">
+      <span className="text-xs text-slate-400 whitespace-nowrap">{failed ? t("Could not load payment proofs.") : t("No Proof Uploaded")}</span>
+      {canUpload && !failed && (
+        <button type="button" className="text-xs font-bold text-slate-500 hover:text-blue-700 whitespace-nowrap" onClick={onOpen} data-pproof="upload-open">+ {t("Upload Proof")}</button>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- UI: proof details / viewer modal ---------------- */
+
+function PaymentProofModal({ payment, invoice, record, currentUser, onClose, onAudit }) {
+  const [url, setUrl] = useState("");
+  const [imgState, setImgState] = useState("idle"); // idle | loading | ok | error
+  const [reloadKey, setReloadKey] = useState(0);
+  const [picked, setPicked] = useState(null);
+  const [replacing, setReplacing] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const receiptNo = paymentReceiptNo(payment);
+  const fileName = `Payment-Proof-${receiptNo}.jpg`;
+  const canUpload = pproofCan(currentUser, "upload");
+  const canReplace = record && (record.verification_status !== PPROOF_STATUS.VERIFIED ? canUpload : pproofCan(currentUser, "replaceVerified"));
+  const canDelete = pproofCan(currentUser, "delete");
+  const canVerify = pproofCan(currentUser, "verify");
+
+  useEffect(() => {
+    let cancelled = false;
+    setUrl("");
+    if (!record) { setImgState("idle"); return undefined; }
+    setImgState("loading");
+    pproofImageUrl(record)
+      .then((u) => { if (!cancelled) setUrl(u); })
+      .catch(() => { if (!cancelled) setImgState("error"); });
+    return () => { cancelled = true; };
+  }, [record && record.version, record && record.path, reloadKey]);
+
+  useEffect(() => () => { if (picked && picked.previewUrl) URL.revokeObjectURL(picked.previewUrl); }, [picked]);
+
+  async function run(kind, work, okMessage, audit) {
+    if (busy) return;
+    setBusy(kind);
+    setError("");
+    setNotice("");
+    try {
+      await work();
+      setNotice(okMessage);
+      if (audit && onAudit) onAudit(audit[0], `${receiptNo} — ${payment.customerName}`, audit[1] || "");
+    } catch (e) {
+      setError(pproofMessage(e, "Could not save. Please check your internet and try again."));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function uploadPicked() {
+    if (!picked) { setError("Select an image first."); return; }
+    const wasReplace = !!record;
+    run("upload", async () => {
+      await pproofUpload(currentUser, payment, picked, invoice);
+      setPicked(null);
+      setReplacing(false);
+    }, wasReplace ? "Proof replaced — Pending Verification." : "Proof uploaded — Pending Verification.",
+    [wasReplace ? "Payment Proof Replaced" : "Payment Proof Uploaded", ""]);
+  }
+
+  function doDelete() {
+    if (!confirm(t("Delete this payment proof? The payment itself will not be deleted."))) return;
+    run("delete", () => pproofDelete(currentUser, payment.id), "Proof deleted. The payment was not changed.", ["Payment Proof Deleted", ""]);
+  }
+
+  function doVerify() {
+    run("verify", () => pproofSetVerification(currentUser, payment.id, PPROOF_STATUS.VERIFIED, ""), "Proof marked as Verified.", ["Payment Proof Verified", ""]);
+  }
+
+  function doReject() {
+    if (!rejectReason.trim()) { setError("Rejection reason is required."); return; }
+    run("reject", async () => {
+      await pproofSetVerification(currentUser, payment.id, PPROOF_STATUS.REJECTED, rejectReason);
+      setRejecting(false);
+      setRejectReason("");
+    }, "Proof marked as Rejected.", ["Payment Proof Rejected", rejectReason.trim()]);
+  }
+
+  async function openFull() {
+    try {
+      const u = url || await pproofImageUrl(record);
+      if (u.startsWith("data:")) {
+        const blob = await (await fetch(u)).blob();
+        window.open(URL.createObjectURL(blob), "_blank", "noopener");
+      } else {
+        window.open(u, "_blank", "noopener");
+      }
+    } catch (e) { setError(pproofMessage(e, "The image could not be loaded.")); }
+  }
+
+  async function download() {
+    try {
+      const u = await pproofImageUrl(record, fileName);
+      const a = document.createElement("a");
+      a.href = u; a.download = fileName; a.rel = "noopener";
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (e) { setError(pproofMessage(e, "The image could not be loaded.")); }
+  }
+
+  const row = (label, value) => (
+    <div className="flex justify-between gap-3 py-0.5">
+      <span className="text-slate-500">{t(label)}</span>
+      <span className="font-bold text-right break-all">{value || "-"}</span>
+    </div>
+  );
+  const smallBtn = "px-3 py-1.5 text-xs font-bold uppercase tracking-wide border transition-colors disabled:opacity-40";
+  const history = record ? [...(record.history || [])].reverse() : [];
+
+  return (
+    <Modal title="Payment Proof" onClose={onClose} wide>
+      <div data-pproof="modal" data-payment-id={payment.id}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 text-xs mb-3">
+          <div>
+            {row("Receipt No.", receiptNo)}
+            {row("Customer", payment.customerName)}
+            {row("Invoice", invoice ? invoice.number : "")}
+            {row("Payment Date", fmtDate(payment.date))}
+          </div>
+          <div>
+            {row("Amount", fmtMoney(payment.amount))}
+            {row("Payment Method", payment.method)}
+            {row("Transaction Reference", payment.reference)}
+            {row("Note", payment.note)}
+          </div>
+        </div>
+
+        {record ? (
+          <>
+            <div className="flex items-center justify-between gap-2 flex-wrap border-t border-slate-200 pt-3 mb-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="font-black uppercase text-slate-700">{t("Verification")}:</span>
+                <PaymentProofBadge status={record.verification_status} />
+              </div>
+              <div className="text-slate-500">
+                {t("Uploaded By")}: <span className="font-bold text-slate-700">{record.uploaded_by}</span> · <span dir="ltr">{fmtDateTime(record.uploaded_at)}</span>
+              </div>
+            </div>
+            {record.verification_status === PPROOF_STATUS.VERIFIED && (
+              <div className="text-xs text-emerald-700 mb-2">{t("Verified By")}: <span className="font-bold">{record.verified_by}</span> · <span dir="ltr">{fmtDateTime(record.verified_at)}</span></div>
+            )}
+            {record.verification_status === PPROOF_STATUS.REJECTED && (
+              <div className="text-xs text-red-700 bg-red-50 border border-red-200 px-2 py-1 mb-2" data-pproof="reject-reason">
+                {t("Rejected By")}: <span className="font-bold">{record.verified_by}</span> · <span dir="ltr">{fmtDateTime(record.verified_at)}</span>
+                <div>{t("Reason")}: <span className="font-bold">{record.reject_reason}</span></div>
+              </div>
+            )}
+
+            <div className="bg-slate-100 border border-slate-200 flex items-center justify-center overflow-auto" style={{ minHeight: 160, maxHeight: "60vh" }}>
+              {imgState === "loading" && !url && <div className="text-xs text-slate-500 p-6">{t("Loading image...")}</div>}
+              {url && imgState !== "error" && (
+                <img
+                  src={url} alt={t("Payment Proof")} data-pproof="image"
+                  onLoad={() => setImgState("ok")} onError={() => setImgState("error")}
+                  style={{ maxWidth: "100%", maxHeight: "58vh", display: imgState === "ok" ? "block" : "none" }}
+                />
+              )}
+              {url && imgState === "loading" && <div className="text-xs text-slate-500 p-6">{t("Loading image...")}</div>}
+              {imgState === "error" && (
+                <div className="text-center p-6" data-pproof="image-error">
+                  <div className="text-xs font-bold text-red-600">{t("The image could not be loaded.")}</div>
+                  <button type="button" className="mt-2 text-xs font-bold text-blue-700 underline" onClick={() => setReloadKey((k) => k + 1)}>{t("Retry")}</button>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-3 flex gap-2 flex-wrap">
+              <button type="button" className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-slate-100`} disabled={imgState !== "ok"} onClick={openFull} data-pproof="open">{t("Open")}</button>
+              <button type="button" className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-slate-100`} disabled={imgState !== "ok"} onClick={download} data-pproof="download">{t("Download")}</button>
+              {canVerify && record.verification_status !== PPROOF_STATUS.VERIFIED && (
+                <button type="button" className={`${smallBtn} border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700`} disabled={!!busy} onClick={doVerify} data-pproof="verify">{busy === "verify" ? t("Saving...") : "✓ " + t("Verify")}</button>
+              )}
+              {canVerify && record.verification_status !== PPROOF_STATUS.REJECTED && (
+                <button type="button" className={`${smallBtn} border-red-300 text-red-600 hover:bg-red-50`} disabled={!!busy} onClick={() => { setRejecting(true); setError(""); }} data-pproof="reject">{t("Reject")}</button>
+              )}
+              {canReplace && (
+                <button type="button" className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-slate-100`} disabled={!!busy} onClick={() => setReplacing((v) => !v)} data-pproof="replace">{t("Replace Proof")}</button>
+              )}
+              {canDelete && (
+                <button type="button" className={`${smallBtn} border-red-300 text-red-600 hover:bg-red-50`} disabled={!!busy} onClick={doDelete} data-pproof="delete">{busy === "delete" ? t("Saving...") : t("Delete Proof")}</button>
+              )}
+            </div>
+
+            {rejecting && (
+              <div className="mt-3 border border-red-200 bg-red-50 p-3" data-pproof="reject-form">
+                <Field label="Rejection Reason">
+                  <input className={inputCls} value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} autoFocus data-pproof="reject-input" />
+                </Field>
+                <div className="flex gap-2">
+                  <Btn variant="danger" small onClick={doReject} disabled={!!busy}>{busy === "reject" ? "Saving..." : "Confirm Reject"}</Btn>
+                  <Btn variant="ghost" small onClick={() => { setRejecting(false); setRejectReason(""); }}>Cancel</Btn>
+                </div>
+              </div>
+            )}
+
+            {replacing && canReplace && (
+              <div className="mt-3 border border-slate-200 p-3" data-pproof="replace-form">
+                <PaymentProofPicker value={picked} onChange={setPicked} disabled={!!busy} />
+                <div className="mt-2 flex gap-2">
+                  <Btn small onClick={uploadPicked} disabled={!!busy || !picked}>{busy === "upload" ? "Uploading..." : "Save Replacement"}</Btn>
+                  <Btn small variant="ghost" onClick={() => { setReplacing(false); setPicked(null); }}>Cancel</Btn>
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="border-t border-slate-200 pt-3" data-pproof="upload-form">
+            <div className="text-sm font-bold text-slate-500 mb-2">{t("No Proof Uploaded")}</div>
+            {canUpload ? (
+              <>
+                <PaymentProofPicker value={picked} onChange={setPicked} disabled={!!busy} />
+                <div className="mt-2">
+                  <Btn onClick={uploadPicked} disabled={!!busy || !picked}>{busy === "upload" ? "Uploading..." : "Upload Proof"}</Btn>
+                </div>
+              </>
+            ) : (
+              <div className="text-xs text-slate-400">{t("You do not have permission to do this.")}</div>
+            )}
+          </div>
+        )}
+
+        {busy === "upload" && <div className="mt-2 text-xs text-blue-700 font-bold" data-pproof="busy">{t("Uploading...")}</div>}
+        {error && <div className="mt-3 text-xs font-bold text-red-600" data-pproof="error">{t(error)}</div>}
+        {notice && <div className="mt-3 text-xs font-bold text-emerald-700" data-pproof="notice">{t(notice)}</div>}
+
+        {history.length > 0 && (
+          <div className="mt-4">
+            <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Proof History")}</div>
+            <div className="border border-slate-200 divide-y divide-slate-100 max-h-36 overflow-y-auto">
+              {history.map((h, idx) => (
+                <div key={idx} className="px-3 py-1.5 text-xs">
+                  <span className="font-bold text-slate-700">{t(h.action)}</span>{h.details ? <span className="text-slate-500"> — {h.details}</span> : null}
+                  <div className="text-slate-400">{h.by} · <span dir="ltr">{fmtDateTime(h.at)}</span></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-4 text-[11px] text-slate-400">{t("A screenshot is supporting evidence only. Uploading, verifying or rejecting it does not change the payment amount, the invoice or the customer ledger.")}</div>
+        <div className="mt-3 flex justify-end">
+          <Btn variant="ghost" onClick={onClose}>Close</Btn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------- UI: line on the Payment Receipt (screen only) ---------------- */
+
+function PaymentProofReceiptLine({ record, onView }) {
+  return (
+    <div className="mt-3 border border-slate-200 px-3 py-2 text-xs flex items-center justify-between gap-2 flex-wrap print:hidden" data-pproof="receipt-line">
+      <div className="flex items-center gap-2">
+        <span className="font-black uppercase text-slate-700">{t("Payment Proof")}:</span>
+        {record ? (
+          <>
+            <span className="font-bold text-slate-700">📎 {t("Proof attached")}</span>
+            <PaymentProofBadge status={record.verification_status} />
+          </>
+        ) : (
+          <span className="text-slate-400">{t("No proof attached")}</span>
+        )}
+      </div>
+      {record && onView && (
+        <button type="button" className="font-bold text-blue-700 hover:underline" onClick={onView} data-pproof="receipt-view">{t("View Payment Proof")}</button>
+      )}
     </div>
   );
 }
