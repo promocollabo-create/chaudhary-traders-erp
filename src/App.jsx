@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { supabase } from "./supabaseClient.js";
+import StartupScreen, { cacheLogo, readCachedLogo } from "./StartupScreen.jsx";
 
 /* ============================================================
    GLOBAL BILINGUAL LANGUAGE SYSTEM
@@ -641,7 +642,7 @@ function I18nDomBridge() {
   const { language } = useLanguage();
 
   useEffect(() => {
-    if (typeof document === "undefined") return;
+    if (typeof document === "undefined") return undefined;
     document.documentElement.dir = language === "ur" ? "rtl" : "ltr";
     document.documentElement.lang = language === "ur" ? "ur" : "en";
     document.body.dir = language === "ur" ? "rtl" : "ltr";
@@ -666,6 +667,8 @@ function I18nDomBridge() {
     };
 
     const root = document.body;
+    const ATTRS = ["placeholder", "title", "aria-label"];
+    const ATTR_SELECTOR = "input[placeholder], textarea[placeholder], [title], [aria-label]";
     const shouldSkip = (node) => {
       const el = node.parentElement;
       if (!el) return true;
@@ -673,42 +676,74 @@ function I18nDomBridge() {
       return ["SCRIPT", "STYLE", "TEXTAREA"].includes(tag) ||
         (tag === "INPUT" && !["button", "submit"].includes((el.type || "").toLowerCase()));
     };
-
-    const translate = () => {
-      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
-      const nodes = [];
-      let node;
-      while ((node = walker.nextNode())) nodes.push(node);
-      nodes.forEach((textNode) => {
-        if (shouldSkip(textNode)) return;
-        const raw = textNode.nodeValue || "";
-        const trimmed = raw.trim();
-        if (!trimmed || trimmed.length > 180) return;
-        const translated = translateValue(trimmed);
-        if (translated !== trimmed) {
-          textNode.nodeValue = raw.replace(trimmed, translated);
+    const translateText = (textNode) => {
+      if (shouldSkip(textNode)) return;
+      const raw = textNode.nodeValue || "";
+      const trimmed = raw.trim();
+      if (!trimmed || trimmed.length > 180) return;
+      const translated = translateValue(trimmed);
+      if (translated !== trimmed) textNode.nodeValue = raw.replace(trimmed, translated);
+    };
+    const translateAttrs = (el) => {
+      if (!el || !el.matches || !el.matches(ATTR_SELECTOR)) return;
+      ATTRS.forEach((attr) => {
+        if (!el.hasAttribute(attr)) return;
+        const value = el.getAttribute(attr);
+        if (value && value.length < 180) {
+          const translated = translateValue(value);
+          if (translated !== value) el.setAttribute(attr, translated);
         }
       });
-
-      root.querySelectorAll("input[placeholder], textarea[placeholder], [title], [aria-label]").forEach((el) => {
-        ["placeholder", "title", "aria-label"].forEach((attr) => {
-          if (!el.hasAttribute(attr)) return;
-          const value = el.getAttribute(attr);
-          if (value && value.length < 180) {
-            const translated = translateValue(value);
-            if (translated !== value) el.setAttribute(attr, translated);
-          }
-        });
-      });
+    };
+    const translateTree = (node) => {
+      if (!node) return;
+      if (node.nodeType === 3) { translateText(node); return; }
+      if (node.nodeType !== 1) return;
+      const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      let n;
+      while ((n = walker.nextNode())) nodes.push(n);
+      nodes.forEach(translateText);
+      translateAttrs(node);
+      node.querySelectorAll(ATTR_SELECTOR).forEach(translateAttrs);
     };
 
-    // React may repaint literal English strings after the language state changes,
-    // so translate after paint and whenever new UI nodes are inserted.
-    const raf = requestAnimationFrame(translate);
-    const observer = new MutationObserver(() => requestAnimationFrame(translate));
-    observer.observe(root, { childList: true, subtree: true });
+    // One full pass whenever the language changes (this is also what turns
+    // Urdu text back into English).
+    const fullPass = requestAnimationFrame(() => translateTree(root));
+
+    // PERFORMANCE: every literal UI string is written in English, so in
+    // English mode nothing new ever needs translating — no observer at all.
+    // (Before, the whole page was re-scanned after every DOM change.)
+    if (language !== "ur") return () => cancelAnimationFrame(fullPass);
+
+    // Urdu: translate only what actually changed — new nodes, text React
+    // updated in place, and changed placeholder/title/aria-label attributes.
+    // Batched into at most one pass per animation frame.
+    const pendingTrees = new Set();
+    const pendingAttrs = new Set();
+    let frame = 0;
+    const flush = () => {
+      frame = 0;
+      const trees = Array.from(pendingTrees);
+      const attrs = Array.from(pendingAttrs);
+      pendingTrees.clear();
+      pendingAttrs.clear();
+      trees.forEach((node) => { if (node.isConnected) translateTree(node); });
+      attrs.forEach((el) => { if (el.isConnected) translateAttrs(el); });
+    };
+    const observer = new MutationObserver((records) => {
+      records.forEach((r) => {
+        if (r.type === "childList") r.addedNodes.forEach((node) => pendingTrees.add(node));
+        else if (r.type === "characterData") pendingTrees.add(r.target);
+        else if (r.type === "attributes") pendingAttrs.add(r.target);
+      });
+      if (!frame && (pendingTrees.size || pendingAttrs.size)) frame = requestAnimationFrame(flush);
+    });
+    observer.observe(root, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ATTRS });
     return () => {
-      cancelAnimationFrame(raf);
+      cancelAnimationFrame(fullPass);
+      if (frame) cancelAnimationFrame(frame);
       observer.disconnect();
     };
   }, [language]);
@@ -886,6 +921,113 @@ const DEFAULT_SETTINGS = {
   logoUrl: "",
 };
 const DEFAULT_BRANCHES = [{ id: "branch_main", name: "Main Branch" }];
+
+/* ============================================================
+   STARTUP DATA LOADING
+   ------------------------------------------------------------
+   Same keys and same defaults as before, but:
+   - Supabase: ONE request for all startup keys instead of 24
+     separate round trips (big win on slow connections).
+   - A slow / failed Supabase request now shows an error with a
+     Retry button. Before, each failed key silently fell back to
+     this browser's localStorage copy — mixing old local data with
+     live data, which the next save would then write back to the
+     shared database. Nothing is written during startup.
+   - Hard timeout, so the loading screen can never spin forever.
+   - No Supabase configured: reads localStorage exactly as before.
+   ============================================================ */
+const STARTUP_TIMEOUT_MS = 25000;
+const STARTUP_DATA = [
+  ["users", "ct-users", () => DEFAULT_USERS],
+  ["customers", "ct-customers", () => []],
+  ["invoices", "ct-invoices", () => []],
+  ["payments", "ct-payments", () => []],
+  ["returns", "ct-returns", () => []],
+  ["exchanges", "ct-exchanges", () => []],
+  ["creditNotes", "ct-creditnotes", () => []],
+  ["promises", "ct-promises", () => []],
+  ["transfers", "ct-transfers", () => []],
+  ["adjustments", "ct-adjustments", () => []],
+  ["leads", "ct-leads", () => []],
+  ["products", "ct-products", () => []],
+  ["drivers", "ct-drivers", () => []],
+  ["offers", "ct-offers", () => []],
+  ["bookings", "ct-bookings", () => []],
+  ["orders", "ct-orders", () => []],
+  ["settings", "ct-settings", () => DEFAULT_SETTINGS],
+  ["branches", "ct-branches", () => DEFAULT_BRANCHES],
+  ["auditLog", "ct-auditlog", () => []],
+  ["commissionAgents", "ct-commissionagents", () => []],
+  ["commissionRules", "ct-commissionrules", () => []],
+  ["commissionTransactions", "ct-commissiontransactions", () => []],
+  ["commissionPayments", "ct-commissionpayments", () => []],
+  ["orderTargets", "ct-ordertargets", () => []],
+];
+const STARTUP_MSG_FAILED = "Could not load your data from the database. Check your internet connection, then press Retry.";
+const STARTUP_MSG_TIMEOUT = "The database is taking too long to respond. Check your internet connection, then press Retry.";
+
+function startupError(message, cause) {
+  const e = new Error(message);
+  e.userMessage = message;
+  if (cause) e.cause = cause;
+  return e;
+}
+
+function startupWithTimeout(thenable, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(startupError(STARTUP_MSG_TIMEOUT)), ms);
+  });
+  return Promise.race([Promise.resolve(thenable), timeout]).finally(() => clearTimeout(timer));
+}
+
+async function loadStartupData(onStage) {
+  const data = {};
+  if (supabase) {
+    if (onStage) onStage("remote");
+    const keys = STARTUP_DATA.map((d) => d[1]);
+    let res;
+    try {
+      res = await startupWithTimeout(supabase.from("kv_store").select("key,value").in("key", keys), STARTUP_TIMEOUT_MS);
+    } catch (e) {
+      if (e && e.userMessage) throw e;
+      throw startupError(STARTUP_MSG_FAILED, e);
+    }
+    if (!res || res.error) throw startupError(STARTUP_MSG_FAILED, res && res.error);
+    const byKey = new Map();
+    (res.data || []).forEach((row) => { if (row && !byKey.has(row.key)) byKey.set(row.key, row.value); });
+    STARTUP_DATA.forEach(([name, key, fallback]) => {
+      const value = byKey.get(key);
+      data[name] = value != null ? value : fallback();
+    });
+    return data;
+  }
+  if (onStage) onStage("local");
+  STARTUP_DATA.forEach(([name, key, fallback]) => {
+    let value = null;
+    try {
+      const raw = window.localStorage.getItem(LS_PREFIX + key);
+      value = raw !== null ? JSON.parse(raw) : null;
+    } catch {
+      value = null;
+    }
+    data[name] = value != null ? value : fallback();
+  });
+  return data;
+}
+
+const STARTUP_URDU = {
+  "Loading your workspace…": "آپ کا ورک اسپیس لوڈ ہو رہا ہے…",
+  "Fetching your data from the database…": "ڈیٹا بیس سے آپ کا ڈیٹا حاصل کیا جا رہا ہے…",
+  "Opening the data saved on this device…": "اس ڈیوائس پر محفوظ ڈیٹا کھولا جا رہا ہے…",
+  "Retry": "دوبارہ کوشش کریں",
+  "Nothing was changed — your saved data is safe.": "کچھ بھی تبدیل نہیں ہوا — آپ کا محفوظ ڈیٹا بالکل محفوظ ہے۔",
+  [STARTUP_MSG_FAILED]: "ڈیٹا بیس سے آپ کا ڈیٹا لوڈ نہیں ہو سکا۔ انٹرنیٹ کنکشن چیک کریں، پھر دوبارہ کوشش کریں دبائیں۔",
+  [STARTUP_MSG_TIMEOUT]: "ڈیٹا بیس جواب دینے میں بہت دیر لگا رہا ہے۔ انٹرنیٹ کنکشن چیک کریں، پھر دوبارہ کوشش کریں دبائیں۔",
+};
+Object.entries(STARTUP_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
 
 function resizeImageToDataUrl(file, maxWidth) {
   return new Promise((resolve, reject) => {
@@ -1228,6 +1370,72 @@ function computeLedgerForCustomer(customer, invoices, payments, returns = [], ex
   return { entries: withBalance, outstanding: bal };
 }
 
+/* ---------------- Outstanding for many customers (performance) ----------------
+   Gives exactly the same numbers as calling computeLedgerForCustomer for each
+   customer, but groups every table by customer ONCE first. Before, every
+   customer's ledger scanned every invoice/payment/return/... in the business,
+   so Dashboard / Customers / Reports slowed down as data grew (and the
+   Customers list recomputed everything on every keystroke in the search box).
+   Payments linked to a cancelled invoice are removed up front using the FULL
+   invoice list, so the result is identical to the original per-customer check.
+   Use it only where the outstanding NUMBER is needed (not ledger lines). */
+function computeOutstandingByCustomer(customers, invoices, payments, returns = [], exchanges = [], promises = [], transfers = [], adjustments = []) {
+  const invById = new Map();
+  const invByNumber = new Map();
+  (invoices || []).forEach((i) => {
+    if (!invById.has(i.id)) invById.set(i.id, i);
+    if (!invByNumber.has(i.number)) invByNumber.set(i.number, i);
+  });
+  const linkedToCancelled = (p) => {
+    if (p.invoiceId) {
+      const inv = invById.get(p.invoiceId);
+      return !!inv && isInvoiceCancelled(inv);
+    }
+    if (p.note && p.note.startsWith("Against ")) {
+      const inv = invByNumber.get(p.note.replace("Against ", "").trim());
+      return !!inv && isInvoiceCancelled(inv);
+    }
+    return false;
+  };
+  const groupBy = (list, ...fields) => {
+    const map = new Map();
+    (list || []).forEach((rec) => {
+      new Set(fields.map((f) => rec[f])).forEach((id) => {
+        let arr = map.get(id);
+        if (!arr) { arr = []; map.set(id, arr); }
+        arr.push(rec);
+      });
+    });
+    return map;
+  };
+  const inv = groupBy(invoices, "customerId");
+  // Decided here against the FULL invoice list (exactly like the original).
+  // The kept payments are passed on with their invoice link cleared, so the
+  // per-customer ledger cannot re-match a legacy "Against <number>" note to a
+  // different invoice that happens to share the same number. invoiceId / note
+  // play no other part in the outstanding balance.
+  const pay = groupBy(
+    (payments || [])
+      .filter((p) => !linkedToCancelled(p))
+      .map((p) => (p.invoiceId || (p.note && p.note.startsWith("Against ")) ? { ...p, invoiceId: "", note: "" } : p)),
+    "customerId"
+  );
+  const ret = groupBy(returns, "customerId");
+  const exch = groupBy(exchanges, "customerId");
+  const prom = groupBy(promises, "customerId");
+  const tr = groupBy(transfers, "fromCustomerId", "toCustomerId");
+  const adj = groupBy(adjustments, "customerId");
+  const none = [];
+  const out = {};
+  (customers || []).forEach((c) => {
+    out[c.id] = computeLedgerForCustomer(
+      c, inv.get(c.id) || none, pay.get(c.id) || none, ret.get(c.id) || none, exch.get(c.id) || none,
+      prom.get(c.id) || none, tr.get(c.id) || none, adj.get(c.id) || none
+    ).outstanding;
+  });
+  return out;
+}
+
 /* ---------------- Invoice Return/Exchange status helpers (Phase 2 upgrade) ---------------- */
 
 // Returns the list of active (non-deleted) Sales Returns for an invoice.
@@ -1532,7 +1740,8 @@ function computeCommissionSummaryForAgent(agentId, transactions, payments) {
 
 function Dashboard({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, onOpenPromises }) {
   const outstandingTotal = useMemo(() => {
-    return customers.reduce((sum, c) => sum + computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding, 0);
+    const byId = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+    return customers.reduce((sum, c) => sum + byId[c.id], 0);
   }, [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments]);
 
   const todaySales = useMemo(() => {
@@ -1695,12 +1904,15 @@ function Customers({ customers, invoices, payments, returns, exchanges, promises
   const [modal, setModal] = useState(null); // null | 'new' | customer object
   const [q, setQ] = useState("");
 
+  // Balances are computed once per data change, not on every search keystroke.
+  const outstandingById = useMemo(
+    () => computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments),
+    [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments]
+  );
+  const qLower = q.toLowerCase();
   const rows = customers
-    .filter((c) => c.name.toLowerCase().includes(q.toLowerCase()) || (c.phone || "").includes(q))
-    .map((c) => {
-      const { outstanding } = computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers, adjustments);
-      return { ...c, outstanding };
-    });
+    .filter((c) => c.name.toLowerCase().includes(qLower) || (c.phone || "").includes(q))
+    .map((c) => ({ ...c, outstanding: outstandingById[c.id] }));
 
   return (
     <div>
@@ -2834,7 +3046,26 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
     return { agentName: agent ? agent.name : tx.agentName, commissionAmount: tx.commissionAmount, status: tx.status };
   }
 
-  const sorted = [...invoices].sort((a, b) => new Date(b.date) - new Date(a.date));
+  // Sorting and Return/Exchange status are computed once per data change, not
+  // on every render (opening a modal used to recompute every invoice's status).
+  const { sorted, returnStatusById } = useMemo(() => {
+    const byInvoice = (list) => {
+      const map = new Map();
+      (list || []).forEach((r) => {
+        let arr = map.get(r.invoiceId);
+        if (!arr) { arr = []; map.set(r.invoiceId, arr); }
+        arr.push(r);
+      });
+      return map;
+    };
+    const retBy = byInvoice(returns);
+    const exBy = byInvoice(exchanges);
+    const statusById = new Map();
+    invoices.forEach((inv) => {
+      statusById.set(inv.id, computeInvoiceReturnStatus(inv, retBy.get(inv.id) || [], exBy.get(inv.id) || []));
+    });
+    return { sorted: [...invoices].sort((a, b) => new Date(b.date) - new Date(a.date)), returnStatusById: statusById };
+  }, [invoices, returns, exchanges]);
 
   return (
     <div>
@@ -2854,7 +3085,7 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
           <tbody>
             {sorted.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi invoice nahi bana.</td></tr>}
             {sorted.map((inv) => {
-              const rs = computeInvoiceReturnStatus(inv, returns, exchanges);
+              const rs = returnStatusById.get(inv.id) || computeInvoiceReturnStatus(inv, returns, exchanges);
               return (
                 <tr key={inv.id} className={`border-t border-slate-100 cursor-pointer hover:bg-slate-50 ${inv.docStatus === "Cancelled" ? "opacity-50" : ""}`} onClick={() => setViewing(inv)}>
                   <td className="px-4 py-2 font-bold text-blue-700">{inv.number}</td>
@@ -7551,10 +7782,13 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
   const totalOrders = orders.filter((o) => inRange(o.date)).length;
   const totalReturnAmount = returns.filter((r) => inRange(r.date) && r.status !== "Deleted").reduce((s, r) => s + r.amount, 0);
 
-  const outstandingCustomers = customers
-    .map((c) => ({ ...c, outstanding: computeLedgerForCustomer(c, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding }))
-    .filter((c) => c.outstanding > 0)
-    .sort((a, b) => b.outstanding - a.outstanding);
+  const outstandingCustomers = useMemo(() => {
+    const byId = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+    return customers
+      .map((c) => ({ ...c, outstanding: byId[c.id] }))
+      .filter((c) => c.outstanding > 0)
+      .sort((a, b) => b.outstanding - a.outstanding);
+  }, [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments]);
 
   function exportCSV() {
     const rows = [["Customer", "Outstanding"], ...outstandingCustomers.map((c) => [c.name, c.outstanding])];
@@ -8128,6 +8362,12 @@ function PrintStyles() {
 
 function App() {
   const [loading, setLoading] = useState(true);
+  // Startup screen (see StartupScreen.jsx). Kept separate from login/data logic.
+  const [loadError, setLoadError] = useState("");
+  const [loadStage, setLoadStage] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [startupDone, setStartupDone] = useState(false);
+  const [splashLogo] = useState(readCachedLogo);
   const [currentUser, setCurrentUser] = useState(null);
   const [page, setPage] = useState("dashboard");
   const [prefill, setPrefill] = useState(null);
@@ -8165,48 +8405,31 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
+    setLoadError("");
     (async () => {
-      const [
-        u, c, inv, pay, ret, exch, cn, prom, tr, adj,
-        ld, prod, drv, off, bk, ord, set, br, aud,
-        cAgents, cRules, cTxns, cPays, oTargets,
-      ] = await Promise.all([
-        storeGet("ct-users", DEFAULT_USERS),
-        storeGet("ct-customers", []),
-        storeGet("ct-invoices", []),
-        storeGet("ct-payments", []),
-        storeGet("ct-returns", []),
-        storeGet("ct-exchanges", []),
-        storeGet("ct-creditnotes", []),
-        storeGet("ct-promises", []),
-        storeGet("ct-transfers", []),
-        storeGet("ct-adjustments", []),
-        storeGet("ct-leads", []),
-        storeGet("ct-products", []),
-        storeGet("ct-drivers", []),
-        storeGet("ct-offers", []),
-        storeGet("ct-bookings", []),
-        storeGet("ct-orders", []),
-        storeGet("ct-settings", DEFAULT_SETTINGS),
-        storeGet("ct-branches", DEFAULT_BRANCHES),
-        storeGet("ct-auditlog", []),
-        storeGet("ct-commissionagents", []),
-        storeGet("ct-commissionrules", []),
-        storeGet("ct-commissiontransactions", []),
-        storeGet("ct-commissionpayments", []),
-        storeGet("ct-ordertargets", []),
-      ]);
-      if (cancelled) return;
-      setUsers(u); setCustomers(c); setInvoices(inv); setPayments(pay); setReturns(ret);
-      setExchanges(exch); setCreditNotes(cn); setPromises(prom); setTransfers(tr); setAdjustments(adj);
-      setLeads(ld); setProducts(prod); setDrivers(drv); setOffers(off); setBookings(bk); setOrders(ord);
-      setSettings({ ...DEFAULT_SETTINGS, ...set }); setBranches(br); setAuditLog(aud);
-      setCommissionAgents(cAgents); setCommissionRules(cRules); setCommissionTransactions(cTxns); setCommissionPayments(cPays);
-      setOrderTargets(oTargets || []);
-      setLoading(false);
+      try {
+        const d = await loadStartupData((stage) => { if (!cancelled) setLoadStage(stage); });
+        if (cancelled) return;
+        setUsers(d.users); setCustomers(d.customers); setInvoices(d.invoices); setPayments(d.payments); setReturns(d.returns);
+        setExchanges(d.exchanges); setCreditNotes(d.creditNotes); setPromises(d.promises); setTransfers(d.transfers); setAdjustments(d.adjustments);
+        setLeads(d.leads); setProducts(d.products); setDrivers(d.drivers); setOffers(d.offers); setBookings(d.bookings); setOrders(d.orders);
+        setSettings({ ...DEFAULT_SETTINGS, ...d.settings }); setBranches(d.branches); setAuditLog(d.auditLog);
+        setCommissionAgents(d.commissionAgents); setCommissionRules(d.commissionRules); setCommissionTransactions(d.commissionTransactions); setCommissionPayments(d.commissionPayments);
+        setOrderTargets(d.orderTargets || []);
+        setLoading(false);
+      } catch (e) {
+        console.error("startup data load failed", e);
+        if (!cancelled) setLoadError((e && e.userMessage) || STARTUP_MSG_FAILED);
+      }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [loadAttempt]);
+
+  // Keep a copy of the company logo in this browser so the next startup
+  // splash can show it before the database has answered.
+  useEffect(() => {
+    if (!loading) cacheLogo(settings.logoUrl);
+  }, [loading, settings.logoUrl]);
 
   // Supabase realtime — when configured, keeps every connected device in
   // sync live. Falls back to purely local state when Supabase isn't set up.
@@ -9045,8 +9268,23 @@ function App() {
   function handleLogin(user) { setCurrentUser(user); }
   function handleLogout() { setCurrentUser(null); setPage("dashboard"); }
 
-  if (loading) {
-    return <div className="min-h-screen flex items-center justify-center bg-slate-100 text-slate-400 font-bold uppercase tracking-wide">Loading...</div>;
+  // Splash -> (loading screen while data loads) -> login / dashboard / portal.
+  // Login is never shown before startup data has finished loading.
+  if (loading || !startupDone) {
+    return (
+      <>
+        <I18nDomBridge />
+        <StartupScreen
+          ready={!loading}
+          error={loadError ? t(loadError) : ""}
+          status={loadStage === "remote" ? t("Fetching your data from the database…") : loadStage === "local" ? t("Opening the data saved on this device…") : ""}
+          onRetry={() => setLoadAttempt((n) => n + 1)}
+          onDone={() => setStartupDone(true)}
+          logoUrl={splashLogo || (loading ? "" : settings.logoUrl || "")}
+          labels={{ loading: t("Loading your workspace…"), retry: t("Retry"), safe: t("Nothing was changed — your saved data is safe.") }}
+        />
+      </>
+    );
   }
 
   if (!currentUser) {
