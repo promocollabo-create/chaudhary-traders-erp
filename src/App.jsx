@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient.js";
-import StartupScreen, { cacheLogo, readCachedLogo } from "./StartupScreen.jsx";
 
 /* ============================================================
    GLOBAL BILINGUAL LANGUAGE SYSTEM
@@ -9325,7 +9324,7 @@ function PrintStyles() {
 
 function App() {
   const [loading, setLoading] = useState(true);
-  // Startup screen (see StartupScreen.jsx). Kept separate from login/data logic.
+  // Startup screen (built in — see STARTUP SCREEN block near the end of this file).
   const [loadError, setLoadError] = useState("");
   const [loadStage, setLoadStage] = useState("");
   const [loadAttempt, setLoadAttempt] = useState(0);
@@ -13092,6 +13091,82 @@ function ReceiptPrintDialog({ payment, customer, settings, balances, proofRecord
           include={{ ...p.include, proof: p.include.proof && hasProof }} proofUrl={proofUrl} proofRecord={proofRecord} />
       )}
     />
+  );
+}
+
+/* ============================================================
+   STARTUP SCREEN (built in — no separate StartupScreen.jsx file)
+   ------------------------------------------------------------
+   Shown while startup data loads. Same props as before:
+     ready, error, status, onRetry, onDone, logoUrl, labels
+   cacheLogo / readCachedLogo keep a copy of the company logo in
+   this browser so the next splash can show it immediately.
+   Presentation only — it never reads or writes ERP data.
+   ============================================================ */
+
+const STARTUP_LOGO_KEY = "ct-cached-logo";
+
+function cacheLogo(url) {
+  try {
+    if (url) window.localStorage.setItem(STARTUP_LOGO_KEY, url);
+    else window.localStorage.removeItem(STARTUP_LOGO_KEY);
+  } catch {}
+}
+
+function readCachedLogo() {
+  try { return window.localStorage.getItem(STARTUP_LOGO_KEY) || ""; } catch { return ""; }
+}
+
+function StartupScreen({ ready, error, status, onRetry, onDone, logoUrl, labels = {} }) {
+  const [leaving, setLeaving] = useState(false);
+
+  useEffect(() => {
+    if (!ready || error) return undefined;
+    setLeaving(true);
+    const timer = setTimeout(() => { if (onDone) onDone(); }, 350);
+    return () => clearTimeout(timer);
+  }, [ready, error]);
+
+  return (
+    <div
+      className="ct-mesh min-h-screen flex items-center justify-center p-6 text-slate-200"
+      style={{ background: "#060a13", opacity: leaving ? 0 : 1, transition: "opacity .35s ease" }}
+    >
+      <ThemeStyles />
+      <div className="w-full max-w-sm text-center ct-rise">
+        {logoUrl ? (
+          <img src={logoUrl} alt="Logo" className="w-16 h-16 mx-auto rounded-2xl object-contain bg-white p-1" />
+        ) : (
+          <div className="w-16 h-16 mx-auto rounded-2xl ct-gold-bg ct-display font-black text-2xl flex items-center justify-center shadow-[0_12px_30px_-10px_rgba(212,169,79,.7)]">CT</div>
+        )}
+
+        {!error ? (
+          <>
+            <div className="mt-6 ct-display text-[18px] font-bold text-white">{labels.loading || "Loading your workspace…"}</div>
+            {status && <div className="mt-1 text-[13px] text-slate-400">{status}</div>}
+            <div className="mt-6 h-1.5 rounded-full bg-white/10 overflow-hidden">
+              <div
+                className="h-full w-1/3 rounded-full bg-gradient-to-r from-emerald-400 to-emerald-600"
+                style={{ animation: "ctStartupBar 1.2s ease-in-out infinite" }}
+              />
+            </div>
+            <style>{`@keyframes ctStartupBar { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }`}</style>
+          </>
+        ) : (
+          <div className="mt-6 ct-card p-5 text-start">
+            <div className="text-[14px] font-semibold text-rose-300">{error}</div>
+            {labels.safe && <div className="mt-2 text-[12.5px] text-slate-400">{labels.safe}</div>}
+            <button
+              type="button"
+              onClick={onRetry}
+              className="ct-em-btn mt-4 w-full rounded-xl px-4 py-2.5 text-sm font-bold hover:brightness-110 active:scale-[.99] transition"
+            >
+              {labels.retry || "Retry"}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
