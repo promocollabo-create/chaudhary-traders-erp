@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { supabase } from "./supabaseClient.js";
 import StartupScreen, { cacheLogo, readCachedLogo } from "./StartupScreen.jsx";
 
@@ -611,23 +612,20 @@ function useLanguage() {
 
 function LanguageSwitcher({ compact = false }) {
   const { language } = useLanguage();
+  const opt = (code, label) => (
+    <button
+      type="button"
+      onClick={() => setLanguage(code)}
+      className={`${compact ? "px-2.5 py-1 text-[11.5px]" : "px-3 py-1.5 text-xs"} rounded-lg font-bold transition-all duration-200
+        ${language === code ? "bg-white text-slate-900 shadow-sm" : "ct-t2 hover:opacity-80"}`}
+    >
+      {label}
+    </button>
+  );
   return (
-    <div className={`inline-flex items-center border border-slate-300 bg-white ${compact ? "text-[10px]" : "text-xs"} font-bold uppercase tracking-wide`} dir="ltr">
-      <button
-        type="button"
-        onClick={() => setLanguage("en")}
-        className={`px-2.5 py-1.5 transition-colors ${language === "en" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"}`}
-      >
-        English
-      </button>
-      <span className="text-slate-300">|</span>
-      <button
-        type="button"
-        onClick={() => setLanguage("ur")}
-        className={`px-2.5 py-1.5 transition-colors ${language === "ur" ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-100"}`}
-      >
-        اردو
-      </button>
+    <div className="inline-flex items-center gap-0.5 p-1 rounded-xl ct-chip" dir="ltr">
+      {opt("en", "EN")}
+      {opt("ur", "اردو")}
     </div>
   );
 }
@@ -672,6 +670,7 @@ function I18nDomBridge() {
     const shouldSkip = (node) => {
       const el = node.parentElement;
       if (!el) return true;
+      if (el.closest && el.closest(".ct-paper")) return true;
       const tag = el.tagName;
       return ["SCRIPT", "STYLE", "TEXTAREA"].includes(tag) ||
         (tag === "INPUT" && !["button", "submit"].includes((el.type || "").toLowerCase()));
@@ -1051,90 +1050,550 @@ function resizeImageToDataUrl(file, maxWidth) {
   });
 }
 
-/* ---------------- Shell / Layout ---------------- */
+/* ============================================================
+   PREMIUM UI SHELL  (design layer only)
+   ------------------------------------------------------------
+   Everything in this block is presentation: theme (dark / light),
+   icons, sidebar, header pieces, modal, buttons, inputs and
+   animations. No stored data, calculation or business rule is read
+   or changed here. All existing pages keep their markup — the
+   ThemeStyles sheet restyles them for the dark theme on SCREEN only,
+   so every print / PDF stays exactly as it was (white paper).
+   ============================================================ */
 
-function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl }) {
-  const items = [
-    { id: "dashboard", label: "Dashboard", icon: "◧" },
-    { id: "customers", label: "Customers", icon: "◍" },
-    { id: "invoices", label: "Invoices", icon: "▤" },
-    { id: "invoiceHistory", label: "Invoice History", icon: "🕓" },
-    { id: "returns", label: "Sales Return", icon: "↩" },
-    { id: "exchange", label: "Exchange", icon: "🔄" },
-    { id: "creditNotes", label: "Credit Notes", icon: "📝" },
-    { id: "ledger", label: "Ledger", icon: "≡" },
-    { id: "payments", label: "Payments", icon: "◎" },
-    { id: "outstandingTransfer", label: "Outstanding Transfer", icon: "⇄" },
-    { id: "adjustments", label: "Adjustments", icon: "±" },
-    { id: "commission", label: "Commission", icon: "🎯" },
-    { id: "bookings", label: "Advance Booking", icon: "▦" },
-    { id: "orders", label: "Daily Orders", icon: "☎" },
-    { id: "promises", label: "Promise To Pay", icon: "🤝" },
-    { id: "leads", label: "Leads", icon: "◔" },
-    { id: "products", label: "Products", icon: "▧" },
-    { id: "drivers", label: "Drivers", icon: "🚚" },
-    { id: "offers", label: "Offers", icon: "🎁" },
-    { id: "reports", label: "Reports", icon: "▥" },
-    { id: "assistant", label: "Sales Assistant", icon: "◈" },
-    { id: "estimator", label: "Cement Estimator", icon: "▨" },
-  ];
-  if (role === "admin") items.push({ id: "settings", label: "Settings", icon: "⚙" });
+const UI_URDU = {
+  "Overview": "جائزہ",
+  "Sales": "فروخت",
+  "Finance": "مالیات",
+  "Business": "کاروبار",
+  "Tools": "ٹولز",
+  "Premium ERP": "پریمیم ای آر پی",
+  "Good morning": "صبح بخیر",
+  "Good afternoon": "سہ پہر بخیر",
+  "Good evening": "شام بخیر",
+  "Search pages, customers, invoices…": "صفحات، گاہک، انوائس تلاش کریں…",
+  "Notifications": "اطلاعات",
+  "No new notifications": "کوئی نئی اطلاع نہیں",
+  "Light mode": "لائٹ موڈ",
+  "Dark mode": "ڈارک موڈ",
+  "More": "مزید",
+  "Home": "ہوم",
+  "Pages": "صفحات",
+  "All Branches": "تمام برانچز",
+  "Owner": "مالک",
+  "Sign in to your account": "اپنے اکاؤنٹ میں لاگ اِن کریں",
+  "Construction materials · Billing · Ledger": "تعمیراتی سامان · بلنگ · لیجر",
+  "Invoices, ledger, payments and bookings — in one place.": "انوائسز، لیجر، ادائیگیاں اور بکنگز — ایک ہی جگہ۔",
+  "No results": "کوئی نتیجہ نہیں",
+  "Live data sync": "لائیو ڈیٹا سنک",
+  "Saved on this device": "اسی ڈیوائس پر محفوظ",
+};
+Object.entries(UI_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
 
+/* ---------------- Theme (dark / light) ---------------- */
+
+const THEME_STORAGE_KEY = "ct-theme";
+let themeState = (() => {
+  try { return window.localStorage.getItem(THEME_STORAGE_KEY) === "light" ? "light" : "dark"; } catch { return "dark"; }
+})();
+const themeListeners = new Set();
+
+function applyThemeClass(theme) {
+  if (typeof document === "undefined") return;
+  document.documentElement.classList.toggle("ct-dark", theme === "dark");
+  document.documentElement.classList.toggle("ct-light", theme !== "dark");
+}
+applyThemeClass(themeState);
+
+function setTheme(next) {
+  themeState = next === "light" ? "light" : "dark";
+  try { window.localStorage.setItem(THEME_STORAGE_KEY, themeState); } catch {}
+  applyThemeClass(themeState);
+  themeListeners.forEach((l) => l(themeState));
+}
+
+function useTheme() {
+  const [theme, setLocal] = useState(themeState);
+  useEffect(() => {
+    themeListeners.add(setLocal);
+    return () => { themeListeners.delete(setLocal); };
+  }, []);
+  return theme;
+}
+
+/* ---------------- Icons ---------------- */
+
+const UI_ICON_PATHS = {
+  dashboard: "M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z",
+  users: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75",
+  file: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8",
+  history: "M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5M12 7v5l4 2",
+  undo: "M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11",
+  swap: "M17 3l4 4-4 4M3 7h18M7 21l-4-4 4-4M21 17H3",
+  note: "M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z",
+  book: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20V2H6.5A2.5 2.5 0 0 0 4 4.5v15zM20 17v5H6.5A2.5 2.5 0 0 1 4 19.5",
+  wallet: "M20 7H5a2 2 0 0 1 0-4h13v4M3 5v14a2 2 0 0 0 2 2h15V7M16 14h.01",
+  transfer: "M7 7h10M7 7l3-3M7 7l3 3M17 17H7M17 17l-3-3M17 17l-3 3",
+  sliders: "M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6",
+  calendar: "M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z",
+  phone: "M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8 9.8a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.5c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z",
+  clock: "M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 6v6l4 2",
+  zap: "M13 2 3 14h9l-1 8 10-12h-9z",
+  box: "M21 8 12 3 3 8v8l9 5 9-5zM3 8l9 5 9-5M12 13v8",
+  truck: "M1 3h15v13H1zM16 8h4l3 3v5h-7zM5.5 21a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM18.5 21a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z",
+  gift: "M20 12v10H4V12M2 7h20v5H2zM12 22V7M12 7H7.5a2.5 2.5 0 0 1 0-5C11 2 12 7 12 7zM12 7h4.5a2.5 2.5 0 0 0 0-5C13 2 12 7 12 7z",
+  chart: "M3 3v18h18M7 16v-5M12 16V7M17 16v-3",
+  chat: "M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z",
+  calc: "M6 2h12a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2zM8 6h8M8 10h.01M12 10h.01M16 10h.01M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01M16 18h.01",
+  percent: "M19 5 5 19M6.5 9a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5zM17.5 20a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z",
+  settings: "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z",
+  logout: "M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9",
+  menu: "M3 6h18M3 12h18M3 18h18",
+  x: "M18 6 6 18M6 6l12 12",
+  lock: "M5 11h14v10H5zM8 11V7a4 4 0 0 1 8 0v4",
+  plus: "M12 5v14M5 12h14",
+  search: "M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16zM21 21l-4.3-4.3",
+  bell: "M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9M10.3 21a1.94 1.94 0 0 0 3.4 0",
+  sun: "M12 16a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41",
+  moon: "M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z",
+  spark: "M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9zM19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z",
+  cash: "M2 6h20v12H2zM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 12h.01M18 12h.01",
+  trend: "M22 7 13.5 15.5 8.5 10.5 2 17M16 7h6v6",
+  down: "M22 17 13.5 8.5 8.5 13.5 2 7M16 17h6v-6",
+  chev: "M6 9l6 6 6-6",
+  right: "M9 18l6-6-6-6",
+  branch: "M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6",
+  home: "M3 10l9-7 9 7v10a2 2 0 0 1-2 2h-4v-7H9v7H5a2 2 0 0 1-2-2z",
+  more: "M12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM19 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM5 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z",
+  alert: "M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0zM12 9v4M12 17h.01",
+  shield: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
+  printer: "M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v8H6z",
+  download: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3",
+  wa: "M3 21l1.7-5A8.5 8.5 0 1 1 8 19.3zM9 9.5c.5 2.5 2.5 4.5 5 5l1.2-1.2 2 1-.5 1.7c-3.6.4-8.2-4.2-7.8-7.8L10.6 7l1 2z",
+  check: "M20 6 9 17l-5-5",
+  image: "M3 3h18v18H3zM8.5 10a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zM21 15l-5-5L5 21",
+};
+
+function UiIcon({ name, className = "w-[18px] h-[18px]" }) {
   return (
-    <div className="w-56 shrink-0 bg-slate-900 text-slate-200 flex flex-col h-full">
-      <div className="px-4 py-5 border-b border-slate-700 flex items-center gap-2">
-        {logoUrl && <img src={logoUrl} alt="Logo" className="w-8 h-8 object-contain shrink-0" />}
-        <div>
-          <div className="text-[10px] uppercase tracking-[0.2em] text-white font-bold">Trading Ledger</div>
-          <div className="text-lg font-black uppercase tracking-tight text-white leading-tight">{companyName}</div>
-        </div>
-      </div>
-      <nav className="flex-1 overflow-y-auto py-3">
-        {items.map((it) => (
-          <button
-            key={it.id}
-            onClick={() => setPage(it.id)}
-            className={`w-full text-left px-4 py-2.5 flex items-center gap-3 text-sm font-medium transition-colors ${
-              page === it.id
-                ? "bg-white text-slate-900 font-bold"
-                : "text-slate-300 hover:bg-slate-800"
-            }`}
-          >
-            <span className="w-4 text-center">{it.icon}</span>
-            {t(it.label)}
-          </button>
-        ))}
-      </nav>
-      <div className="p-3 border-t border-slate-700">
-        <button
-          onClick={onLogout}
-          className="w-full text-xs uppercase tracking-wide font-bold text-slate-400 hover:text-white px-2 py-2"
-        >
-          Log out
-        </button>
-      </div>
-    </div>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" className={`shrink-0 ${className}`} aria-hidden="true">
+      <path d={UI_ICON_PATHS[name] || UI_ICON_PATHS.dashboard} />
+    </svg>
   );
 }
+
+/* ---------------- Navigation structure (same page ids as before) ---------------- */
+
+const NAV_GROUPS = [
+  { title: "Overview", items: [
+    { id: "dashboard", label: "Dashboard", icon: "dashboard" },
+  ]},
+  { title: "Sales", items: [
+    { id: "invoices", label: "Invoices", icon: "file" },
+    { id: "invoiceHistory", label: "Invoice History", icon: "history" },
+    { id: "orders", label: "Daily Orders", icon: "phone" },
+    { id: "bookings", label: "Advance Booking", icon: "calendar" },
+    { id: "returns", label: "Sales Return", icon: "undo" },
+    { id: "exchange", label: "Exchange", icon: "swap" },
+    { id: "creditNotes", label: "Credit Notes", icon: "note" },
+  ]},
+  { title: "Finance", items: [
+    { id: "customers", label: "Customers", icon: "users" },
+    { id: "ledger", label: "Ledger", icon: "book" },
+    { id: "payments", label: "Payments", icon: "wallet" },
+    { id: "promises", label: "Promise To Pay", icon: "clock" },
+    { id: "outstandingTransfer", label: "Outstanding Transfer", icon: "transfer" },
+    { id: "adjustments", label: "Adjustments", icon: "sliders" },
+  ]},
+  { title: "Business", items: [
+    { id: "commission", label: "Commission", icon: "percent" },
+    { id: "leads", label: "Leads", icon: "zap" },
+    { id: "products", label: "Products", icon: "box" },
+    { id: "drivers", label: "Drivers", icon: "truck" },
+    { id: "offers", label: "Offers", icon: "gift" },
+  ]},
+  { title: "Tools", items: [
+    { id: "reports", label: "Reports", icon: "chart" },
+    { id: "assistant", label: "Sales Assistant", icon: "chat" },
+    { id: "estimator", label: "Cement Estimator", icon: "calc" },
+    { id: "settings", label: "Settings", icon: "settings", adminOnly: true },
+  ]},
+];
+
+function navItemFor(pageId) {
+  for (const g of NAV_GROUPS) {
+    const it = g.items.find((x) => x.id === pageId);
+    if (it) return { ...it, group: g.title };
+  }
+  return { id: "dashboard", label: "Dashboard", icon: "dashboard", group: "Overview" };
+}
+
+function uiInitials(name, fallback = "CT") {
+  const s = String(name || "").trim();
+  if (!s) return fallback;
+  return s.split(/\s+/).map((w) => w[0]).join("").slice(0, 2).toUpperCase();
+}
+
+const UI_AVATAR_GRADIENTS = [
+  "from-sky-400 to-indigo-500", "from-rose-400 to-pink-600", "from-emerald-400 to-teal-600",
+  "from-violet-400 to-purple-600", "from-amber-300 to-orange-500", "from-cyan-400 to-blue-600",
+];
+function uiAvatarGradient(key) {
+  const s = String(key || "");
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+  return UI_AVATAR_GRADIENTS[h % UI_AVATAR_GRADIENTS.length];
+}
+
+/* ---------------- Animated number (count-up) ----------------
+   Animates only the number on screen; the real value is shown as soon
+   as the animation ends (and immediately when motion is reduced). */
+
+function uiReducedMotion() {
+  try { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; } catch { return false; }
+}
+
+function CountUp({ value, format = (n) => String(Math.round(n)), duration = 900 }) {
+  const target = Number(value) || 0;
+  const [shown, setShown] = useState(uiReducedMotion() ? target : 0);
+  const fromRef = React.useRef(0);
+  useEffect(() => {
+    if (uiReducedMotion()) { setShown(target); return undefined; }
+    const from = fromRef.current;
+    let raf;
+    const start = performance.now();
+    const step = (now) => {
+      const p = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - p, 3);
+      setShown(from + (target - from) * eased);
+      if (p < 1) raf = requestAnimationFrame(step);
+      else fromRef.current = target;
+    };
+    raf = requestAnimationFrame(step);
+    return () => { cancelAnimationFrame(raf); fromRef.current = target; };
+  }, [target]);
+  return <>{format(shown)}</>;
+}
+
+/* ---------------- Global theme stylesheet ---------------- */
+
+const UI_THEME_CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Naskh+Arabic:wght@400;500;600;700&display=swap');
+
+/* ---------- Animations ---------- */
+@keyframes ctFadeUp { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes ctFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes ctPop { from { opacity: 0; transform: translateY(10px) scale(.98); } to { opacity: 1; transform: none; } }
+@keyframes ctGrowY { from { transform: scaleY(0); } to { transform: scaleY(1); } }
+@keyframes ctGrowX { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes ctDraw { from { stroke-dashoffset: 1; } to { stroke-dashoffset: 0; } }
+@keyframes ctPulse { 0%,100% { box-shadow: 0 0 0 0 rgba(52,211,153,.55); } 70% { box-shadow: 0 0 0 8px rgba(52,211,153,0); } }
+@keyframes ctShimmer { from { background-position: -200% 0; } to { background-position: 200% 0; } }
+.ct-page { animation: ctFadeUp .45s cubic-bezier(.2,.7,.2,1) backwards; }
+.ct-rise { animation: ctFadeUp .55s cubic-bezier(.2,.7,.2,1) backwards; }
+.ct-modal-panel { animation: ctPop .28s cubic-bezier(.2,.7,.2,1) backwards; }
+.ct-modal-back { animation: ctFade .2s ease backwards; }
+.ct-bar { transform-origin: bottom; transform-box: fill-box; animation: ctGrowY .8s cubic-bezier(.2,.7,.2,1) backwards; }
+.ct-barx { transform-origin: left; animation: ctGrowX .9s cubic-bezier(.2,.7,.2,1) backwards; }
+[dir="rtl"] .ct-barx { transform-origin: right; }
+.ct-draw { stroke-dasharray: 1; stroke-dashoffset: 1; animation: ctDraw 1.4s .2s cubic-bezier(.4,0,.2,1) forwards; }
+.ct-live { animation: ctPulse 2s infinite; }
+.ct-lift { transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
+.ct-lift:hover { transform: translateY(-2px); }
+@media (prefers-reduced-motion: reduce) {
+  .ct-page, .ct-rise, .ct-modal-panel, .ct-modal-back, .ct-bar, .ct-barx, .ct-live { animation: none !important; }
+  .ct-draw { animation: none !important; stroke-dashoffset: 0; }
+  .ct-lift:hover { transform: none; }
+}
+
+/* ---------- Shared surfaces ---------- */
+.ct-mesh { background: radial-gradient(800px 420px at 8% -8%, rgba(16,185,129,.15), transparent 60%),
+  radial-gradient(760px 480px at 92% -12%, rgba(99,102,241,.16), transparent 60%),
+  radial-gradient(900px 600px at 50% 120%, rgba(212,175,95,.06), transparent 60%), #060a13; }
+html.ct-light .ct-mesh { background: radial-gradient(800px 420px at 8% -8%, rgba(16,185,129,.10), transparent 60%),
+  radial-gradient(760px 480px at 92% -12%, rgba(99,102,241,.08), transparent 60%), #f4f6fa; }
+.ct-card { background: linear-gradient(180deg, rgba(148,163,184,.075), rgba(148,163,184,.03)); border: 1px solid rgba(148,163,184,.13);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.05), 0 24px 48px -28px rgba(0,0,0,.9); border-radius: 20px; }
+html.ct-light .ct-card { background: #fff; border-color: #e6e9ef; box-shadow: 0 1px 2px rgba(16,24,40,.04), 0 12px 32px -20px rgba(16,24,40,.18); }
+.ct-chip { background: rgba(148,163,184,.08); border: 1px solid rgba(148,163,184,.13); }
+html.ct-light .ct-chip { background: #f3f5f9; border-color: #e3e7ee; }
+.ct-gold-bg { background: linear-gradient(135deg, #f3dca0, #d4a94f); color: #2a1f05; }
+.ct-em-btn { background: linear-gradient(135deg, #34d399, #10b981 55%, #059669); color: #022c22;
+  box-shadow: 0 10px 30px -12px rgba(16,185,129,.8), inset 0 1px 0 rgba(255,255,255,.35); }
+.ct-h { color: #f8fafc; } html.ct-light .ct-h { color: #0f172a; }
+.ct-t2 { color: #94a3b8; } html.ct-light .ct-t2 { color: #64748b; }
+.ct-t3 { color: #64748b; } html.ct-light .ct-t3 { color: #94a3b8; }
+.ct-line { border-color: rgba(148,163,184,.12) !important; } html.ct-light .ct-line { border-color: #e6e9ef !important; }
+.ct-display { font-family: "Inter Display", Inter, system-ui, sans-serif; letter-spacing: -.03em; }
+.ct-nav::-webkit-scrollbar { width: 6px; } .ct-nav::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 999px; }
+.ct-scroll::-webkit-scrollbar { width: 10px; height: 10px; }
+.ct-scroll::-webkit-scrollbar-thumb { background: rgba(148,163,184,.35); border-radius: 999px; border: 3px solid transparent; background-clip: content-box; }
+
+@media screen {
+  /* ---------- Existing pages: shared polish (both themes) ---------- */
+  .ct-content h2.text-xl { text-transform: none; font-size: 1.55rem; line-height: 2rem; font-weight: 800; letter-spacing: -.025em; }
+  .ct-content h3.text-lg { text-transform: none; letter-spacing: -.01em; }
+  .ct-content .bg-white.border:not(.print-area):not(.ct-paper):not(:is(.print-area, .ct-paper) *) { border-radius: 16px; }
+  .ct-content .bg-white.border > div:first-child.border-b:not(:is(.print-area, .ct-paper) *) { text-transform: none; letter-spacing: 0; font-size: 13.5px; }
+  .ct-content table:not(:is(.print-area, .ct-paper) *) { border-collapse: separate; border-spacing: 0; }
+  .ct-content thead tr:not(.bg-slate-900) th { font-size: 11px; font-weight: 600; letter-spacing: .05em; padding-top: 11px; padding-bottom: 11px; white-space: nowrap; }
+  .ct-content tbody tr:not(:is(.print-area, .ct-paper) *) { transition: background-color .12s ease; }
+  .ct-content span.text-\\[10px\\].uppercase:not(:is(.print-area, .ct-paper) *) { border-radius: 999px; padding: 3px 10px; letter-spacing: .03em; font-weight: 700; display: inline-block; line-height: 1.25; }
+  .ct-content :is(.bg-slate-50,.bg-blue-50,.bg-amber-50,.bg-red-50,.bg-emerald-50,.bg-purple-50).border:not(:is(.print-area, .ct-paper) *) { border-radius: 12px; }
+  .ct-content select.text-xs.border:not(:is(.print-area, .ct-paper) *), .ct-content input.text-xs.border:not(:is(.print-area, .ct-paper) *) { border-radius: 8px; padding: 4px 8px; }
+  .ct-content td > button.text-xs.font-bold { border-radius: 6px; padding: 3px 7px; margin: -3px 0; transition: background-color .15s; }
+  /* Item rows (invoice / exchange): fixed-width inputs keep their width, the name field gets the rest. */
+  .ct-content :is(input, select).w-16 { width: 4rem; } .ct-content :is(input, select).w-20 { width: 5rem; }
+  .ct-content :is(input, select).w-24 { width: 6rem; } .ct-content :is(input, select).w-28 { width: 7rem; }
+  .ct-content :is(input, select).w-36 { width: 9rem; } .ct-content :is(input, select).w-40 { width: 10rem; }
+  .ct-content :is(input, select).flex-1 { min-width: 7rem; }
+  [dir="rtl"] .ct-content .text-left { text-align: right; }
+  [dir="rtl"] .ct-content .text-right { text-align: left; }
+
+  html.ct-light .ct-content .bg-white.border:not(.print-area):not(.ct-paper):not(:is(.print-area, .ct-paper) *) { border-color: #e6e9ef; box-shadow: 0 1px 2px rgba(16,24,40,.04), 0 10px 28px -22px rgba(16,24,40,.25); }
+  html.ct-light .ct-content thead tr:not(.bg-slate-900) { background: #f8fafc; }
+  html.ct-light .ct-content tbody tr:not(:is(.print-area, .ct-paper) *):hover { background-color: #f8fafc; }
+  html.ct-light .ct-content td > button.text-xs.font-bold:hover { background: #ecfdf5; }
+  html.ct-light :is(.text-rose-300,.text-rose-400) { color: #e11d48; }
+  html.ct-light :is(.text-emerald-300,.text-emerald-400) { color: #059669; }
+  html.ct-light .text-\\[\\#e9c77b\\] { color: #a16207; }
+  html.ct-light .text-sky-400 { color: #0284c7; }
+  html.ct-light .text-amber-400 { color: #d97706; }
+  html.ct-light .text-\\[\\#d4a94f\\] { color: #a16207; }
+
+  /* ---------- Dark theme: remap the light utility colours ---------- */
+  html.ct-dark .ct-content { color: #cbd5e1; color-scheme: dark; }
+  html.ct-dark .ct-content :is(.bg-white):not(.print-area):not(.ct-paper):not(:is(.print-area, .ct-paper) *) { background-color: #0e1526; }
+  html.ct-dark .ct-content .bg-white.border:not(.print-area):not(.ct-paper):not(:is(.print-area, .ct-paper) *) { background: linear-gradient(180deg, rgba(30,41,59,.55), rgba(15,23,42,.55)); border-color: rgba(148,163,184,.14); box-shadow: inset 0 1px 0 rgba(255,255,255,.04), 0 24px 48px -30px rgba(0,0,0,.9); }
+  html.ct-dark .ct-content :is(.bg-slate-50,.bg-slate-100):not(.print-area):not(.ct-paper):not(:is(.print-area, .ct-paper) *) { background-color: rgba(148,163,184,.08); }
+  html.ct-dark .ct-content .bg-slate-200:not(.print-area):not(.ct-paper):not(:is(.print-area, .ct-paper) *) { background-color: rgba(148,163,184,.16); }
+  html.ct-dark .ct-content .bg-slate-300:not(:is(.print-area, .ct-paper) *) { background-color: rgba(148,163,184,.28); }
+  html.ct-dark .ct-content .bg-slate-900:not(:is(.print-area, .ct-paper) *):not(.ct-keep) { background-color: #1e293b; }
+  html.ct-dark .ct-content button.bg-slate-900:not(.ct-keep):not(:is(.print-area, .ct-paper) *) { background: rgba(16,185,129,.16); border-color: rgba(52,211,153,.7); color: #ecfdf5; }
+  html.ct-dark .ct-content :is(.hover\\:bg-slate-50,.hover\\:bg-slate-100):not(:is(.print-area, .ct-paper) *):hover { background-color: rgba(148,163,184,.10); }
+  html.ct-dark .ct-content tbody tr:not(:is(.print-area, .ct-paper) *):hover { background-color: rgba(148,163,184,.05); }
+  html.ct-dark .ct-content thead tr:not(.bg-slate-900):not(:is(.print-area, .ct-paper) *) { background: rgba(148,163,184,.06); }
+  html.ct-dark .ct-content td > button.text-xs.font-bold:hover { background: rgba(52,211,153,.12); }
+
+  html.ct-dark .ct-content .text-slate-900:not(:is(.print-area, .ct-paper) *), html.ct-dark .ct-content .text-slate-800:not(:is(.print-area, .ct-paper) *) { color: #f1f5f9; }
+  html.ct-dark .ct-content .text-slate-700:not(:is(.print-area, .ct-paper) *) { color: #e2e8f0; }
+  html.ct-dark .ct-content :is(.text-slate-600,.text-slate-500):not(:is(.print-area, .ct-paper) *) { color: #94a3b8; }
+  html.ct-dark .ct-content .text-slate-400:not(:is(.print-area, .ct-paper) *) { color: #64748b; }
+  html.ct-dark .ct-content .text-slate-300:not(:is(.print-area, .ct-paper) *) { color: #475569; }
+  html.ct-dark .ct-content :is(.hover\\:text-slate-900,.hover\\:text-slate-700):not(:is(.print-area, .ct-paper) *):hover { color: #fff; }
+
+  html.ct-dark .ct-content :is(.border-slate-100,.border-slate-200):not(.print-area):not(.ct-paper):not(:is(.print-area, .ct-paper) *) { border-color: rgba(148,163,184,.13); }
+  html.ct-dark .ct-content :is(.border-slate-300,.border-slate-400):not(:is(.print-area, .ct-paper) *) { border-color: rgba(148,163,184,.24); }
+  html.ct-dark .ct-content .border-slate-900:not(:is(.print-area, .ct-paper) *) { border-color: rgba(226,232,240,.55); }
+  html.ct-dark .ct-content .divide-slate-100:not(:is(.print-area, .ct-paper) *) > * + * { border-color: rgba(148,163,184,.12); }
+
+  html.ct-dark .ct-content .text-blue-700:not(:is(.print-area, .ct-paper) *), html.ct-dark .ct-content .hover\\:text-blue-700:not(:is(.print-area, .ct-paper) *):hover { color: #a5b4fc; }
+  html.ct-dark .ct-content .text-blue-800:not(:is(.print-area, .ct-paper) *) { color: #c7d2fe; }
+  html.ct-dark .ct-content :is(.text-red-600,.text-red-700,.text-red-800):not(:is(.print-area, .ct-paper) *), html.ct-dark .ct-content .hover\\:text-red-600:not(:is(.print-area, .ct-paper) *):hover { color: #fb7185; }
+  html.ct-dark .ct-content :is(.text-emerald-600,.text-emerald-700,.text-emerald-800):not(:is(.print-area, .ct-paper) *), html.ct-dark .ct-content .hover\\:text-emerald-600:not(:is(.print-area, .ct-paper) *):hover { color: #34d399; }
+  html.ct-dark .ct-content :is(.text-amber-600,.text-amber-700,.text-amber-800):not(:is(.print-area, .ct-paper) *) { color: #fbbf24; }
+  html.ct-dark .ct-content :is(.text-purple-700,.text-purple-800):not(:is(.print-area, .ct-paper) *) { color: #c4b5fd; }
+
+  html.ct-dark .ct-content .bg-blue-50:not(:is(.print-area, .ct-paper) *) { background-color: rgba(99,102,241,.10); }
+  html.ct-dark .ct-content .bg-amber-50:not(:is(.print-area, .ct-paper) *) { background-color: rgba(245,158,11,.09); }
+  html.ct-dark .ct-content :is(.bg-red-50,.hover\\:bg-red-50:hover):not(:is(.print-area, .ct-paper) *) { background-color: rgba(244,63,94,.09); }
+  html.ct-dark .ct-content .bg-emerald-50:not(:is(.print-area, .ct-paper) *) { background-color: rgba(16,185,129,.09); }
+  html.ct-dark .ct-content .bg-purple-50:not(:is(.print-area, .ct-paper) *) { background-color: rgba(139,92,246,.10); }
+  html.ct-dark .ct-content .hover\\:bg-amber-100:not(:is(.print-area, .ct-paper) *):hover { background-color: rgba(245,158,11,.16); }
+  html.ct-dark .ct-content .bg-blue-100:not(:is(.print-area, .ct-paper) *) { background-color: rgba(99,102,241,.18); color: #c7d2fe; }
+  html.ct-dark .ct-content .bg-red-100:not(:is(.print-area, .ct-paper) *) { background-color: rgba(244,63,94,.16); color: #fda4af; }
+  html.ct-dark .ct-content .bg-emerald-100:not(:is(.print-area, .ct-paper) *) { background-color: rgba(16,185,129,.16); color: #6ee7b7; }
+  html.ct-dark .ct-content .bg-amber-100:not(:is(.print-area, .ct-paper) *) { background-color: rgba(245,158,11,.16); color: #fcd34d; }
+  html.ct-dark .ct-content .bg-purple-100:not(:is(.print-area, .ct-paper) *) { background-color: rgba(139,92,246,.18); color: #ddd6fe; }
+  html.ct-dark .ct-content :is(.border-blue-200,.border-blue-700):not(:is(.print-area, .ct-paper) *) { border-color: rgba(129,140,248,.30); }
+  html.ct-dark .ct-content :is(.border-amber-200,.border-amber-300):not(:is(.print-area, .ct-paper) *) { border-color: rgba(245,158,11,.30); }
+  html.ct-dark .ct-content :is(.border-red-200,.border-red-300):not(:is(.print-area, .ct-paper) *) { border-color: rgba(244,63,94,.30); }
+  html.ct-dark .ct-content .border-emerald-200:not(:is(.print-area, .ct-paper) *) { border-color: rgba(16,185,129,.30); }
+  html.ct-dark .ct-content .border-purple-200:not(:is(.print-area, .ct-paper) *) { border-color: rgba(139,92,246,.30); }
+
+  html.ct-dark .ct-content :is(input:not([type=checkbox]):not([type=radio]):not([type=file]):not([type=range]), select, textarea):not(:is(.print-area, .ct-paper) *) {
+    background-color: rgba(2,6,23,.55); color: #e2e8f0; border-color: rgba(148,163,184,.22); }
+  html.ct-dark .ct-content :is(input, textarea)::placeholder { color: #64748b; }
+  html.ct-dark .ct-content :is(input, select, textarea):disabled { background-color: rgba(148,163,184,.08); color: #94a3b8; }
+  html.ct-dark .ct-content option { background: #0e1526; color: #e2e8f0; }
+  html.ct-dark .ct-content input[type=date]::-webkit-calendar-picker-indicator { filter: invert(.8); }
+
+  /* A document shown on screen (invoice / receipt preview) stays white paper. */
+  html.ct-dark .ct-content .print-area { border-radius: 14px; color: #0f172a; padding: 18px; }
+}
+`;
+
+function ThemeStyles() {
+  return <style>{UI_THEME_CSS}</style>;
+}
+
+/* ---------------- Sidebar ---------------- */
+
+function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl, open = false, onClose, branchLabel, badges = {} }) {
+  const { language } = useLanguage();
+  const rtl = language === "ur";
+  const groups = NAV_GROUPS
+    .map((g) => ({ ...g, items: g.items.filter((it) => !it.adminOnly || role === "admin") }))
+    .filter((g) => g.items.length > 0);
+
+  function go(id) {
+    setPage(id);
+    if (onClose) onClose();
+  }
+
+  return (
+    <>
+      <div
+        className={`fixed inset-0 z-40 bg-slate-950/60 backdrop-blur-sm lg:hidden transition-opacity print:hidden ${open ? "opacity-100" : "opacity-0 pointer-events-none"}`}
+        onClick={onClose}
+      />
+      <aside
+        className={`fixed inset-y-0 z-50 w-[248px] shrink-0 flex flex-col bg-[#070c17] text-slate-300 border-white/5 transition-transform duration-300 ease-out
+          lg:static lg:z-auto lg:translate-x-0 print:hidden ${rtl ? "right-0 border-l" : "left-0 border-r"}
+          ${open ? "translate-x-0" : rtl ? "translate-x-full" : "-translate-x-full"}`}
+      >
+        <div className="h-[72px] px-5 flex items-center gap-3 border-b border-white/5">
+          {logoUrl ? (
+            <img src={logoUrl} alt="Logo" className="w-10 h-10 rounded-xl object-contain bg-white p-0.5 shrink-0" />
+          ) : (
+            <div className="w-10 h-10 rounded-xl ct-gold-bg ct-display font-black flex items-center justify-center text-[15px] shadow-[0_8px_24px_-8px_rgba(212,169,79,.7)] shrink-0">
+              {uiInitials(companyName)}
+            </div>
+          )}
+          <div className="min-w-0 flex-1">
+            <div className="ct-display text-[15.5px] font-bold text-white leading-tight truncate">{companyName}</div>
+            <div className="text-[10px] font-semibold tracking-[.2em] text-[#e9c77b] uppercase">{t("Premium ERP")}</div>
+          </div>
+          <button type="button" onClick={onClose} className="lg:hidden p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/10" aria-label="Close menu">
+            <UiIcon name="x" />
+          </button>
+        </div>
+
+        {branchLabel && (
+          <div className="mx-4 mt-4 flex items-center gap-2.5 rounded-xl bg-white/[.04] border border-white/[.07] px-3 py-2.5">
+            <span className="text-emerald-400"><UiIcon name="branch" className="w-4 h-4" /></span>
+            <div className="min-w-0">
+              <div className="text-[10.5px] text-slate-500 leading-none">{t("Branch")}</div>
+              <div className="text-[13px] text-white font-semibold mt-1 truncate">{branchLabel}</div>
+            </div>
+          </div>
+        )}
+
+        <nav className="ct-nav flex-1 overflow-y-auto px-3 py-4 space-y-4">
+          {groups.map((g) => (
+            <div key={g.title}>
+              <div className="px-3 mb-1 text-[10px] font-bold tracking-[.16em] text-slate-500 uppercase">{t(g.title)}</div>
+              {g.items.map((it) => {
+                const active = page === it.id;
+                const badge = badges[it.id];
+                return (
+                  <button
+                    key={it.id}
+                    type="button"
+                    onClick={() => go(it.id)}
+                    aria-current={active ? "page" : undefined}
+                    className={`group relative w-full flex items-center gap-3 px-3 py-[7px] rounded-lg text-[13.5px] font-medium transition-all duration-200 text-start
+                      ${active ? "text-white bg-gradient-to-r from-emerald-500/20 to-emerald-500/0" : "text-slate-400 hover:text-slate-100 hover:bg-white/[.04]"}`}
+                  >
+                    {active && <span className="absolute inset-y-1.5 w-[3px] rounded-full bg-emerald-400 shadow-[0_0_12px_#34d399]" style={{ insetInlineStart: 0 }} />}
+                    <span className={`transition-colors ${active ? "text-emerald-400" : "text-slate-500 group-hover:text-slate-300"}`}><UiIcon name={it.icon} className="w-[17px] h-[17px]" /></span>
+                    <span className="truncate">{t(it.label)}</span>
+                    {badge ? (
+                      <span className="ms-auto min-w-[20px] text-center text-[10px] font-bold rounded-full px-1.5 py-0.5 bg-rose-500/15 text-rose-300">{badge}</span>
+                    ) : null}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
+        </nav>
+
+        <div className="m-3 rounded-2xl p-3.5 border border-[#e9c77b]/25 bg-gradient-to-br from-[#e9c77b]/10 to-transparent">
+          <div className="flex items-center gap-2 text-[12px] font-bold text-[#e9c77b]">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 ct-live" />
+            {t(supabase ? "Live data sync" : "Saved on this device")}
+          </div>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="mt-2.5 w-full flex items-center gap-2.5 px-2 py-1.5 rounded-lg text-[13px] font-medium text-slate-400 hover:bg-rose-500/10 hover:text-rose-300 transition-colors"
+          >
+            <UiIcon name="logout" className="w-4 h-4" />
+            <span>{t("Log out")}</span>
+          </button>
+        </div>
+      </aside>
+    </>
+  );
+}
+
+/* ---------------- Stat card ---------------- */
+
+const STAT_TONE = {
+  "text-red-600": "#fb7185", "text-emerald-600": "#34d399", "text-blue-700": "#818cf8",
+  "text-amber-600": "#fbbf24", "text-purple-700": "#a78bfa", "text-slate-500": "#64748b",
+};
 
 function Stat({ label, value, accent }) {
+  const tone = STAT_TONE[accent] || "rgba(148,163,184,.45)";
   return (
-    <div className="bg-white border border-slate-200 p-4 flex-1 min-w-[150px]">
-      <div className="text-[11px] uppercase tracking-wide text-slate-500 font-bold">{label}</div>
-      <div className={`text-2xl font-black mt-1 ${accent || "text-slate-900"}`}>{value}</div>
+    <div className="ct-card ct-lift ct-rise relative p-4 flex-1 min-w-[160px] overflow-hidden">
+      <span className="absolute top-3.5 bottom-3.5 w-[3px] rounded-full" style={{ insetInlineStart: 0, background: tone, boxShadow: `0 0 12px ${tone}` }} />
+      <div className="text-[12px] font-medium ct-t2 truncate">{label}</div>
+      <div className={`ct-display text-[22px] leading-7 font-bold mt-1.5 tabular-nums ${accent || "ct-h"}`}>{value}</div>
     </div>
   );
 }
 
+/* ---------------- Modal ----------------
+   Escape closes only the top-most modal when modals are stacked. */
+
+const uiModalStack = [];
+
 function Modal({ title, onClose, children, wide }) {
+  const idRef = React.useRef(null);
+  if (!idRef.current) idRef.current = {};
+  const closeRef = React.useRef(onClose);
+  closeRef.current = onClose;
+
+  useEffect(() => {
+    const id = idRef.current;
+    uiModalStack.push(id);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e) => {
+      if (e.key === "Escape" && uiModalStack[uiModalStack.length - 1] === id && closeRef.current) closeRef.current();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      const i = uiModalStack.indexOf(id);
+      if (i >= 0) uiModalStack.splice(i, 1);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, []);
+
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-start justify-center z-50 p-4 overflow-y-auto">
-      <div className={`bg-white w-full ${wide ? "max-w-3xl" : "max-w-lg"} mt-8 mb-8 border-t-4 border-slate-900`}>
-        <div className="flex items-center justify-between px-5 py-3 border-b border-slate-200">
-          <h3 className="font-black uppercase tracking-tight text-slate-900">{t(title)}</h3>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-900 text-xl leading-none">×</button>
+    <div className="ct-modal-back fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-950/70 p-2 sm:p-6 print:bg-transparent">
+      <div
+        role="dialog"
+        aria-modal="true"
+        className={`ct-modal-panel w-full ${wide ? "max-w-4xl" : "max-w-lg"} my-4 sm:my-10 bg-white rounded-[22px] shadow-2xl shadow-black/40 ring-1 ring-slate-900/5 overflow-hidden`}
+      >
+        <div className="flex items-center justify-between gap-3 px-5 sm:px-6 py-4 border-b border-slate-200">
+          <h3 className="ct-display text-[17px] font-bold text-slate-900 truncate">{t(title)}</h3>
+          <button
+            type="button"
+            onClick={onClose}
+            className="p-1.5 -m-1.5 rounded-lg text-slate-400 hover:text-slate-900 hover:bg-slate-100 transition-colors print:hidden"
+            aria-label="Close"
+          >
+            <UiIcon name="x" className="w-5 h-5" />
+          </button>
         </div>
-        <div className="p-5">{children}</div>
+        <div className="p-4 sm:p-6">{children}</div>
       </div>
     </div>
   );
@@ -1142,24 +1601,31 @@ function Modal({ title, onClose, children, wide }) {
 
 function Field({ label, children }) {
   return (
-    <label className="block mb-3">
-      <span className="block text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t(label)}</span>
+    <label className="block mb-4">
+      <span className="block text-[12.5px] font-semibold text-slate-600 mb-1.5">{t(label)}</span>
       {children}
     </label>
   );
 }
-const inputCls = "w-full border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:border-slate-900 focus:ring-1 focus:ring-slate-900";
+
+const inputCls =
+  "w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 shadow-sm " +
+  "transition-colors focus:outline-none focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/15";
 
 function Btn({ children, onClick, variant = "primary", type = "button", small, disabled }) {
-  const base = `${small ? "px-3 py-1.5 text-xs" : "px-4 py-2 text-sm"} font-bold uppercase tracking-wide transition-colors ${disabled ? "opacity-40 cursor-not-allowed" : ""}`;
+  const base =
+    `inline-flex items-center justify-center gap-1.5 rounded-xl font-semibold whitespace-nowrap transition-all duration-150 select-none ` +
+    `focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ` +
+    `${small ? "px-3 py-1.5 text-xs" : "px-4 py-2 text-sm"} ` +
+    `${disabled ? "opacity-45 cursor-not-allowed" : "active:scale-[.97]"}`;
   const styles = {
-    primary: "bg-slate-900 text-white hover:bg-slate-700",
-    dark: "bg-slate-900 text-white hover:bg-slate-700",
-    ghost: "bg-transparent text-slate-600 hover:bg-slate-100 border border-slate-300",
-    danger: "bg-red-600 text-white hover:bg-red-700",
+    primary: "ct-em-btn hover:brightness-110 focus-visible:ring-emerald-500",
+    dark: "ct-keep bg-slate-900 text-white border border-white/10 shadow-sm hover:bg-slate-800 focus-visible:ring-slate-500",
+    ghost: "bg-white text-slate-700 border border-slate-300 shadow-sm hover:bg-slate-50 focus-visible:ring-slate-400",
+    danger: "bg-gradient-to-br from-rose-500 to-red-600 text-white shadow-[0_10px_24px_-12px_rgba(244,63,94,.8)] hover:brightness-110 focus-visible:ring-red-500",
   };
   return (
-    <button type={type} onClick={disabled ? undefined : onClick} disabled={disabled} className={`${base} ${styles[variant]}`}>
+    <button type={type} onClick={disabled ? undefined : onClick} disabled={disabled} className={`${base} ${styles[variant] || styles.primary}`}>
       {typeof children === "string" ? t(children) : children}
     </button>
   );
@@ -1173,6 +1639,7 @@ function Login({ users, customers, onLogin, companyName, logoUrl, onResetUsers }
   const [error, setError] = useState("");
   const [resetMsg, setResetMsg] = useState("");
   const [failCount, setFailCount] = useState(0);
+  const [showPass, setShowPass] = useState(false);
 
   function submit() {
     const uname = username.trim().toLowerCase();
@@ -1191,38 +1658,90 @@ function Login({ users, customers, onLogin, companyName, logoUrl, onResetUsers }
     setFailCount(0);
   }
 
-  function onKeyDown(e) {
-    if (e.key === "Enter") submit();
-  }
+  function onSubmit(e) { e.preventDefault(); submit(); }
+
+  const field = "w-full rounded-xl border border-white/10 bg-white/[.04] px-3.5 py-2.5 text-[14px] text-white placeholder:text-slate-500 outline-none transition focus:border-emerald-400/70 focus:ring-4 focus:ring-emerald-400/15";
 
   return (
-    <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-      <div className="bg-white w-full max-w-sm border-t-4 border-slate-900">
-        <div className="px-6 pt-4 flex justify-end">
-          <LanguageSwitcher />
-        </div>
-        <div className="px-6 pt-2 pb-2">
-          {logoUrl && <img src={logoUrl} alt="Logo" className="w-12 h-12 object-contain mb-2" />}
-          <div className="text-[10px] uppercase tracking-[0.25em] text-slate-500 font-bold">Trading Ledger</div>
-          <div className="text-2xl font-black uppercase tracking-tight text-slate-900">{companyName}</div>
-        </div>
-        <div className="p-6 pt-4">
-          <Field label="Username">
-            <input className={inputCls} value={username} onChange={(e) => setUsername(e.target.value)} onKeyDown={onKeyDown} autoFocus />
-          </Field>
-          <Field label="Password">
-            <input type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} onKeyDown={onKeyDown} />
-          </Field>
-          {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
-          <Btn onClick={submit}>Log In</Btn>
-          {failCount >= 1 && (
-            <div className="mt-3 pt-3 border-t border-slate-200">
-              <button type="button" onClick={resetDefaults} className="text-xs font-bold text-blue-700 hover:underline">
-                Login nahi ho raha? Default logins reset karein
-              </button>
-              {resetMsg && <div className="text-emerald-600 text-xs font-semibold mt-2">{resetMsg}</div>}
-            </div>
+    <div className="ct-mesh min-h-screen grid lg:grid-cols-[1.1fr_1fr] text-slate-200" style={{ background: "#060a13" }}>
+      <ThemeStyles />
+      {/* Brand panel */}
+      <div className="hidden lg:flex relative flex-col justify-between p-12 overflow-hidden border-e border-white/5">
+        <div className="absolute -top-40 -left-24 w-[34rem] h-[34rem] rounded-full bg-emerald-500/20 blur-3xl" />
+        <div className="absolute -bottom-48 right-0 w-[32rem] h-[32rem] rounded-full bg-indigo-500/20 blur-3xl" />
+        <div className="relative flex items-center gap-3 ct-rise">
+          {logoUrl ? (
+            <img src={logoUrl} alt="Logo" className="w-12 h-12 rounded-2xl object-contain bg-white p-1" />
+          ) : (
+            <div className="w-12 h-12 rounded-2xl ct-gold-bg ct-display font-black text-lg flex items-center justify-center">{uiInitials(companyName)}</div>
           )}
+          <div>
+            <div className="ct-display text-lg font-bold text-white leading-tight">{companyName}</div>
+            <div className="text-[10.5px] font-semibold tracking-[.2em] text-[#e9c77b] uppercase">{t("Premium ERP")}</div>
+          </div>
+        </div>
+        <div className="relative max-w-lg ct-rise" style={{ animationDelay: ".1s" }}>
+          <div className="ct-display text-[44px] font-extrabold leading-[1.05] text-white">
+            {t("Invoices, ledger, payments and bookings — in one place.")}
+          </div>
+          <div className="mt-5 text-slate-400">{t("Construction materials · Billing · Ledger")}</div>
+          <div className="mt-8 grid grid-cols-3 gap-3 max-w-md">
+            {[["file", "Invoices"], ["wallet", "Payments"], ["book", "Ledger"]].map(([ic, l], i) => (
+              <div key={l} className="ct-card ct-rise p-3.5" style={{ animationDelay: `${0.2 + i * 0.08}s` }}>
+                <span className="text-emerald-400"><UiIcon name={ic} className="w-5 h-5" /></span>
+                <div className="mt-2 text-[13px] font-semibold text-white">{t(l)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="relative text-xs text-slate-500">© {new Date().getFullYear()} {companyName}</div>
+      </div>
+
+      {/* Form panel */}
+      <div className="flex items-center justify-center p-6">
+        <div className="w-full max-w-sm ct-rise">
+          <div className="flex justify-end mb-10"><LanguageSwitcher /></div>
+          <div className="lg:hidden flex items-center gap-3 mb-8">
+            {logoUrl ? (
+              <img src={logoUrl} alt="Logo" className="w-11 h-11 rounded-xl object-contain bg-white p-0.5" />
+            ) : (
+              <div className="w-11 h-11 rounded-xl ct-gold-bg ct-display font-black flex items-center justify-center">{uiInitials(companyName)}</div>
+            )}
+            <div className="ct-display text-lg font-bold text-white">{companyName}</div>
+          </div>
+          <h1 className="ct-display text-[28px] font-bold text-white">{t("Log In")}</h1>
+          <p className="mt-1 mb-6 text-sm text-slate-400">{t("Sign in to your account")}</p>
+
+          <form onSubmit={onSubmit} className="ct-card p-6">
+            <label className="block mb-4">
+              <span className="block text-[12.5px] font-semibold text-slate-300 mb-1.5">{t("Username")}</span>
+              <input className={field} value={username} onChange={(e) => setUsername(e.target.value)} autoFocus autoComplete="username" />
+            </label>
+            <label className="block mb-4">
+              <span className="block text-[12.5px] font-semibold text-slate-300 mb-1.5">{t("Password")}</span>
+              <div className="relative">
+                <input type={showPass ? "text" : "password"} className={`${field} pe-11`} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
+                <button type="button" onClick={() => setShowPass((v) => !v)} className="absolute inset-y-0 end-0 px-3 text-[11px] font-bold text-slate-400 hover:text-white">
+                  {showPass ? "HIDE" : "SHOW"}
+                </button>
+              </div>
+            </label>
+            {error && (
+              <div className="mb-4 rounded-xl bg-rose-500/10 border border-rose-400/30 px-3 py-2 text-sm font-medium text-rose-300">{t(error)}</div>
+            )}
+            <button type="submit" className="ct-em-btn w-full inline-flex items-center justify-center gap-2 rounded-xl px-4 py-3 text-sm font-bold hover:brightness-110 active:scale-[.99] transition">
+              <UiIcon name="lock" className="w-4 h-4" />
+              {t("Log In")}
+            </button>
+            {failCount >= 1 && (
+              <div className="mt-4 pt-4 border-t border-white/10">
+                <button type="button" onClick={resetDefaults} className="text-xs font-semibold text-emerald-400 hover:underline">
+                  Login nahi ho raha? Default logins reset karein
+                </button>
+                {resetMsg && <div className="text-emerald-300 text-xs font-medium mt-2">{t(resetMsg)}</div>}
+              </div>
+            )}
+          </form>
         </div>
       </div>
     </div>
@@ -1738,97 +2257,530 @@ function computeCommissionSummaryForAgent(agentId, transactions, payments) {
 
 /* ---------------- Dashboard ---------------- */
 
-function Dashboard({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, onOpenPromises }) {
-  const outstandingTotal = useMemo(() => {
-    const byId = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
-    return customers.reduce((sum, c) => sum + byId[c.id], 0);
-  }, [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments]);
+/* ---------------- Dashboard (premium) ----------------
+   Read-only: every number below is computed from the same records the
+   rest of the ERP uses (invoices, payments, ledger outstanding,
+   promises, bookings). Nothing is written from this page. */
 
-  const todaySales = useMemo(() => {
-    const t = todayISO();
-    return invoices.filter((i) => i.date === t && !isInvoiceCancelled(i)).reduce((s, i) => s + i.total, 0);
-  }, [invoices]);
+const DASH_URDU = {
+  "Business overview": "کاروبار کا جائزہ",
+  "Today's Promise Collection": "آج کی وعدہ وصولی",
+  "Collected (This Week)": "وصولی (اس ہفتے)",
+  "Cash (This Month)": "نقد وصولی (اس ماہ)",
+  "This Month Sales": "اس ماہ کی فروخت",
+  "vs yesterday": "گزشتہ کل کے مقابلے",
+  "vs last week": "پچھلے ہفتے کے مقابلے",
+  "vs last month": "پچھلے ماہ کے مقابلے",
+  "invoices today": "آج کی انوائسز",
+  "payments": "ادائیگیاں",
+  "customers": "گاہک",
+  "Sales vs Collection": "فروخت بمقابلہ وصولی",
+  "Last 12 months": "پچھلے 12 ماہ",
+  "Collection": "وصولی",
+  "Smart Insights": "اسمارٹ انسائٹس",
+  "All good — nothing needs attention right now.": "سب ٹھیک ہے — ابھی کسی چیز پر توجہ کی ضرورت نہیں۔",
+  "Top Outstanding": "سب سے زیادہ بقایا",
+  "View all": "سب دیکھیں",
+  "Payment Reminders": "ادائیگی کی یاد دہانیاں",
+  "No payment for": "ادائیگی نہیں",
+  "days": "دن",
+  "Never paid": "کبھی ادائیگی نہیں",
+  "Top Products": "سرفہرست مصنوعات",
+  "This month · by revenue": "اس ماہ · آمدنی کے لحاظ سے",
+  "No sales this month yet.": "اس ماہ ابھی کوئی فروخت نہیں۔",
+  "Quick Actions": "فوری کام",
+  "Total": "کل",
+  "Others": "دیگر",
+  "Send reminder": "یاد دہانی بھیجیں",
+  "No overdue customers.": "کوئی واجب الادا گاہک نہیں۔",
+  "No outstanding balances.": "کوئی بقایا نہیں۔",
+  "Return": "واپسی",
+  "Booking": "بکنگ",
+};
+Object.entries(DASH_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
 
-  const monthSales = useMemo(() => {
-    const m = todayISO().slice(0, 7);
-    return invoices.filter((i) => i.date.startsWith(m) && !isInvoiceCancelled(i)).reduce((s, i) => s + i.total, 0);
-  }, [invoices]);
+function dashShortMoney(n) {
+  const v = Number(n) || 0;
+  const a = Math.abs(v);
+  if (a >= 10000000) return `Rs ${(v / 10000000).toFixed(2)}Cr`;
+  if (a >= 100000) return `Rs ${(v / 100000).toFixed(a >= 1000000 ? 1 : 2)}L`;
+  if (a >= 1000) return `Rs ${(v / 1000).toFixed(0)}K`;
+  return `Rs ${Math.round(v)}`;
+}
 
-  const activeLeads = leads.filter((l) => l.status !== "Won" && l.status !== "Lost").length;
-  const openBookings = bookings.filter((b) => computeBookingState(b, invoices, payments).isOpen).length;
+function dashPct(now, before) {
+  if (!before) return now > 0 ? null : 0;
+  return Math.round(((now - before) / Math.abs(before)) * 1000) / 10;
+}
 
-  const recentInvoices = [...invoices].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 6);
+function dashDaysAgoISO(n) {
+  const d = parseDateValue(todayISO());
+  d.setDate(d.getDate() - n);
+  return dateToLocalISO(d);
+}
 
-  // Feature 8 — Promise dashboard cards
-  const activePromises = useMemo(() => promises.filter((p) => p.status !== "Deleted").map(promiseWithComputed), [promises]);
-  const t = todayISO();
-  const in7 = new Date(); in7.setDate(in7.getDate() + 7);
-  const in7ISO = dateToLocalISO(in7);
-  const todaysPromises = activePromises.filter((p) => p.expectedDate === t && (p.status === "Pending" || p.status === "Partially Paid"));
-  const upcomingPromises = activePromises.filter((p) => p.expectedDate > t && p.expectedDate <= in7ISO && (p.status === "Pending" || p.status === "Partially Paid"));
-  const overduePromises = activePromises.filter((p) => p.status === "Broken Promise");
-  const pendingPromises = activePromises.filter((p) => p.status === "Pending" || p.status === "Partially Paid");
-  const completedPromises = activePromises.filter((p) => p.status === "Completed");
-  const brokenPromises = activePromises.filter((p) => p.status === "Broken Promise");
-  const totalPromisedAmount = activePromises.reduce((s, p) => s + (Number(p.amount) || 0), 0);
-  const promiseCustomers = new Set(activePromises.map((p) => p.customerId)).size;
+function Sparkline({ points, color, w = 72, h = 28 }) {
+  const pts = points && points.length ? points : [0, 0];
+  const max = Math.max(...pts), min = Math.min(...pts);
+  const d = pts.map((v, i) => `${i ? "L" : "M"}${((i / Math.max(1, pts.length - 1)) * w).toFixed(1)} ${(h - 2 - ((v - min) / (max - min || 1)) * (h - 4)).toFixed(1)}`).join(" ");
+  const gid = React.useMemo(() => "sp" + Math.random().toString(36).slice(2, 8), []);
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="shrink-0" aria-hidden="true">
+      <defs>
+        <linearGradient id={gid} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stopColor={color} stopOpacity=".35" />
+          <stop offset="1" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={`${d} L${w} ${h} L0 ${h}Z`} fill={`url(#${gid})`} className="ct-rise" />
+      <path d={d} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" pathLength="1" className="ct-draw" />
+    </svg>
+  );
+}
+
+function DashTrend({ pct, invert }) {
+  if (pct === undefined) return null;
+  if (pct == null) return <span className="text-[11px] font-bold text-emerald-400">{t("New")}</span>;
+  if (pct === 0) return <span className="text-[11px] font-bold ct-t3">—</span>;
+  const up = pct > 0;
+  const good = invert ? !up : up;
+  return <span className={`text-[11px] font-bold ${good ? "text-emerald-400" : "text-rose-400"}`}>{up ? "▲" : "▼"} {Math.abs(pct)}%</span>;
+}
+
+function DashKpi({ label, value, money = true, pct, invert, spark, color, sub, delay = 0, tone, className = "" }) {
+  return (
+    <div className={`ct-card ct-lift ct-rise p-4 min-w-0 ${className}`} style={{ animationDelay: `${delay}s` }}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="text-[12px] ct-t2 font-medium truncate min-w-0">{t(label)}</div>
+        <span className="shrink-0 whitespace-nowrap"><DashTrend pct={pct} invert={invert} /></span>
+      </div>
+      <div className="flex items-end justify-between gap-2 mt-2">
+        <div className={`ct-display text-[17px] sm:text-[21px] font-bold tabular-nums whitespace-nowrap ${tone || "ct-h"}`}>
+          <CountUp value={value} format={money ? fmtMoney : (n) => String(Math.round(n))} />
+        </div>
+        <span className="hidden sm:block"><Sparkline points={spark} color={color} w={60} h={26} /></span>
+      </div>
+      <div className="text-[11px] ct-t3 mt-1 truncate">{sub}</div>
+    </div>
+  );
+}
+
+function DashSectionTitle({ title, sub, right }) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <div className="ct-display text-[16px] font-bold ct-h">{t(title)}</div>
+        {sub && <div className="text-[12px] ct-t3">{sub}</div>}
+      </div>
+      {right}
+    </div>
+  );
+}
+
+function DashSalesChart({ months }) {
+  const W = 640, H = 170;
+  const max = Math.max(1, ...months.map((m) => Math.max(m.sales, m.collected))) * 1.12;
+  const bw = W / months.length;
+  const y = (v) => H - (v / max) * H;
+  const line = months.map((m, i) => `${i ? "L" : "M"}${(i * bw + bw / 2).toFixed(1)} ${y(m.collected).toFixed(1)}`).join(" ");
+  const last = months[months.length - 1];
+  return (
+    <svg className="w-full h-full min-h-[190px]" viewBox={`0 -40 ${W} ${H + 64}`} preserveAspectRatio="none" role="img" aria-label="Sales vs collection chart">
+      <defs>
+        <linearGradient id="ctBarHi" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#6ee7b7" /><stop offset="1" stopColor="#059669" /></linearGradient>
+      </defs>
+      {[0, 1, 2, 3].map((k) => <line key={k} x1="0" x2={W} y1={(k * H) / 3} y2={(k * H) / 3} stroke="rgba(148,163,184,.12)" vectorEffect="non-scaling-stroke" />)}
+      {months.map((m, i) => (
+        <rect key={m.key} className="ct-bar" style={{ animationDelay: `${i * 0.04}s` }}
+          x={(i * bw + bw * 0.2).toFixed(1)} y={y(m.sales).toFixed(1)} width={(bw * 0.6).toFixed(1)} height={Math.max(0, H - y(m.sales)).toFixed(1)}
+          rx="5" fill={i === months.length - 1 ? "url(#ctBarHi)" : "rgba(148,163,184,.22)"}>
+          <title>{`${m.label}: ${fmtMoney(m.sales)} / ${fmtMoney(m.collected)}`}</title>
+        </rect>
+      ))}
+      <path d={line} fill="none" stroke="#a5b4fc" strokeWidth="2.5" strokeLinejoin="round" pathLength="1" className="ct-draw" vectorEffect="non-scaling-stroke" />
+      {months.map((m, i) => (
+        <circle key={m.key + "c"} cx={(i * bw + bw / 2).toFixed(1)} cy={y(m.collected).toFixed(1)} r="3.2" fill="#0b1220" stroke="#a5b4fc" strokeWidth="2" vectorEffect="non-scaling-stroke" className="ct-rise" style={{ animationDelay: `${0.6 + i * 0.04}s` }} />
+      ))}
+      <g transform={`translate(${Math.max(0, (months.length - 1) * bw - 64)},${Math.max(-38, y(last.sales) - 40)})`}>
+        <g className="ct-rise" style={{ animationDelay: ".9s" }}>
+          <rect width="108" height="30" rx="8" fill="#0f172a" stroke="rgba(52,211,153,.55)" />
+          <text x="54" y="19.5" textAnchor="middle" fontSize="12.5" fontWeight="700" fill="#fff">{dashShortMoney(last.sales)}</text>
+        </g>
+      </g>
+      {months.map((m, i) => (
+        <text key={m.key + "t"} x={(i * bw + bw / 2).toFixed(1)} y={H + 18} textAnchor="middle" fontSize="11.5" fill={i === months.length - 1 ? "#34d399" : "#64748b"} fontWeight={i === months.length - 1 ? 700 : 500}>{m.label}</text>
+      ))}
+    </svg>
+  );
+}
+
+function DashDonut({ segments, total }) {
+  const colors = ["#34d399", "#a5b4fc", "#e9c77b", "#38bdf8", "#64748b"];
+  let offset = 25;
+  return (
+    <svg width="112" height="112" viewBox="0 0 42 42" className="shrink-0" role="img" aria-label="Top products">
+      <circle cx="21" cy="21" r="15.9" fill="none" stroke="rgba(148,163,184,.12)" strokeWidth="5.5" />
+      {segments.map((s, i) => {
+        const v = total > 0 ? (s.value / total) * 100 : 0;
+        const el = (
+          <circle key={s.name} cx="21" cy="21" r="15.9" fill="none" stroke={colors[i % colors.length]} strokeWidth="5.5"
+            strokeDasharray={`${Math.max(0, v - 1)} ${100 - Math.max(0, v - 1)}`} strokeDashoffset={offset} className="ct-rise" style={{ animationDelay: `${0.2 + i * 0.1}s` }} />
+        );
+        offset -= v;
+        return el;
+      })}
+      <text x="21" y="20.5" textAnchor="middle" fontSize="5.2" fontWeight="800" className="fill-current ct-h">{dashShortMoney(total).replace("Rs ", "")}</text>
+      <text x="21" y="26" textAnchor="middle" fontSize="3.2" fill="#64748b">TOTAL</text>
+    </svg>
+  );
+}
+
+function Dashboard({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, settings, currentUser, onOpenPromises, onNavigate, onNewInvoice, onOpenInvoice }) {
+  const { language } = useLanguage();
+  const today = todayISO();
+  const go = (p) => { if (onNavigate) onNavigate(p); };
+
+  const data = useMemo(() => {
+    const liveInv = invoices.filter((i) => !isInvoiceCancelled(i));
+    const livePay = payments.filter((p) => !isPaymentLinkedToCancelledInvoice(p, invoices));
+    const payAmt = (p) => (p.kind === "Refund" ? -1 : 1) * (Number(p.amount) || 0);
+    const sumInv = (pred) => liveInv.reduce((s, i) => (pred(i.date || "") ? s + (Number(i.total) || 0) : s), 0);
+    const sumPay = (pred, extra = () => true) => livePay.reduce((s, p) => (pred(p.date || "") && extra(p) ? s + payAmt(p) : s), 0);
+
+    const days = Array.from({ length: 14 }, (_, k) => dashDaysAgoISO(13 - k));
+    const salesByDay = days.map((d) => sumInv((x) => x === d));
+    const payByDay = days.map((d) => sumPay((x) => x === d));
+    const yesterday = days[12];
+    const todaySales = salesByDay[13];
+    const todayCount = liveInv.filter((i) => i.date === today).length;
+    const weekStart = days[7], lastWeekStart = days[0];
+    const collectedWeek = sumPay((d) => d >= weekStart && d <= today);
+    const collectedLastWeek = sumPay((d) => d >= lastWeekStart && d < weekStart);
+    const weekPayCount = livePay.filter((p) => p.date >= weekStart && p.date <= today && p.kind !== "Refund").length;
+
+    const month = today.slice(0, 7);
+    const dayOfMonth = Number(today.slice(8, 10));
+    const prev = parseDateValue(month + "-01"); prev.setMonth(prev.getMonth() - 1);
+    const prevMonth = dateToLocalISO(prev).slice(0, 7);
+    const monthSales = sumInv((d) => d.startsWith(month));
+    const prevMonthSameDays = sumInv((d) => d.startsWith(prevMonth) && Number(d.slice(8, 10)) <= dayOfMonth);
+    const cashMonth = sumPay((d) => d.startsWith(month), (p) => String(p.method || "Cash").toLowerCase() === "cash");
+    const cashPrevSame = sumPay((d) => d.startsWith(prevMonth) && Number(d.slice(8, 10)) <= dayOfMonth, (p) => String(p.method || "Cash").toLowerCase() === "cash");
+
+    const months = Array.from({ length: 12 }, (_, k) => {
+      const d = parseDateValue(month + "-01"); d.setMonth(d.getMonth() - (11 - k));
+      const key = dateToLocalISO(d).slice(0, 7);
+      return {
+        key, label: d.toLocaleDateString("en-GB", { month: "short" }),
+        sales: sumInv((x) => x.startsWith(key)), collected: sumPay((x) => x.startsWith(key)),
+      };
+    });
+
+    const outById = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+    const withOut = customers.map((c) => ({ c, out: outById[c.id] || 0 })).filter((x) => x.out > 0.5).sort((a, b) => b.out - a.out);
+    const outstandingTotal = customers.reduce((s, c) => s + (outById[c.id] || 0), 0);
+    const overLimit = withOut.filter(({ c, out }) => Number(c.creditLimit) > 0 && out > Number(c.creditLimit));
+
+    const lastPay = {};
+    livePay.forEach((p) => { if (p.kind !== "Refund" && (!lastPay[p.customerId] || p.date > lastPay[p.customerId])) lastPay[p.customerId] = p.date; });
+    const firstInv = {};
+    liveInv.forEach((i) => { if (!firstInv[i.customerId] || i.date < firstInv[i.customerId]) firstInv[i.customerId] = i.date; });
+    const reminders = withOut
+      .map(({ c, out }) => {
+        const since = lastPay[c.id] || firstInv[c.id];
+        const daysSince = since ? -bookingDaysUntil(since) : null;
+        return { c, out, daysSince, neverPaid: !lastPay[c.id] };
+      })
+      .filter((r) => r.daysSince == null || r.daysSince >= 15)
+      .sort((a, b) => (b.daysSince || 9999) - (a.daysSince || 9999) || b.out - a.out)
+      .slice(0, 4);
+
+    const prodTotals = {};
+    liveInv.filter((i) => (i.date || "").startsWith(month)).forEach((i) => (i.items || []).forEach((it) => {
+      const k = String(it.name || "").trim() || "Item";
+      prodTotals[k] = (prodTotals[k] || 0) + (Number(it.total ?? it.qty * it.price) || 0);
+    }));
+    const prodList = Object.entries(prodTotals).sort((a, b) => b[1] - a[1]);
+    const prodTotal = prodList.reduce((s, [, v]) => s + v, 0);
+    const topProducts = prodList.slice(0, 4).map(([name, value]) => ({ name, value }));
+    const othersVal = prodList.slice(4).reduce((s, [, v]) => s + v, 0);
+    if (othersVal > 0) topProducts.push({ name: "Others", value: othersVal });
+
+    const qtyIn = (from, to) => {
+      const m = {};
+      liveInv.filter((i) => i.date >= from && i.date <= to).forEach((i) => (i.items || []).forEach((it) => {
+        const k = String(it.name || "").trim(); if (!k) return;
+        m[k] = (m[k] || 0) + (Number(it.qty) || 0);
+      }));
+      return m;
+    };
+    const qThis = qtyIn(weekStart, today), qLast = qtyIn(lastWeekStart, dashDaysAgoISO(7));
+    let demand = null;
+    Object.keys(qThis).forEach((k) => {
+      const p = qLast[k] ? ((qThis[k] - qLast[k]) / qLast[k]) * 100 : null;
+      if (p != null && Math.abs(p) >= 15 && (!demand || Math.abs(p) > Math.abs(demand.pct))) demand = { name: k, pct: Math.round(p) };
+    });
+
+    const act = promises.filter((p) => p.status !== "Deleted").map(promiseWithComputed);
+    const todaysPromises = act.filter((p) => p.expectedDate === today && (p.status === "Pending" || p.status === "Partially Paid"));
+    const broken = act.filter((p) => p.status === "Broken Promise");
+    const in7 = dashDaysAgoISO(-7);
+    const upcoming = act.filter((p) => p.expectedDate > today && p.expectedDate <= in7 && (p.status === "Pending" || p.status === "Partially Paid"));
+    const completedP = act.filter((p) => p.status === "Completed");
+    const keptBase = completedP.length + broken.length;
+
+    const bookingStates = bookings.map((b) => ({ b, s: computeBookingState(b, invoices, payments) }));
+    const expiring = bookingStates.filter((x) => x.s.expiringSoon);
+    const openBookings = bookingStates.filter((x) => x.s.isOpen).length;
+    const activeLeads = leads.filter((l) => l.status !== "Won" && l.status !== "Lost").length;
+
+    const insights = [];
+    if (overLimit.length) insights.push({ icon: "alert", tone: "text-rose-400", go: "customers",
+      title: `${overLimit.length} ${t("customers")} — ${t("Over limit")}`,
+      sub: overLimit.slice(0, 3).map((x) => x.c.name).join(", ") + ` · ${fmtMoney(overLimit.reduce((s, x) => s + x.out - Number(x.c.creditLimit), 0))}` });
+    if (todaysPromises.length) insights.push({ icon: "clock", tone: "text-[#e9c77b]", go: "promises",
+      title: `${t("Today's Promises")}: ${fmtMoney(todaysPromises.reduce((s, p) => s + p.remainingAmount, 0))}`,
+      sub: todaysPromises.slice(0, 3).map((p) => p.customerName).join(", ") });
+    if (broken.length) insights.push({ icon: "alert", tone: "text-rose-400", go: "promises",
+      title: `${broken.length} ${t("Broken Promises")}`,
+      sub: fmtMoney(broken.reduce((s, p) => s + p.remainingAmount, 0)) });
+    if (expiring.length) insights.push({ icon: "calendar", tone: "text-sky-400", go: "bookings",
+      title: `${expiring.length} ${t("Expiring Soon")} — ${t("Advance Booking")}`,
+      sub: expiring.slice(0, 3).map((x) => `${x.b.code} ${x.b.customerName}`).join(", ") });
+    if (demand) insights.push({ icon: demand.pct > 0 ? "trend" : "down", tone: demand.pct > 0 ? "text-emerald-400" : "text-amber-400", go: "reports",
+      title: `${demand.name} ${demand.pct > 0 ? "▲" : "▼"} ${Math.abs(demand.pct)}% ${t("vs last week")}`,
+      sub: `${fmtQty(qThis[demand.name])} · ${t("This Week")}` });
+
+    return {
+      todaySales, yesterdaySales: salesByDay[12], todayCount, salesSpark: salesByDay.slice(7),
+      collectedWeek, collectedLastWeek, weekPayCount, paySpark: payByDay.slice(7),
+      monthSales, prevMonthSameDays, cashMonth, cashPrevSame,
+      outstandingTotal, outCount: withOut.length, outSpark: months.slice(-7).map((m) => Math.max(0, m.sales - m.collected)),
+      months, top: withOut.slice(0, 5), topMax: withOut[0]?.out || 1, reminders, topProducts, prodTotal, insights,
+      todaysPromises, broken, upcoming, completedP, keptPct: keptBase ? Math.round((completedP.length / keptBase) * 100) : null,
+      promisedTotal: act.reduce((s, p) => s + (Number(p.amount) || 0), 0),
+      openBookings, activeLeads, yesterday,
+    };
+  }, [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, today, language]);
+
+  const recentInvoices = useMemo(() => [...invoices].sort((a, b) => parseDateValue(b.date) - parseDateValue(a.date) || String(b.number).localeCompare(String(a.number))).slice(0, 6), [invoices]);
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+  const name = currentUser?.name || currentUser?.username || "";
+
+  const statusPill = (inv) => {
+    if (inv.docStatus === "Cancelled") return ["Cancelled", "#94a3b8"];
+    if (inv.status === "Paid") return ["Paid", "#34d399"];
+    if (inv.status === "Partial") return ["Partial", "#38bdf8"];
+    return ["Unpaid", "#fb7185"];
+  };
+
+  const reminderMsg = (r) => `Assalam-o-Alaikum ${r.c.name},\n\n${settings?.companyName || ""} ki taraf se yaad dehani: aap ke account mein ${fmtMoney(r.out)} bakaya hain. Barah-e-karam jald ada kar dein.\n\nShukriya!`;
+
+  const quick = [
+    { icon: "plus", label: "New Invoice", onClick: onNewInvoice, primary: true, key: "N" },
+    { icon: "wallet", label: "Payments", onClick: () => go("payments"), key: "P" },
+    { icon: "calendar", label: "Booking", onClick: () => go("bookings"), key: "B" },
+    { icon: "undo", label: "Return", onClick: () => go("returns"), key: "R" },
+  ];
 
   return (
-    <div>
-      <h2 className="text-xl font-black uppercase tracking-tight mb-4">Dashboard</h2>
-
-      {/* Feature 9 — Home Alert: today's promise collections */}
-      {todaysPromises.length > 0 && (
-        <div className="bg-amber-50 border border-amber-300 p-4 mb-4 cursor-pointer hover:bg-amber-100" onClick={onOpenPromises}>
-          <div className="text-[11px] uppercase tracking-wide font-black text-amber-700 mb-2">Today's Promise Collection</div>
-          <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
-            {todaysPromises.map((p) => (
-              <div key={p.id}><span className="font-bold">{p.customerName}</span> — <span className="font-black text-amber-700">{fmtMoney(p.remainingAmount)}</span></div>
-            ))}
-          </div>
+    <div className="space-y-4">
+      {/* Greeting + quick actions */}
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 ct-rise">
+        <div>
+          <div className="text-[13px] ct-t2">{fmtDate(today)} · {t(greeting)}{name ? `, ${name}` : ""} 👋</div>
+          <h2 className="ct-display text-[26px] sm:text-[30px] font-bold ct-h leading-tight">{t("Business overview")}</h2>
         </div>
+        <div className="grid grid-cols-4 gap-2 md:flex">
+          {quick.map((q) => (
+            <button key={q.label} type="button" onClick={q.onClick}
+              className={`ct-lift flex flex-col md:flex-row items-center gap-1.5 md:gap-2 rounded-xl px-3 py-2.5 text-[12px] md:text-[13px] font-bold ${q.primary ? "ct-em-btn" : "ct-chip ct-h"}`}>
+              <UiIcon name={q.icon} className="w-[18px] h-[18px]" />
+              <span className="whitespace-nowrap">{t(q.label)}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {data.todaysPromises.length > 0 && (
+        <button type="button" onClick={onOpenPromises} className="ct-rise w-full text-start rounded-2xl border border-[#e9c77b]/30 bg-gradient-to-r from-[#e9c77b]/12 to-transparent px-4 py-3 flex items-center gap-3 ct-lift">
+          <span className="w-9 h-9 rounded-xl ct-gold-bg flex items-center justify-center shrink-0"><UiIcon name="clock" className="w-[18px] h-[18px]" /></span>
+          <div className="min-w-0">
+            <div className="text-[12px] font-bold text-[#e9c77b]">{t("Today's Promise Collection")}</div>
+            <div className="text-[13px] ct-h truncate">
+              {data.todaysPromises.map((p) => `${p.customerName} — ${fmtMoney(p.remainingAmount)}`).join("  ·  ")}
+            </div>
+          </div>
+          <span className="ms-auto ct-t2"><UiIcon name="right" className="w-4 h-4" /></span>
+        </button>
       )}
 
-      <div className="flex flex-wrap gap-3 mb-6">
-        <Stat label="Today's Sales" value={fmtMoney(todaySales)} />
-        <Stat label="This Month" value={fmtMoney(monthSales)} />
-        <Stat label="Total Outstanding" value={fmtMoney(outstandingTotal)} accent="text-red-600" />
-        <Stat label="Active Leads" value={activeLeads} />
-        <Stat label="Open Bookings" value={openBookings} />
-        <Stat label="Customers" value={customers.length} />
+      {/* KPI row */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5 gap-3 sm:gap-4">
+        <DashKpi label="Today's Sales" value={data.todaySales} pct={dashPct(data.todaySales, data.yesterdaySales)} spark={data.salesSpark} color="#34d399" sub={`${data.todayCount} ${t("invoices today")}`} delay={0.02} />
+        <DashKpi label="Collected (This Week)" value={data.collectedWeek} pct={dashPct(data.collectedWeek, data.collectedLastWeek)} spark={data.paySpark} color="#34d399" sub={`${data.weekPayCount} ${t("payments")}`} delay={0.06} />
+        <DashKpi label="Total Outstanding" value={data.outstandingTotal} spark={data.outSpark} color="#fb7185" tone="text-rose-300" sub={`${data.outCount} ${t("customers")}`} delay={0.1} />
+        <DashKpi label="Cash (This Month)" value={data.cashMonth} pct={dashPct(data.cashMonth, data.cashPrevSame)} spark={data.paySpark} color="#a5b4fc" sub={t("vs last month")} delay={0.14} />
+        <DashKpi label="This Month Sales" value={data.monthSales} pct={dashPct(data.monthSales, data.prevMonthSameDays)} spark={data.months.slice(-7).map((m) => m.sales)} color="#e9c77b" sub={t("vs last month")} delay={0.18} className="col-span-2 lg:col-span-1" />
       </div>
 
-      <div className="text-xs font-black uppercase tracking-wide text-slate-500 mb-2">Promise To Pay Overview</div>
-      <div className="flex flex-wrap gap-3 mb-6">
-        <Stat label="Today's Promises" value={todaysPromises.length} accent="text-blue-700" />
-        <Stat label="Upcoming (7 Days)" value={upcomingPromises.length} />
-        <Stat label="Overdue Promises" value={overduePromises.length} accent="text-red-600" />
-        <Stat label="Pending Promises" value={pendingPromises.length} />
-        <Stat label="Completed Promises" value={completedPromises.length} accent="text-emerald-600" />
-        <Stat label="Broken Promises" value={brokenPromises.length} accent="text-red-600" />
-        <Stat label="Total Promised Amount" value={fmtMoney(totalPromisedAmount)} />
-        <Stat label="Promise Customers" value={promiseCustomers} />
-      </div>
-
-      <div className="bg-white border border-slate-200">
-        <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">
-          Recent Invoices
-        </div>
-        <table className="w-full text-sm">
-          <tbody>
-            {recentInvoices.length === 0 && (
-              <tr><td className="px-4 py-6 text-slate-400 text-center" colSpan={4}>Koi invoice nahi bana abhi tak.</td></tr>
+      {/* Chart + insights + top outstanding */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+        <section className="ct-card ct-rise xl:col-span-6 p-5 flex flex-col min-h-[300px]" style={{ animationDelay: ".1s" }}>
+          <DashSectionTitle
+            title="Sales vs Collection"
+            sub={`${t("Last 12 months")}`}
+            right={(
+              <div className="flex items-center gap-3 text-[11.5px] ct-t2">
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-gradient-to-b from-emerald-300 to-emerald-600" />{t("Sales")}</span>
+                <span className="flex items-center gap-1.5"><span className="w-3 h-[2px] rounded bg-indigo-300" />{t("Collection")}</span>
+              </div>
             )}
-            {recentInvoices.map((inv) => (
-              <tr key={inv.id} className="border-t border-slate-100">
-                <td className="px-4 py-2 font-bold">{inv.number}</td>
-                <td className="px-4 py-2">{inv.customerName}</td>
-                <td className="px-4 py-2 text-slate-500">{fmtDate(inv.date)}</td>
-                <td className="px-4 py-2 text-right font-bold">{fmtMoney(inv.total)}</td>
-              </tr>
+          />
+          <div className="flex-1 mt-2"><DashSalesChart months={data.months} /></div>
+        </section>
+
+        <section className="ct-card ct-rise xl:col-span-3 p-5 relative overflow-hidden" style={{ animationDelay: ".14s" }}>
+          <div className="absolute -top-16 -right-16 w-48 h-48 rounded-full bg-[#e9c77b]/10 blur-2xl" />
+          <div className="relative flex items-center gap-2 ct-display text-[16px] font-bold ct-h">
+            <span className="w-7 h-7 rounded-lg ct-gold-bg flex items-center justify-center"><UiIcon name="spark" className="w-4 h-4" /></span>
+            {t("Smart Insights")}
+          </div>
+          <div className="relative mt-3 space-y-2.5">
+            {data.insights.length === 0 && (
+              <div className="rounded-xl ct-chip p-3 text-[12.5px] ct-t2 flex items-center gap-2"><span className="text-emerald-400"><UiIcon name="check" className="w-4 h-4" /></span>{t("All good — nothing needs attention right now.")}</div>
+            )}
+            {data.insights.slice(0, 4).map((ins, i) => (
+              <button key={i} type="button" onClick={() => go(ins.go)} className="ct-lift ct-rise w-full text-start flex gap-3 rounded-xl ct-chip p-2.5" style={{ animationDelay: `${0.2 + i * 0.07}s` }}>
+                <span className={`${ins.tone} mt-0.5`}><UiIcon name={ins.icon} className="w-4 h-4" /></span>
+                <div className="min-w-0">
+                  <div className="text-[12.5px] ct-h font-semibold leading-snug">{ins.title}</div>
+                  {ins.sub && <div className="text-[11px] ct-t3 mt-0.5 truncate">{ins.sub}</div>}
+                </div>
+              </button>
             ))}
-          </tbody>
-        </table>
+          </div>
+        </section>
+
+        <section className="ct-card ct-rise xl:col-span-3 p-5 flex flex-col" style={{ animationDelay: ".18s" }}>
+          <DashSectionTitle title="Top Outstanding" right={<button type="button" onClick={() => go("customers")} className="text-[12px] font-semibold text-emerald-400 hover:underline">{t("View all")}</button>} />
+          <div className="mt-3 space-y-3">
+            {data.top.length === 0 && <div className="text-[12.5px] ct-t3">{t("No outstanding balances.")}</div>}
+            {data.top.map(({ c, out }, i) => (
+              <div key={c.id} className="flex items-center gap-3">
+                <div className={`w-8 h-8 rounded-lg bg-gradient-to-br ${uiAvatarGradient(c.id)} text-white text-[11px] font-bold flex items-center justify-center shrink-0`}>{uiInitials(c.name, "?")}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex justify-between gap-2 text-[12.5px]">
+                    <span className="ct-h font-semibold truncate">{c.name}</span>
+                    <b className="ct-display text-rose-300 whitespace-nowrap">{fmtMoney(out)}</b>
+                  </div>
+                  <div className="mt-1.5 h-1.5 rounded-full bg-slate-500/15 overflow-hidden">
+                    <div className="ct-barx h-full rounded-full bg-gradient-to-r from-rose-500 to-orange-400" style={{ width: `${Math.max(4, (out / data.topMax) * 100)}%`, animationDelay: `${0.3 + i * 0.08}s` }} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          {data.outCount > 0 && (
+            <div className="mt-auto pt-4">
+              <div className="flex items-center justify-between rounded-xl bg-rose-500/10 border border-rose-400/20 px-3.5 py-2.5">
+                <span className="text-[12px] ct-t2">{t("Total")} · {data.outCount} {t("customers")}</span>
+                <b className="ct-display text-[16px] text-rose-300">{fmtMoney(data.outstandingTotal)}</b>
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {/* Recent invoices + reminders + products/promises */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+        <section className="ct-card ct-rise xl:col-span-6 overflow-hidden" style={{ animationDelay: ".2s" }}>
+          <div className="px-5 py-4"><DashSectionTitle title="Recent Invoices" right={<button type="button" onClick={() => go("invoices")} className="text-[12px] font-semibold text-emerald-400 hover:underline">{t("View all")}</button>} /></div>
+          {recentInvoices.length === 0 && <div className="px-5 pb-6 text-[13px] ct-t3">{t("Koi invoice nahi bana abhi tak.")}</div>}
+          {recentInvoices.map((inv, i) => {
+            const [label, col] = statusPill(inv);
+            return (
+              <div key={inv.id} className="ct-rise flex items-center gap-3 px-5 py-2.5 border-t ct-line hover:bg-slate-500/5 cursor-pointer" style={{ animationDelay: `${0.25 + i * 0.04}s` }} onClick={() => onOpenInvoice && onOpenInvoice(inv.id)}>
+                <div className={`w-9 h-9 rounded-xl bg-gradient-to-br ${uiAvatarGradient(inv.customerId)} text-white text-[11px] font-bold flex items-center justify-center shrink-0`}>{uiInitials(inv.customerName, "?")}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[13px] ct-h font-semibold truncate">{inv.customerName}</div>
+                  <div className="text-[11px] ct-t3">{inv.number} · {fmtDate(inv.date)}</div>
+                </div>
+                <span className="hidden sm:inline-block text-[10.5px] font-bold rounded-full px-2.5 py-0.5" style={{ color: col, background: `${col}1f`, border: `1px solid ${col}38` }}>{tStatus(label)}</span>
+                <div className="text-end ct-display font-semibold ct-h tabular-nums text-[13.5px] whitespace-nowrap">{fmtMoney(inv.total)}</div>
+                {inv.customerPhone ? (
+                  <a href={waLink(inv.customerPhone, buildInvoiceWaMessage(inv, settings || {}))} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+                    className="w-8 h-8 rounded-lg ct-chip flex items-center justify-center text-emerald-400 hover:scale-105 transition shrink-0" title={t("Share on WhatsApp")}>
+                    <UiIcon name="wa" className="w-4 h-4" />
+                  </a>
+                ) : <span className="w-8 shrink-0" />}
+              </div>
+            );
+          })}
+        </section>
+
+        <section className="ct-card ct-rise xl:col-span-3 p-5 flex flex-col" style={{ animationDelay: ".24s" }}>
+          <DashSectionTitle title="Payment Reminders" />
+          <div className="mt-3 space-y-2.5">
+            {data.reminders.length === 0 && <div className="text-[12.5px] ct-t3">{t("No overdue customers.")}</div>}
+            {data.reminders.map((r) => (
+              <div key={r.c.id} className="flex items-center gap-2.5">
+                <span className="w-2 h-2 rounded-full bg-rose-400 shadow-[0_0_8px_#fb7185] shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12.5px] ct-h font-semibold truncate">{r.c.name}</div>
+                  <div className="text-[11px] ct-t3">{r.neverPaid ? t("Never paid") : `${t("No payment for")} ${r.daysSince} ${t("days")}`}</div>
+                </div>
+                <div className="ct-display text-[13px] font-bold text-rose-300 whitespace-nowrap">{dashShortMoney(r.out)}</div>
+                {r.c.phone ? (
+                  <a href={waLink(r.c.phone, reminderMsg(r))} target="_blank" rel="noreferrer" className="w-8 h-8 rounded-lg ct-em-btn flex items-center justify-center shrink-0" title={t("Send reminder")}>
+                    <UiIcon name="wa" className="w-4 h-4" />
+                  </a>
+                ) : <span className="w-8 shrink-0" />}
+              </div>
+            ))}
+          </div>
+          <div className="mt-auto pt-4 grid grid-cols-3 gap-2 text-center">
+            {[["Today's Promises", data.todaysPromises.length, "text-[#e9c77b]"], ["Upcoming (7 Days)", data.upcoming.length, "ct-h"], ["Broken Promises", data.broken.length, "text-rose-400"]].map(([l, v, c]) => (
+              <button key={l} type="button" onClick={onOpenPromises} className="rounded-xl ct-chip px-2 py-2 ct-lift">
+                <div className={`ct-display text-[18px] font-bold ${c}`}><CountUp value={v} /></div>
+                <div className="text-[10px] ct-t3 leading-tight">{t(l)}</div>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="ct-card ct-rise xl:col-span-3 p-5" style={{ animationDelay: ".28s" }}>
+          <DashSectionTitle title="Top Products" sub={t("This month · by revenue")} />
+          {data.topProducts.length === 0 ? (
+            <div className="mt-4 text-[12.5px] ct-t3">{t("No sales this month yet.")}</div>
+          ) : (
+            <div className="flex items-center gap-4 mt-3">
+              <DashDonut segments={data.topProducts} total={data.prodTotal} />
+              <div className="space-y-1.5 text-[12px] min-w-0 flex-1">
+                {data.topProducts.map((p, i) => (
+                  <div key={p.name} className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: ["#34d399", "#a5b4fc", "#e9c77b", "#38bdf8", "#64748b"][i] }} />
+                    <span className="ct-t2 truncate flex-1">{p.name === "Others" ? t("Others") : p.name}</span>
+                    <b className="ct-h">{Math.round((p.value / (data.prodTotal || 1)) * 100)}%</b>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-2 mt-4">
+            <button type="button" onClick={() => go("bookings")} className="rounded-xl ct-chip px-3 py-2.5 text-start ct-lift">
+              <div className="text-[11px] ct-t3">{t("Open Bookings")}</div>
+              <div className="ct-display text-[18px] font-bold ct-h"><CountUp value={data.openBookings} /></div>
+            </button>
+            <button type="button" onClick={() => go("leads")} className="rounded-xl ct-chip px-3 py-2.5 text-start ct-lift">
+              <div className="text-[11px] ct-t3">{t("Active Leads")}</div>
+              <div className="ct-display text-[18px] font-bold ct-h"><CountUp value={data.activeLeads} /></div>
+            </button>
+          </div>
+        </section>
       </div>
     </div>
   );
@@ -2759,6 +3711,7 @@ function invoiceStatusBanner(invoice) {
 }
 
 function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, onClose, onEdit, onCancelInvoice, onGoToReturn, onGoToExchange, onCreateNewFromInvoice }) {
+  const [printOpen, setPrintOpen] = useState(false);
   const banner = invoiceStatusBanner(invoice);
   const bannerCls = {
     emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
@@ -2965,7 +3918,7 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
       )}
 
       <div className="mt-4 flex gap-2 flex-wrap print:hidden">
-        <Btn onClick={() => window.print()}>Print / Save as PDF</Btn>
+        <Btn onClick={() => setPrintOpen(true)}>Print / Save as PDF</Btn>
         <a href={waLink(invoice.customerPhone, buildInvoiceWaMessage(invoice, settings))} target="_blank" rel="noreferrer">
           <Btn variant="dark">Share on WhatsApp</Btn>
         </a>
@@ -2980,6 +3933,7 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
       {!invoice.customerPhone && (
         <div className="text-xs text-red-600 mt-2 print:hidden">Is customer ka phone number save nahi hai — WhatsApp share ke liye Customers tab mein add karein.</div>
       )}
+      {printOpen && <InvoicePrintDialog invoice={invoice} settings={settings} rs={rs} onClose={() => setPrintOpen(false)} />}
     </Modal>
   );
 }
@@ -3003,7 +3957,7 @@ function buildInvoiceWaMessage(invoice, settings) {
   return lines.join("\n");
 }
 
-function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, commissionTransactions, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange }) {
+function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, commissionTransactions, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange, newInvoiceSignal = 0 }) {
   const [showForm, setShowForm] = useState(false);
   const [editingInvoice, setEditingInvoice] = useState(null);
   const [viewing, setViewing] = useState(null);
@@ -3012,6 +3966,11 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
   useEffect(() => {
     if (prefill) setShowForm(true);
   }, [prefill]);
+
+  // "New Invoice" pressed in the header, dashboard or mobile "+" button.
+  useEffect(() => {
+    if (newInvoiceSignal) { setViewing(null); setEditingInvoice(null); setShowForm(true); }
+  }, [newInvoiceSignal]);
 
   // Opened from global search / linked-record navigation.
   useEffect(() => {
@@ -3865,6 +4824,7 @@ function PaymentReceipt({ payment, customers, invoices, payments, returns, excha
   const balances = computePaymentReceiptBalances(payment, customer, invoices, payments, returns, exchanges, promises || [], transfers, adjustments);
   const receiptNo = paymentReceiptNo(payment);
   const bodyProps = { payment, customer, settings, balances };
+  const [printOpen, setPrintOpen] = useState(false);
 
   // Print and Save as PDF both go through the app's existing window.print()
   // mechanism. For Save as PDF the page title is switched for the duration
@@ -3892,10 +4852,13 @@ function PaymentReceipt({ payment, customers, invoices, payments, returns, excha
         <PaymentReceiptBody {...bodyProps} />
         {showProof && <PaymentProofReceiptLine record={proofRecord} onView={onViewProof} />}
         <div className="mt-4 flex gap-2 flex-wrap">
-          <Btn onClick={() => printReceipt(false)}>Print</Btn>
-          <Btn variant="dark" onClick={() => printReceipt(true)}>Save as PDF</Btn>
+          <Btn onClick={() => setPrintOpen(true)}>Print / Save as PDF</Btn>
           <Btn variant="ghost" onClick={onClose}>Close</Btn>
         </div>
+        {printOpen && (
+          <ReceiptPrintDialog payment={payment} customer={customer} settings={settings} balances={balances}
+            proofRecord={proofRecord || null} onClose={() => setPrintOpen(false)} />
+        )}
       </Modal>
       {/* Print/PDF-only copy — same pattern as the Ledger's #print-ledger:
           hidden on screen, forced visible by the @media print rule in
@@ -8370,6 +9333,9 @@ function App() {
   const [splashLogo] = useState(readCachedLogo);
   const [currentUser, setCurrentUser] = useState(null);
   const [page, setPage] = useState("dashboard");
+  const [navOpen, setNavOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [newInvoiceSignal, setNewInvoiceSignal] = useState(0);
   const [prefill, setPrefill] = useState(null);
   const [focusCustomerId, setFocusCustomerId] = useState(null);
   const [focusInvoiceId, setFocusInvoiceId] = useState(null);
@@ -9265,6 +10231,32 @@ function App() {
     ? payments.filter((p) => (p.branchId ? p.branchId === currentUser.branchId : visibleCustomerIds.has(p.customerId)))
     : payments;
 
+  // Premium shell: notifications / sidebar badges and the Ctrl+K search.
+  const shellAlerts = useMemo(() => {
+    if (loading || !currentUser || currentUser.role === "customer") return { list: [], badges: {} };
+    return computeShellAlerts({
+      customers: visibleCustomers, invoices: visibleInvoices, payments: visiblePayments, returns, exchanges,
+      promises, transfers, adjustments, bookings: isBranchScoped ? bookings.filter((b) => visibleCustomerIds.has(b.customerId)) : bookings,
+    });
+  }, [loading, currentUser, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, bookings]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === "k") { e.preventDefault(); setPaletteOpen((v) => !v); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // The customer portal keeps its light design; staff get their chosen theme.
+  useEffect(() => {
+    applyThemeClass(currentUser && currentUser.role === "customer" ? "light" : themeState);
+  }, [currentUser]);
+
+  function goPage(p) { setPage(p); setNavOpen(false); }
+  function openNewInvoice() { setPage("invoices"); setNavOpen(false); setNewInvoiceSignal((n) => n + 1); }
+  function openInvoiceById(id) { setFocusInvoiceId(id); setPage("invoices"); }
+
   function handleLogin(user) { setCurrentUser(user); }
   function handleLogout() { setCurrentUser(null); setPage("dashboard"); }
 
@@ -9318,6 +10310,7 @@ function App() {
         customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments}
         returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
         leads={leads} bookings={bookings} onOpenPromises={() => setPage("promises")}
+        settings={settings} currentUser={currentUser} onNavigate={goPage} onNewInvoice={openNewInvoice} onOpenInvoice={openInvoiceById}
       />
     ),
     customers: (
@@ -9340,6 +10333,7 @@ function App() {
         onBookingFulfilled={onBookingFulfilled} onOrderFulfilled={onOrderFulfilled}
         focusInvoiceId={focusInvoiceId} setFocusInvoiceId={setFocusInvoiceId}
         onGoToReturn={() => setPage("returns")} onGoToExchange={() => setPage("exchange")}
+        newInvoiceSignal={newInvoiceSignal}
       />
     ),
     invoiceHistory: <InvoiceHistoryPage invoices={visibleInvoices} auditLog={auditLog} />,
@@ -9446,24 +10440,41 @@ function App() {
     ),
   };
 
+  const branchLabel = currentUser.branchId
+    ? (branches.find((b) => b.id === currentUser.branchId)?.name || t("Branch"))
+    : (branches.length > 1 ? t("All Branches") : (branches[0]?.name || ""));
+
   return (
     <>
       <I18nDomBridge />
       <PrintStyles />
+      <ThemeStyles />
       {/* Receiving Proof (add-only): current admin / staff user for upload permissions */}
       <RecvSessionUser user={currentUser} />
-      <div className="flex h-screen bg-slate-100 text-slate-900">
-        <Sidebar page={page} setPage={setPage} role={currentUser.role} onLogout={handleLogout} companyName={settings.companyName} logoUrl={settings.logoUrl} />
-        <div className="flex-1 overflow-y-auto">
-          <div className="flex items-center justify-end gap-3 px-6 py-2 border-b border-slate-200 bg-white print:hidden">
-            <span className="text-xs text-slate-500">{t("Welcome,")} <span className="font-bold text-slate-700">{currentUser.name || currentUser.username}</span></span>
-            <LanguageSwitcher compact />
-          </div>
-          <div className="p-6">
-            {pages[page] || pages.dashboard}
-          </div>
+      <div className="ct-app ct-mesh flex h-[100dvh] overflow-hidden">
+        <Sidebar
+          page={page} setPage={goPage} role={currentUser.role} onLogout={handleLogout}
+          companyName={settings.companyName} logoUrl={settings.logoUrl}
+          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={shellAlerts.badges}
+        />
+        <div className="flex-1 min-w-0 flex flex-col">
+          <AppHeader
+            page={page} currentUser={currentUser} alerts={shellAlerts.list}
+            onMenu={() => setNavOpen(true)} onSearch={() => setPaletteOpen(true)} onNewInvoice={openNewInvoice} onGo={goPage}
+          />
+          <main className="ct-content ct-scroll flex-1 overflow-y-auto">
+            <div key={page} className="ct-page max-w-[1600px] mx-auto p-3 sm:p-5 lg:p-7 pb-28 lg:pb-8">
+              {pages[page] || pages.dashboard}
+            </div>
+          </main>
         </div>
       </div>
+      <MobileTabBar page={page} onGo={goPage} onNewInvoice={openNewInvoice} onMore={() => setNavOpen(true)} />
+      <CommandPalette
+        open={paletteOpen} onClose={() => setPaletteOpen(false)} role={currentUser.role}
+        customers={visibleCustomers} invoices={visibleInvoices}
+        onPage={goPage} onCustomer={(id) => openLedger(id)} onInvoice={openInvoiceById}
+      />
     </>
   );
 }
@@ -11070,6 +12081,1017 @@ function PaymentProofReceiptLine({ record, onView }) {
         <button type="button" className="font-bold text-blue-700 hover:underline" onClick={onView} data-pproof="receipt-view">{t("View Payment Proof")}</button>
       )}
     </div>
+  );
+}
+
+/* ============================================================
+   APP SHELL PIECES — header, search (Ctrl+K), notifications,
+   mobile bottom tab bar. Navigation only; nothing is written.
+   ============================================================ */
+
+function computeShellAlerts({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, bookings }) {
+  const today = todayISO();
+  const act = (promises || []).filter((p) => p.status !== "Deleted").map(promiseWithComputed);
+  const todays = act.filter((p) => p.expectedDate === today && (p.status === "Pending" || p.status === "Partially Paid"));
+  const broken = act.filter((p) => p.status === "Broken Promise");
+  const outById = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  const overLimit = (customers || []).filter((c) => Number(c.creditLimit) > 0 && (outById[c.id] || 0) > Number(c.creditLimit));
+  const expiring = (bookings || []).filter((b) => computeBookingState(b, invoices, payments).expiringSoon);
+  const list = [];
+  todays.forEach((p) => list.push({ id: "pt" + p.id, icon: "clock", tone: "text-[#e9c77b]", page: "promises", title: `${p.customerName} — ${fmtMoney(p.remainingAmount)}`, sub: t("Today's Promises") }));
+  broken.forEach((p) => list.push({ id: "pb" + p.id, icon: "alert", tone: "text-rose-400", page: "promises", title: `${p.customerName} — ${fmtMoney(p.remainingAmount)}`, sub: t("Broken Promise") }));
+  overLimit.forEach((c) => list.push({ id: "ol" + c.id, icon: "alert", tone: "text-rose-400", page: "customers", title: `${c.name} — ${fmtMoney(outById[c.id])}`, sub: `${t("Over limit")} (${fmtMoney(c.creditLimit)})` }));
+  expiring.forEach((b) => list.push({ id: "bk" + b.id, icon: "calendar", tone: "text-sky-400", page: "bookings", title: `${b.code} — ${b.customerName}`, sub: `${t("Expiring Soon")} · ${fmtDate(b.expiryDate)}` }));
+  return {
+    list,
+    badges: {
+      promises: todays.length + broken.length || 0,
+      bookings: expiring.length || 0,
+    },
+  };
+}
+
+function NotificationsMenu({ alerts, onGo }) {
+  useLanguage();
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  const count = alerts.length;
+  return (
+    <div className="relative" ref={ref}>
+      <button type="button" onClick={() => setOpen((v) => !v)} className="relative w-10 h-10 rounded-xl ct-chip flex items-center justify-center ct-t2 hover:opacity-90" aria-label={t("Notifications")}>
+        <UiIcon name="bell" className="w-[18px] h-[18px]" />
+        {count > 0 && (
+          <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center ring-2 ring-[#060a13]">{count > 99 ? "99+" : count}</span>
+        )}
+      </button>
+      {open && (
+        <div className="ct-modal-panel absolute end-0 mt-2 w-[330px] max-w-[calc(100vw-24px)] rounded-2xl border border-white/10 bg-[#0e1526] shadow-2xl shadow-black/50 z-50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-white/10 text-[13px] font-bold text-white flex justify-between">{t("Notifications")}<span className="text-slate-500">{count}</span></div>
+          <div className="max-h-[360px] overflow-y-auto">
+            {count === 0 && <div className="px-4 py-6 text-center text-[13px] text-slate-400">{t("No new notifications")}</div>}
+            {alerts.map((a) => (
+              <button key={a.id} type="button" onClick={() => { setOpen(false); onGo(a.page); }} className="w-full text-start flex gap-3 px-4 py-2.5 hover:bg-white/5 border-b border-white/5">
+                <span className={`${a.tone} mt-0.5`}><UiIcon name={a.icon} className="w-4 h-4" /></span>
+                <div className="min-w-0">
+                  <div className="text-[12.5px] text-white font-semibold truncate">{a.title}</div>
+                  <div className="text-[11px] text-slate-500">{a.sub}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CommandPalette({ open, onClose, role, customers, invoices, onPage, onCustomer, onInvoice }) {
+  const { language } = useLanguage();
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState(0);
+  const inputRef = React.useRef(null);
+  useEffect(() => { if (open) { setQ(""); setSel(0); setTimeout(() => inputRef.current && inputRef.current.focus(), 20); } }, [open]);
+
+  const results = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    const pages = NAV_GROUPS.flatMap((g) => g.items.filter((it) => !it.adminOnly || role === "admin").map((it) => ({ kind: "page", id: it.id, icon: it.icon, title: t(it.label), sub: t(g.title), key: it.label })));
+    const pageHits = pages.filter((p) => !s || p.title.toLowerCase().includes(s) || p.key.toLowerCase().includes(s)).slice(0, s ? 6 : 8);
+    if (!s) return pageHits;
+    const custHits = (customers || []).filter((c) => (c.name || "").toLowerCase().includes(s) || (c.phone || "").includes(s)).slice(0, 6)
+      .map((c) => ({ kind: "customer", id: c.id, icon: "users", title: c.name, sub: c.phone || t("Customer") }));
+    const invHits = (invoices || []).filter((i) => (i.number || "").toLowerCase().includes(s) || (i.customerName || "").toLowerCase().includes(s)).slice(0, 6)
+      .map((i) => ({ kind: "invoice", id: i.id, icon: "file", title: `${i.number} — ${i.customerName}`, sub: `${fmtDate(i.date)} · ${fmtMoney(i.total)}` }));
+    return [...pageHits, ...custHits, ...invHits];
+  }, [q, customers, invoices, role, language]);
+
+  function pick(r) {
+    if (!r) return;
+    onClose();
+    if (r.kind === "page") onPage(r.id);
+    else if (r.kind === "customer") onCustomer(r.id);
+    else onInvoice(r.id);
+  }
+
+  if (!open) return null;
+  return (
+    <div className="ct-modal-back fixed inset-0 z-[60] bg-slate-950/60 backdrop-blur-sm flex items-start justify-center p-3 pt-[12vh]" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="ct-modal-panel w-full max-w-xl rounded-2xl border border-white/10 bg-[#0e1526] shadow-2xl shadow-black/60 overflow-hidden">
+        <div className="flex items-center gap-3 px-4 border-b border-white/10">
+          <span className="text-slate-500"><UiIcon name="search" className="w-5 h-5" /></span>
+          <input
+            ref={inputRef}
+            value={q}
+            onChange={(e) => { setQ(e.target.value); setSel(0); }}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") { e.preventDefault(); setSel((n) => Math.min(results.length - 1, n + 1)); }
+              else if (e.key === "ArrowUp") { e.preventDefault(); setSel((n) => Math.max(0, n - 1)); }
+              else if (e.key === "Enter") { e.preventDefault(); pick(results[sel]); }
+              else if (e.key === "Escape") onClose();
+            }}
+            placeholder={t("Search pages, customers, invoices…")}
+            className="flex-1 bg-transparent py-4 text-[15px] text-white placeholder:text-slate-500 outline-none"
+          />
+          <span className="text-[10px] font-bold text-slate-500 border border-white/10 rounded px-1.5 py-0.5">ESC</span>
+        </div>
+        <div className="max-h-[50vh] overflow-y-auto py-2">
+          {results.length === 0 && <div className="px-4 py-6 text-center text-[13px] text-slate-400">{t("No results")}</div>}
+          {results.map((r, i) => (
+            <button key={r.kind + r.id} type="button" onMouseEnter={() => setSel(i)} onClick={() => pick(r)}
+              className={`w-full text-start flex items-center gap-3 px-4 py-2.5 ${i === sel ? "bg-emerald-500/12" : ""}`}>
+              <span className={`w-8 h-8 rounded-lg flex items-center justify-center ${i === sel ? "bg-emerald-500/20 text-emerald-300" : "bg-white/5 text-slate-400"}`}><UiIcon name={r.icon} className="w-4 h-4" /></span>
+              <div className="min-w-0 flex-1">
+                <div className="text-[13.5px] text-white font-medium truncate">{r.title}</div>
+                <div className="text-[11px] text-slate-500 truncate">{r.sub}</div>
+              </div>
+              {i === sel && <span className="text-slate-500"><UiIcon name="right" className="w-4 h-4" /></span>}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AppHeader({ page, currentUser, alerts, onMenu, onSearch, onNewInvoice, onGo }) {
+  useLanguage();
+  const theme = useTheme();
+  const nav = navItemFor(page);
+  const name = currentUser.name || currentUser.username || "";
+  return (
+    <header className="h-[64px] sm:h-[72px] shrink-0 flex items-center gap-2 sm:gap-3 px-3 sm:px-6 border-b ct-line backdrop-blur-xl bg-[#060a13]/40 print:hidden" style={{ backgroundColor: theme === "dark" ? "rgba(6,10,19,.55)" : "rgba(255,255,255,.75)" }}>
+      <button type="button" onClick={onMenu} className="lg:hidden w-10 h-10 rounded-xl ct-chip flex items-center justify-center ct-h" aria-label={t("Menu")}>
+        <UiIcon name="menu" className="w-5 h-5" />
+      </button>
+      <div className="min-w-0 flex-1">
+        <div className="text-[11px] ct-t3 leading-none hidden sm:block">{t(nav.group)}</div>
+        <div className="mt-0 sm:mt-1 flex items-center gap-2 ct-display text-[16px] sm:text-[19px] font-bold ct-h leading-none truncate">
+          <span className="text-emerald-400 hidden sm:inline"><UiIcon name={nav.icon} className="w-[18px] h-[18px]" /></span>
+          <span className="truncate">{t(nav.label)}</span>
+        </div>
+      </div>
+      <button type="button" onClick={onSearch} className="hidden md:flex items-center gap-2 w-[280px] xl:w-[340px] rounded-xl ct-chip px-3.5 py-2.5 text-[13px] ct-t3 hover:opacity-90">
+        <UiIcon name="search" className="w-4 h-4" />
+        <span className="truncate">{t("Search pages, customers, invoices…")}</span>
+        <span className="ms-auto text-[10px] font-bold ct-chip rounded px-1.5 py-0.5">Ctrl K</span>
+      </button>
+      <button type="button" onClick={onSearch} className="md:hidden w-10 h-10 rounded-xl ct-chip flex items-center justify-center ct-t2" aria-label="Search">
+        <UiIcon name="search" className="w-[18px] h-[18px]" />
+      </button>
+      <div className="hidden sm:block"><LanguageSwitcher compact /></div>
+      <button type="button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="hidden sm:flex w-10 h-10 rounded-xl ct-chip items-center justify-center ct-t2 hover:opacity-90" title={t(theme === "dark" ? "Light mode" : "Dark mode")}>
+        <UiIcon name={theme === "dark" ? "sun" : "moon"} className="w-[18px] h-[18px]" />
+      </button>
+      <NotificationsMenu alerts={alerts} onGo={onGo} />
+      <button type="button" onClick={onNewInvoice} className="hidden lg:flex items-center gap-2 rounded-xl ct-em-btn px-4 py-2.5 text-[13px] font-bold hover:brightness-110 active:scale-[.98] transition">
+        <UiIcon name="plus" className="w-4 h-4" />{t("New Invoice")}
+      </button>
+      <div className="hidden sm:flex items-center gap-2.5 ps-3 border-s ct-line">
+        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-400 to-violet-600 text-white font-bold flex items-center justify-center text-sm ring-2 ring-emerald-400/60 ring-offset-2 ring-offset-transparent">{uiInitials(name, "U")}</div>
+        <div className="leading-tight hidden xl:block">
+          <div className="text-[13px] ct-h font-semibold">{name}</div>
+          <div className="text-[11px] ct-t3">{t(currentUser.role === "admin" ? "Admin" : "Staff")}</div>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function MobileTabBar({ page, onGo, onNewInvoice, onMore }) {
+  useLanguage();
+  const items = [
+    { id: "dashboard", icon: "home", label: "Home" },
+    { id: "invoices", icon: "file", label: "Invoices" },
+    null,
+    { id: "customers", icon: "users", label: "Customers" },
+    { id: "__more", icon: "more", label: "More" },
+  ];
+  return (
+    <div className="lg:hidden fixed bottom-0 inset-x-0 z-40 px-3 pb-[max(12px,env(safe-area-inset-bottom))] pt-2 print:hidden pointer-events-none">
+      <div className="pointer-events-auto relative flex items-center justify-around rounded-[22px] border border-white/10 bg-[#0d1424]/95 backdrop-blur-xl h-16 shadow-[0_20px_40px_-10px_rgba(0,0,0,.9)]">
+        {items.map((it, i) => it ? (
+          <button key={it.id} type="button" onClick={() => (it.id === "__more" ? onMore() : onGo(it.id))}
+            className={`flex flex-col items-center gap-0.5 w-16 transition-colors ${page === it.id ? "text-emerald-400" : "text-slate-500"}`}>
+            <UiIcon name={it.icon} className="w-[21px] h-[21px]" />
+            <span className="text-[10px] font-semibold">{t(it.label)}</span>
+          </button>
+        ) : <div key={"gap" + i} className="w-14" />)}
+        <button type="button" onClick={onNewInvoice} className="absolute left-1/2 -translate-x-1/2 -top-6 w-14 h-14 rounded-2xl ct-em-btn flex items-center justify-center ring-4 ring-[#060a13] active:scale-95 transition" aria-label={t("New Invoice")}>
+          <UiIcon name="plus" className="w-7 h-7" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   PRINT / SAVE PDF — paper size picker (58mm · 80mm · A5 · A4)
+   ------------------------------------------------------------
+   Used by the Invoice and the Payment Receipt. Presentation only:
+   it READS the invoice / payment / proof that the screen already
+   shows and never writes anything.
+
+   How the size is applied: the chosen document is rendered into its
+   own print element (portal on <body>) and a temporary @page rule
+   sets the exact paper size. For thermal rolls the page height is
+   measured from the content, so "Save as PDF" produces a slip of the
+   real width (e.g. 80mm), not a full A4 page. Other print areas on
+   the screen are hidden while this document prints.
+   The last choice (size, options, copies) is remembered per document
+   type in this browser.
+   ============================================================ */
+
+const PRINT_PX_PER_MM = 96 / 25.4;
+
+const PRINT_SIZES = {
+  t58: { label: "Thermal 58mm", sub: "Mini printer", desc: "Portable · Bluetooth", widthMm: 58, padMm: 3, thermal: true, font: 10.5 },
+  t80: { label: "Thermal 80mm", sub: "Recommended", desc: "Shop counter printer", widthMm: 80, padMm: 4, thermal: true, font: 12 },
+  a5: { label: "A5", sub: "Half page", desc: "148 × 210 mm", widthMm: 148, heightMm: 210, padMm: 9, thermal: false, font: 10.5 },
+  a4: { label: "A4", sub: "Full page", desc: "210 × 297 mm", widthMm: 210, heightMm: 297, padMm: 13, thermal: false, font: 12.5 },
+};
+const PRINT_SIZE_ORDER = ["t58", "t80", "a5", "a4"];
+
+const PRINT_URDU = {
+  "Print / Save": "پرنٹ / محفوظ کریں",
+  "Paper Size": "کاغذ کا سائز",
+  "Include": "شامل کریں",
+  "Copies": "کاپیاں",
+  "Live Preview": "لائیو پیش منظر",
+  "Save PDF": "پی ڈی ایف محفوظ کریں",
+  "1 Copy": "1 کاپی",
+  "2 Copies (Customer + Office)": "2 کاپیاں (گاہک + دفتر)",
+  "Mini printer": "منی پرنٹر",
+  "Recommended": "تجویز کردہ",
+  "Half page": "آدھا صفحہ",
+  "Full page": "پورا صفحہ",
+  "Portable · Bluetooth": "پورٹیبل · بلوٹوتھ",
+  "Shop counter printer": "دکان کا کاؤنٹر پرنٹر",
+  "Preparing…": "تیار ہو رہا ہے…",
+  "Your last choice is remembered for next time.": "آپ کی آخری پسند اگلی بار کے لیے یاد رکھی جائے گی۔",
+  "PDF is saved in the selected size — a thermal slip stays a slip, not a full A4 page.": "پی ڈی ایف منتخب سائز میں محفوظ ہوگی — تھرمل سلپ، پورا A4 صفحہ نہیں۔",
+  "In the print window choose “Save as PDF” as the printer.": "پرنٹ ونڈو میں پرنٹر کے طور پر “Save as PDF” منتخب کریں۔",
+  "Previous Balance": "پچھلا بیلنس",
+  "Driver & Delivery": "ڈرائیور اور ڈیلیوری",
+  "Receiving Proof": "وصولی کا ثبوت",
+  "Material Issued To": "سامان وصول کرنے والا",
+  "Signature Line": "دستخط کی لائن",
+  "Urdu Print": "اردو پرنٹ",
+  "Payment Screenshot / Proof": "ادائیگی کا اسکرین شاٹ / ثبوت",
+  "Balance Summary": "بیلنس کا خلاصہ",
+  "Old balance + net balance": "پرانا بقایا + کل بیلنس",
+  "Driver, vehicle, rent": "ڈرائیور، گاڑی، کرایہ",
+  "Signed slip photo": "دستخط شدہ سلپ کی تصویر",
+  "Who collected the material": "سامان کس نے وصول کیا",
+  "Customer / authorized signature": "گاہک / مجاز دستخط",
+  "Print the document in Urdu": "دستاویز اردو میں پرنٹ کریں",
+  "Image printed under the receipt": "رسید کے نیچے تصویر پرنٹ ہوگی",
+  "Previous · Received · Remaining": "پچھلا · وصول · باقی",
+  "No proof uploaded for this payment.": "اس ادائیگی کا کوئی ثبوت اپ لوڈ نہیں ہوا۔",
+  "Customer Copy": "گاہک کی کاپی",
+  "Office Copy": "دفتر کی کاپی",
+  "SALE INVOICE": "فروخت انوائس",
+  "CASH SALE": "نقد فروخت",
+  "PAYMENT RECEIPT": "ادائیگی کی رسید",
+  "Inv #": "انوائس نمبر",
+  "Receipt #": "رسید نمبر",
+  "Received by": "وصول کنندہ",
+  "Authorized": "مجاز",
+  "Thank you!": "شکریہ!",
+  "Net Balance": "کل بیلنس",
+  "This Invoice Due": "اس انوائس کی رقم باقی",
+  "Received": "وصول",
+  "Paid": "ادا شدہ",
+  "Delivery": "ڈیلیوری",
+  "Rent": "کرایہ",
+  "Payment Proof": "ادائیگی کا ثبوت",
+  "Verified": "تصدیق شدہ",
+  "Pending Verification": "تصدیق زیرِ التوا",
+  "Rejected": "مسترد",
+  "Ref": "حوالہ",
+  "Method": "طریقہ",
+  "Qty": "مقدار",
+  "Rate": "ریٹ",
+  "Amount": "رقم",
+  "Item": "آئٹم",
+  "Unit": "یونٹ",
+  "Bill To": "بل برائے",
+  "Phone": "فون",
+  "Date": "تاریخ",
+  "Customer": "گاہک",
+  "Subtotal": "ذیلی کل",
+  "Rickshaw + Delivery": "رکشہ + ڈیلیوری",
+  "Discount": "رعایت",
+  "TOTAL": "کل",
+  "Advance Applied": "لاگو شدہ پیشگی",
+  "Remaining Balance": "باقی بیلنس",
+  "Note": "نوٹ",
+  "Returned": "واپس",
+  "Remaining": "باقی",
+  "Booking": "بکنگ",
+  "Ph": "فون",
+};
+Object.entries(PRINT_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
+
+// Label for the PRINTED document (independent of the screen language).
+function printL(key, urdu) {
+  if (!urdu) return key;
+  return PRINT_URDU[key] || translations.ur[key] || key;
+}
+
+function printLoadPrefs(kind, includeDefs) {
+  const base = { size: "t80", copies: 1, include: {} };
+  includeDefs.forEach((d) => { base.include[d.key] = d.default; });
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("ct-print-pref:" + kind) || "null");
+    if (saved && typeof saved === "object") {
+      if (PRINT_SIZES[saved.size]) base.size = saved.size;
+      if (saved.copies === 2) base.copies = 2;
+      if (saved.include && typeof saved.include === "object") {
+        includeDefs.forEach((d) => { if (typeof saved.include[d.key] === "boolean") base.include[d.key] = saved.include[d.key]; });
+      }
+    }
+  } catch {}
+  return base;
+}
+
+function printSavePrefs(kind, prefs) {
+  try { window.localStorage.setItem("ct-print-pref:" + kind, JSON.stringify(prefs)); } catch {}
+}
+
+function printWaitImages(root, timeoutMs = 6000) {
+  if (!root) return Promise.resolve();
+  const imgs = Array.from(root.querySelectorAll("img"));
+  const pending = imgs.filter((img) => !img.complete);
+  if (!pending.length) return Promise.resolve();
+  return new Promise((resolve) => {
+    let left = pending.length;
+    const done = () => { left -= 1; if (left <= 0) resolve(); };
+    pending.forEach((img) => { img.addEventListener("load", done, { once: true }); img.addEventListener("error", done, { once: true }); });
+    setTimeout(resolve, timeoutMs);
+  });
+}
+
+/* ---------------- Shared document pieces ---------------- */
+
+// Numbers, dates, phones and codes are always isolated left-to-right so an
+// Urdu (RTL) print never reorders them (e.g. "-134,624" stays as written).
+function PrintLtr({ children }) {
+  return <bdi dir="ltr" style={{ unicodeBidi: "isolate" }}>{children}</bdi>;
+}
+
+function PrintRow({ l, v, bold, big, color, lLtr }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontWeight: bold ? 700 : 400, fontSize: big ? "1.2em" : undefined, color }}>
+      <span>{lLtr ? <PrintLtr>{l}</PrintLtr> : l}</span><span style={{ textAlign: "end", whiteSpace: "nowrap" }}><PrintLtr>{v}</PrintLtr></span>
+    </div>
+  );
+}
+
+function PrintRule({ dashed = true }) {
+  return <div style={{ borderTop: `1px ${dashed ? "dashed" : "solid"} #000`, margin: "1.2mm 0" }} />;
+}
+
+function PrintCopyWrap({ copies, thermal, children }) {
+  const list = copies === 2 ? ["Customer Copy", "Office Copy"] : [null];
+  return (
+    <>
+      {list.map((label, i) => (
+        <div key={i} style={i > 0 ? (thermal ? { borderTop: "1px dashed #000", marginTop: "4mm", paddingTop: "4mm" } : { breakBefore: "page", pageBreakBefore: "always" }) : undefined}>
+          {children(label)}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function printDocStyle(size, urdu) {
+  const s = PRINT_SIZES[size];
+  return {
+    width: `${s.widthMm}mm`,
+    padding: `${s.thermal ? 3 : s.padMm}mm ${s.padMm}mm`,
+    boxSizing: "border-box",
+    background: "#fff",
+    color: "#000",
+    fontSize: `${s.font}px`,
+    lineHeight: 1.42,
+    fontFamily: urdu
+      ? '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif'
+      : s.thermal ? '"Courier New", "DejaVu Sans Mono", ui-monospace, monospace' : 'Inter, Arial, sans-serif',
+    direction: urdu ? "rtl" : "ltr",
+    WebkitPrintColorAdjust: "exact",
+    printColorAdjust: "exact",
+  };
+}
+
+const PRINT_THERMAL_IMG = { display: "block", width: "100%", maxHeight: "120mm", objectFit: "contain", filter: "grayscale(1) contrast(1.15)", margin: "1mm 0" };
+
+/* ---------------- Invoice documents ---------------- */
+
+function InvoiceThermalDoc({ invoice, settings, size, include, copies, urdu, recvProofs }) {
+  const L = (k) => printL(k, urdu);
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
+  const prevBal = (invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0);
+  const delivery = (Number(invoice.rickshawRent) || 0) + (Number(invoice.deliveryCharges) || 0);
+  return (
+    <div style={printDocStyle(size, urdu)}>
+      <PrintCopyWrap copies={copies} thermal>
+        {(copyLabel) => (
+          <div>
+            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.3em" }}>{settings.companyName}</div>
+            {settings.companyAddress && <div style={{ textAlign: "center" }}>{settings.companyAddress}</div>}
+            {settings.companyPhone && <div style={{ textAlign: "center" }}>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+            <PrintRule />
+            <div style={{ textAlign: "center", fontWeight: 700 }}>{L(invoice.customerType === "Cash" ? "CASH SALE" : "SALE INVOICE")}{invoice.docStatus === "Cancelled" ? " — CANCELLED" : ""}</div>
+            {copyLabel && <div style={{ textAlign: "center" }}>({L(copyLabel)})</div>}
+            <PrintRow l={<>{L("Inv #")}: <PrintLtr>{invoice.number}</PrintLtr></>} v={fmtDate(invoice.date)} />
+            <div>{L("Customer")}: <b>{invoice.customerName}</b></div>
+            {invoice.customerPhone && <div>{L("Ph")}: <PrintLtr>{invoice.customerPhone}</PrintLtr></div>}
+            {include.issuedTo && invoice.issuedTo?.name && (
+              <div>{L("Material Issued To")}: {invoice.issuedTo.name}{invoice.issuedTo.relation ? ` (${invoice.issuedTo.relation})` : ""}</div>
+            )}
+            {invoice.bookingRef && <div>{L("Booking")}: {invoice.bookingRef}</div>}
+            <PrintRule />
+            {(invoice.items || []).map((it, i) => (
+              <div key={i} style={{ marginBottom: "0.8mm" }}>
+                <div style={{ fontWeight: 700 }}>{it.name}</div>
+                <PrintRow lLtr l={`${fmtQty(it.qty)} ${it.unit || ""} x ${fmtMoney(it.price).replace("Rs ", "")}`} v={fmtMoney(it.total).replace("Rs ", "")} />
+              </div>
+            ))}
+            <PrintRule />
+            <PrintRow l={L("Subtotal")} v={fmtMoney(invoice.subtotal).replace("Rs ", "")} />
+            {delivery > 0 && <PrintRow l={L("Rickshaw + Delivery")} v={fmtMoney(delivery).replace("Rs ", "")} />}
+            {Number(invoice.discount) > 0 && <PrintRow l={L("Discount")} v={"-" + fmtMoney(invoice.discount).replace("Rs ", "")} />}
+            <PrintRow l={L("TOTAL")} v={fmtMoney(invoice.total)} bold big />
+            <PrintRow l={L("Paid")} v={"-" + fmtMoney(invoice.paymentReceived).replace("Rs ", "")} />
+            {Number(invoice.advanceApplied) > 0 && <PrintRow l={L("Advance Applied")} v={"-" + fmtMoney(invoice.advanceApplied).replace("Rs ", "")} />}
+            <PrintRow l={L("This Invoice Due")} v={fmtMoney(invoice.balanceDue).replace("Rs ", "")} bold />
+            {include.prevBalance && invoice.customerType !== "Cash" && (
+              <>
+                <PrintRule />
+                <PrintRow l={L("Previous Balance")} v={fmtMoney(prevBal).replace("Rs ", "")} />
+                <PrintRow l={L("Net Balance")} v={fmtMoney(outstandingNow)} bold big />
+              </>
+            )}
+            {include.delivery && (invoice.driverName || invoice.vehicleNumber) && (
+              <>
+                <PrintRule />
+                <div>{L("Delivery")}: <PrintLtr>{invoice.driverName || "-"}{invoice.driverId ? ` (${invoice.driverId})` : ""}</PrintLtr></div>
+                {(invoice.vehicleType || invoice.vehicleNumber) && <div><PrintLtr>{invoice.vehicleType} {invoice.vehicleNumber ? `[${invoice.vehicleNumber}]` : ""}</PrintLtr></div>}
+                {Number(invoice.rickshawRent) > 0 && <div>{L("Rent")}: <PrintLtr>{fmtMoney(invoice.rickshawRent)}</PrintLtr></div>}
+              </>
+            )}
+            {include.recvProof && recvProofs.length > 0 && (
+              <>
+                <PrintRule />
+                <div style={{ textAlign: "center", fontWeight: 700 }}>{L("Receiving Proof")}</div>
+                {recvProofs.map((p) => <img key={p.receiving_id} src={recvSafeImageSrc(p.proof_image)} alt="" style={PRINT_THERMAL_IMG} />)}
+              </>
+            )}
+            <PrintRule />
+            <div style={{ textAlign: "center" }}>{L("Thank you!")}</div>
+            {include.signature && (
+              <div style={{ textAlign: "center", marginTop: "8mm" }}>
+                <div style={{ borderTop: "1px solid #000", width: "60%", margin: "0 auto" }} />
+                <div>{L("Received by")}</div>
+              </div>
+            )}
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+function InvoicePaperDoc({ invoice, settings, size, include, copies, urdu, recvProofs, rs }) {
+  const L = (k) => printL(k, urdu);
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
+  const prevBal = (invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0);
+  const delivery = (Number(invoice.rickshawRent) || 0) + (Number(invoice.deliveryCharges) || 0);
+  const banner = invoiceStatusBanner(invoice);
+  const rows = rs && rs.status !== "Normal" ? rs.breakdown : invoice.items || [];
+  const showRet = rs && rs.status !== "Normal";
+  const th = { padding: "1.6mm 2mm", textAlign: "start", fontSize: "0.82em", textTransform: "uppercase", letterSpacing: ".04em" };
+  const td = { padding: "1.6mm 2mm", borderBottom: "1px solid #e5e7eb" };
+  const num = { textAlign: "end" };
+  return (
+    <div style={printDocStyle(size, urdu)}>
+      <PrintCopyWrap copies={copies} thermal={false}>
+        {(copyLabel) => (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "3px solid #0f172a", paddingBottom: "3mm", marginBottom: "3mm" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "3mm" }}>
+                {settings.logoUrl ? <img src={settings.logoUrl} alt="" style={{ width: "13mm", height: "13mm", objectFit: "contain" }} /> : (
+                  <div style={{ width: "13mm", height: "13mm", background: "#0f172a", color: "#fff", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.3em" }}>{uiInitials(settings.companyName)}</div>
+                )}
+                <div>
+                  <div style={{ fontWeight: 900, fontSize: "1.55em", textTransform: "uppercase", letterSpacing: "-.01em" }}>{settings.companyName}</div>
+                  <div style={{ fontSize: ".78em", fontWeight: 700, color: "#047857", textTransform: "uppercase", letterSpacing: ".06em" }}>Construction Materials Supplier</div>
+                </div>
+              </div>
+              <div style={{ textAlign: "end", color: "#4b5563", fontSize: ".9em" }}>
+                <div>{settings.companyAddress}</div>
+                {settings.companyPhone && <div>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "4mm", marginBottom: "3mm" }}>
+              <div>
+                <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Bill To")}</div>
+                <div style={{ fontWeight: 700, fontSize: "1.1em" }}>{invoice.customerName}</div>
+                {invoice.customerPhone && <div style={{ color: "#4b5563" }}>{invoice.customerPhone}</div>}
+                {invoice.customerAddress && <div style={{ color: "#4b5563" }}>{invoice.customerAddress}</div>}
+                {include.issuedTo && invoice.issuedTo?.name && (
+                  <div style={{ marginTop: "1.5mm", fontSize: ".9em" }}><b>{L("Material Issued To")}:</b> {invoice.issuedTo.name}{invoice.issuedTo.relation ? ` (${invoice.issuedTo.relation})` : ""}{invoice.issuedTo.phone ? ` · ${invoice.issuedTo.phone}` : ""}</div>
+                )}
+              </div>
+              <div style={{ textAlign: "end" }}>
+                <div style={{ display: "inline-block", background: "#0f172a", color: "#fff", fontWeight: 900, padding: "1mm 3mm" }}>{invoice.number}</div>
+                <div style={{ color: "#4b5563", marginTop: "1mm" }}>{L("Date")}: <b style={{ color: "#111" }}>{fmtDate(invoice.date)}</b></div>
+                {invoice.customerType === "Cash" && <div style={{ fontWeight: 700, color: "#b45309" }}>{L("CASH SALE")}</div>}
+                {invoice.bookingRef && <div style={{ fontSize: ".85em", color: "#b45309", fontWeight: 700 }}>{L("Booking")}: {invoice.bookingRef}</div>}
+                {invoice.docStatus === "Cancelled" && <div style={{ fontWeight: 900, color: "#b91c1c" }}>CANCELLED</div>}
+                {copyLabel && <div style={{ fontSize: ".85em", color: "#6b7280" }}>{L(copyLabel)}</div>}
+              </div>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "3mm" }}>
+              <thead>
+                <tr style={{ background: "#0f172a", color: "#fff" }}>
+                  <th style={th}>{L("Item")}</th>
+                  <th style={{ ...th, ...num }}>{L("Qty")}</th>
+                  <th style={{ ...th, ...num }}>{L("Unit")}</th>
+                  <th style={{ ...th, ...num }}>{L("Rate")}</th>
+                  <th style={{ ...th, ...num }}>{L("Amount")}</th>
+                  {showRet && <th style={{ ...th, ...num }}>{L("Returned")}</th>}
+                  {showRet && <th style={{ ...th, ...num }}>{L("Remaining")}</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((it, i) => (
+                  <tr key={i}>
+                    <td style={td}>{it.name}</td>
+                    <td style={{ ...td, ...num }}>{fmtQty(it.qty)}</td>
+                    <td style={{ ...td, ...num, color: "#6b7280" }}>{it.unit || "-"}</td>
+                    <td style={{ ...td, ...num }}>{fmtMoney(it.price)}</td>
+                    <td style={{ ...td, ...num, fontWeight: 700 }}>{fmtMoney(it.total)}</td>
+                    {showRet && <td style={{ ...td, ...num }}>{(it.returnedQty || 0) + (it.exchangedQty || 0) > 0 ? fmtQty((it.returnedQty || 0) + (it.exchangedQty || 0)) : "-"}</td>}
+                    {showRet && <td style={{ ...td, ...num }}>{fmtQty(it.remainingQty)}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {include.delivery && (invoice.driverName || delivery > 0) && (
+              <div style={{ fontSize: ".9em", color: "#374151", marginBottom: "3mm" }}>
+                <b>{L("Delivery")}:</b> {invoice.driverName || "-"}{invoice.driverId ? ` (${invoice.driverId})` : ""}
+                {invoice.vehicleType ? ` — ${invoice.vehicleType}` : ""}{invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}
+                {delivery > 0 ? ` · ${L("Rickshaw + Delivery")}: ${fmtMoney(delivery)}` : ""}
+                {invoice.receivedBy ? ` · ${L("Received by")}: ${invoice.receivedBy}` : ""}
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <div style={{ width: size === "a5" ? "62%" : "48%" }}>
+                {include.prevBalance && invoice.customerType !== "Cash" && <PrintRow l={L("Previous Balance")} v={fmtMoney(prevBal)} />}
+                <PrintRow l={L("Subtotal")} v={fmtMoney(invoice.subtotal)} />
+                {delivery > 0 && <PrintRow l={L("Rickshaw + Delivery")} v={fmtMoney(delivery)} />}
+                {Number(invoice.discount) > 0 && <PrintRow l={L("Discount")} v={"-" + fmtMoney(invoice.discount)} />}
+                <PrintRow l={L("Paid")} v={"-" + fmtMoney(invoice.paymentReceived)} />
+                {Number(invoice.advanceApplied) > 0 && <PrintRow l={`${L("Advance Applied")} (${invoice.bookingRef})`} v={"-" + fmtMoney(invoice.advanceApplied)} />}
+                <div style={{ borderTop: "2px solid #0f172a", marginTop: "1.5mm", paddingTop: "1.5mm" }}>
+                  {include.prevBalance && invoice.customerType !== "Cash"
+                    ? <PrintRow l={L("Net Balance")} v={fmtMoney(outstandingNow)} bold big color="#047857" />
+                    : <PrintRow l={L("This Invoice Due")} v={fmtMoney(invoice.balanceDue)} bold big color="#047857" />}
+                </div>
+              </div>
+            </div>
+            <div style={{ marginTop: "3mm", border: "1px solid #d1d5db", padding: "1.5mm 3mm", textAlign: "center", fontWeight: 700, fontSize: ".9em" }}>{banner.text}</div>
+            {include.recvProof && recvProofs.length > 0 && (
+              <div style={{ marginTop: "4mm" }}>
+                <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Receiving Proof")}</div>
+                <div style={{ display: "flex", gap: "3mm", flexWrap: "wrap", marginTop: "1.5mm" }}>
+                  {recvProofs.map((p) => <img key={p.receiving_id} src={recvSafeImageSrc(p.proof_image)} alt="" style={{ maxWidth: "48%", maxHeight: size === "a4" ? "95mm" : "60mm", objectFit: "contain", border: "1px solid #e5e7eb" }} />)}
+                </div>
+              </div>
+            )}
+            {include.signature && (
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "14mm", color: "#4b5563" }}>
+                <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Received by")}</div>
+                <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Authorized")}</div>
+              </div>
+            )}
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+/* ---------------- Payment receipt documents ---------------- */
+
+function ReceiptDoc({ payment, customer, settings, balances, size, include, copies, urdu, proofUrl, proofRecord }) {
+  const L = (k) => printL(k, urdu);
+  const s = PRINT_SIZES[size];
+  const receiptNo = paymentReceiptNo(payment);
+  const note = String(payment.note || "").trim();
+  const proofStatus = proofRecord?.verification_status;
+  const showProof = include.proof && proofUrl;
+  return (
+    <div style={printDocStyle(size, urdu)}>
+      <PrintCopyWrap copies={copies} thermal={s.thermal}>
+        {(copyLabel) => s.thermal ? (
+          <div>
+            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.3em" }}>{settings.companyName}</div>
+            {settings.companyAddress && <div style={{ textAlign: "center" }}>{settings.companyAddress}</div>}
+            {settings.companyPhone && <div style={{ textAlign: "center" }}>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+            <PrintRule />
+            <div style={{ textAlign: "center", fontWeight: 700 }}>{L("PAYMENT RECEIPT")}</div>
+            <div style={{ textAlign: "center" }}><PrintLtr>{receiptNo}</PrintLtr></div>
+            {copyLabel && <div style={{ textAlign: "center" }}>({L(copyLabel)})</div>}
+            {balances.reversed && <div style={{ textAlign: "center", fontWeight: 700 }}>*** REVERSED ***</div>}
+            <PrintRule />
+            <PrintRow l={L("Date")} v={fmtDate(payment.date)} />
+            <PrintRow l={L("Customer")} v={customer.name || "-"} />
+            {customer.phone && <PrintRow l={L("Ph")} v={customer.phone} />}
+            <PrintRow l={L("Method")} v={payment.method || "Cash"} />
+            {payment.reference && <PrintRow l={L("Ref")} v={payment.reference} />}
+            {payment.bookingCode && <PrintRow l={L("Booking")} v={payment.bookingCode} />}
+            <PrintRule />
+            {include.balance && <PrintRow l={L("Previous Balance")} v={fmtMoney(balances.previous).replace("Rs ", "")} />}
+            <PrintRow l={L("Received").toUpperCase()} v={fmtMoney(balances.received)} bold big />
+            {include.balance && <PrintRow l={L("Remaining Balance")} v={fmtMoney(balances.remaining).replace("Rs ", "") + (balances.remaining < 0 ? " (Adv)" : "")} bold />}
+            {note && (<><PrintRule /><div>{L("Note")}: {note}</div></>)}
+            {showProof && (
+              <>
+                <PrintRule />
+                <div style={{ textAlign: "center", fontWeight: 700 }}>{L("Payment Proof")}{proofStatus ? ` · ${L(proofStatus)}` : ""}</div>
+                <img src={proofUrl} alt="" style={PRINT_THERMAL_IMG} />
+              </>
+            )}
+            <PrintRule />
+            <div style={{ textAlign: "center" }}>{L("Thank you!")}</div>
+            {include.signature && (
+              <div style={{ textAlign: "center", marginTop: "8mm" }}>
+                <div style={{ borderTop: "1px solid #000", width: "60%", margin: "0 auto" }} />
+                <div>{L("Authorized")}</div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "3px solid #0f172a", paddingBottom: "3mm" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "3mm" }}>
+                {settings.logoUrl ? <img src={settings.logoUrl} alt="" style={{ width: "12mm", height: "12mm", objectFit: "contain" }} /> : (
+                  <div style={{ width: "12mm", height: "12mm", background: "#0f172a", color: "#fff", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>{uiInitials(settings.companyName)}</div>
+                )}
+                <div>
+                  <div style={{ fontWeight: 900, fontSize: "1.45em", textTransform: "uppercase" }}>{settings.companyName}</div>
+                  <div style={{ fontSize: ".78em", fontWeight: 700, color: "#047857", textTransform: "uppercase", letterSpacing: ".06em" }}>Construction Materials Supplier</div>
+                </div>
+              </div>
+              <div style={{ textAlign: "end", color: "#4b5563", fontSize: ".9em" }}>
+                <div>{settings.companyAddress}</div>
+                {settings.companyPhone && <div>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+              </div>
+            </div>
+            <div style={{ background: "#0f172a", color: "#fff", textAlign: "center", fontWeight: 900, padding: "1.5mm", marginTop: "3mm", letterSpacing: ".06em" }}>
+              {L("PAYMENT RECEIPT")}{copyLabel ? ` — ${L(copyLabel)}` : ""}
+            </div>
+            {balances.reversed && <div style={{ marginTop: "2mm", border: "1px solid #fca5a5", color: "#b91c1c", padding: "1.5mm", fontWeight: 700, textAlign: "center" }}>REVERSED — invoice cancelled</div>}
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "4mm", marginTop: "3mm" }}>
+              <div>
+                <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Customer")}</div>
+                <div style={{ fontWeight: 700, fontSize: "1.1em" }}>{customer.name || "-"}</div>
+                {customer.phone && <div style={{ color: "#4b5563" }}>{customer.phone}</div>}
+                {customer.address && <div style={{ color: "#4b5563" }}>{customer.address}</div>}
+              </div>
+              <div style={{ textAlign: "end" }}>
+                <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Receipt #")}</div>
+                <div style={{ fontWeight: 700 }}>{receiptNo}</div>
+                <div style={{ color: "#4b5563" }}>{fmtDate(payment.date)} · {payment.method || "Cash"}</div>
+                {payment.reference && <div style={{ color: "#4b5563" }}>{L("Ref")}: {payment.reference}</div>}
+                {payment.bookingCode && <div style={{ color: "#4b5563" }}>{L("Booking")}: {payment.bookingCode}</div>}
+              </div>
+            </div>
+            <div style={{ marginTop: "4mm" }}>
+              {include.balance && <div style={{ padding: "1.5mm 2mm", background: "#f3f4f6" }}><PrintRow l={L("Previous Balance")} v={fmtMoney(balances.previous)} /></div>}
+              <div style={{ padding: "1.5mm 2mm" }}><PrintRow l={L("Received")} v={fmtMoney(balances.received)} bold color="#047857" /></div>
+              {include.balance && (
+                <div style={{ padding: "1.5mm 2mm", borderTop: "2px solid #0f172a" }}>
+                  <PrintRow l={L("Remaining Balance")} v={fmtMoney(balances.remaining) + (balances.remaining < 0 ? " (Advance)" : "")} bold big color="#0f172a" />
+                </div>
+              )}
+            </div>
+            {note && <div style={{ marginTop: "2mm", color: "#374151" }}><b>{L("Note")}:</b> {note}</div>}
+            {showProof && (
+              <div style={{ marginTop: "4mm" }}>
+                <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Payment Proof")}{proofStatus ? ` · ${L(proofStatus)}` : ""}</div>
+                <img src={proofUrl} alt="" style={{ marginTop: "1.5mm", maxWidth: size === "a4" ? "70%" : "85%", maxHeight: size === "a4" ? "120mm" : "80mm", objectFit: "contain", border: "1px solid #e5e7eb" }} />
+                {proofRecord?.uploaded_by && <div style={{ fontSize: ".8em", color: "#6b7280" }}>{proofRecord.uploaded_by} · {fmtDateTime(proofRecord.uploaded_at)}</div>}
+              </div>
+            )}
+            {include.signature && (
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "14mm", color: "#4b5563" }}>
+                <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Customer")}</div>
+                <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Authorized")}</div>
+              </div>
+            )}
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+/* ---------------- The dialog ---------------- */
+
+function PrintSizeIcon({ id }) {
+  const s = PRINT_SIZES[id];
+  if (s.thermal) {
+    const w = id === "t58" ? 34 : 48;
+    return (
+      <div style={{ width: w }}>
+        <div className="h-1.5 rounded-t-md bg-slate-500/70" />
+        <div className="px-1.5 pt-1.5 space-y-1" style={{ background: "#fff", height: 44, WebkitMask: "conic-gradient(from -45deg at bottom,#0000,#000 1deg 90deg,#0000 91deg) 50%/6px 100%", mask: "conic-gradient(from -45deg at bottom,#0000,#000 1deg 90deg,#0000 91deg) 50%/6px 100%" }}>
+          {[1, 0.6, 0.85, 0.5, 0.9].map((x, i) => <div key={i} className="h-[3px] rounded" style={{ background: "#d1d5db", width: `${x * 100}%` }} />)}
+        </div>
+      </div>
+    );
+  }
+  const big = id === "a4";
+  return (
+    <div className="rounded-sm p-1.5" style={{ background: "#fff", width: big ? 40 : 34, height: big ? 54 : 46 }}>
+      <div className="h-[4px] w-1/2 rounded mb-1" style={{ background: "#9ca3af" }} />
+      {[1, 0.8, 1, 0.7, 1].map((x, i) => <div key={i} className="h-[3px] rounded mb-1" style={{ background: "#e5e7eb", width: `${x * 100}%` }} />)}
+    </div>
+  );
+}
+
+function PrintToggle({ on, onChange, label, sub, disabled }) {
+  return (
+    <button type="button" disabled={disabled} onClick={() => onChange(!on)}
+      className={`w-full flex items-center gap-3 rounded-xl ct-chip px-3.5 py-2.5 text-start transition ${disabled ? "opacity-45 cursor-not-allowed" : "hover:opacity-95"}`}>
+      <div className="flex-1 min-w-0">
+        <div className="text-[13px] font-semibold ct-h">{t(label)}</div>
+        {sub && <div className="text-[11px] ct-t3 truncate">{t(sub)}</div>}
+      </div>
+      <span className={`w-10 h-6 rounded-full p-0.5 transition-colors shrink-0 ${on && !disabled ? "bg-emerald-400" : "bg-slate-500/40"}`}>
+        <span className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${on && !disabled ? (document.documentElement.dir === "rtl" ? "-translate-x-4" : "translate-x-4") : ""}`} />
+      </span>
+    </button>
+  );
+}
+
+function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, renderDoc, onClose }) {
+  useLanguage();
+  const [prefs, setPrefs] = useState(() => printLoadPrefs(kind, includeDefs));
+  const [busy, setBusy] = useState("");
+  const previewBoxRef = React.useRef(null);
+  const previewDocRef = React.useRef(null);
+  const printRef = React.useRef(null);
+  const [scale, setScale] = useState(1);
+  const [docH, setDocH] = useState(0);
+  const size = PRINT_SIZES[prefs.size];
+
+  useEffect(() => { printSavePrefs(kind, prefs); }, [kind, prefs]);
+
+  // Fit the preview into its column (the document keeps its real mm width).
+  useEffect(() => {
+    const measure = () => {
+      const box = previewBoxRef.current, doc = previewDocRef.current;
+      if (!box || !doc) return;
+      const docW = size.widthMm * PRINT_PX_PER_MM;
+      const s = Math.min(1, (box.clientWidth - 8) / docW);
+      setScale(s);
+      setDocH(doc.offsetHeight);
+    };
+    measure();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    if (ro && previewBoxRef.current) ro.observe(previewBoxRef.current);
+    if (ro && previewDocRef.current) ro.observe(previewDocRef.current);
+    const imgs = previewDocRef.current ? Array.from(previewDocRef.current.querySelectorAll("img")) : [];
+    imgs.forEach((img) => img.addEventListener("load", measure));
+    return () => { if (ro) ro.disconnect(); imgs.forEach((img) => img.removeEventListener("load", measure)); };
+  }, [prefs, size.widthMm]);
+
+  const setSize = (id) => setPrefs((p) => ({ ...p, size: id }));
+  const setInc = (key, val) => setPrefs((p) => ({ ...p, include: { ...p.include, [key]: val } }));
+  const setCopies = (n) => setPrefs((p) => ({ ...p, copies: n }));
+  const docProps = { size: prefs.size, include: prefs.include, copies: prefs.copies, urdu: !!prefs.include.urdu };
+
+  async function doPrint(asPdf) {
+    if (busy) return;
+    setBusy(asPdf ? "pdf" : "print");
+    const node = printRef.current;
+    await printWaitImages(node);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const measured = previewDocRef.current ? previewDocRef.current.offsetHeight : 0;
+    const heightMm = size.thermal ? Math.ceil(((measured || 600) / PRINT_PX_PER_MM) + 4) : null;
+    const pageSize = size.thermal ? `${size.widthMm}mm ${heightMm}mm` : prefs.size === "a5" ? "A5 portrait" : "A4 portrait";
+    const style = document.createElement("style");
+    style.setAttribute("data-ct-print", "1");
+    style.textContent = `
+      @page { size: ${pageSize}; margin: 0; }
+      @media print {
+        html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+        body.ct-doc-printing .print-area:not(.ct-print-doc),
+        body.ct-doc-printing .recv-print-proof-pages { display: none !important; }
+        body.ct-doc-printing .ct-print-doc { display: block !important; position: absolute !important; left: 0 !important; top: 0 !important;
+          width: ${size.widthMm}mm !important; margin: 0 !important; padding: 0 !important; }
+      }`;
+    document.head.appendChild(style);
+    document.body.classList.add("ct-doc-printing");
+    const prevTitle = document.title;
+    document.title = fileName + (prefs.size ? `-${prefs.size.toUpperCase()}` : "");
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      document.body.classList.remove("ct-doc-printing");
+      style.remove();
+      document.title = prevTitle;
+      window.removeEventListener("afterprint", cleanup);
+      setBusy("");
+    };
+    window.addEventListener("afterprint", cleanup);
+    try {
+      window.print();
+    } finally {
+      // Some mobile browsers return from print() before printing and never fire afterprint.
+      setTimeout(cleanup, 1500);
+    }
+  }
+
+  return (
+    <Modal title={title} onClose={onClose} wide>
+      <div className="text-[12.5px] ct-t2 -mt-2 mb-4">{subtitle}</div>
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5">
+        <div className="min-w-0">
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{t("Paper Size")}</div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+            {PRINT_SIZE_ORDER.map((id) => {
+              const s = PRINT_SIZES[id];
+              const active = prefs.size === id;
+              return (
+                <button key={id} type="button" onClick={() => setSize(id)}
+                  className={`relative rounded-2xl p-3 text-start transition-all ct-lift ${active ? "border-2 border-emerald-400 bg-emerald-400/10 shadow-[0_0_0_4px_rgba(52,211,153,.12)]" : "ct-chip border-2 border-transparent"}`}>
+                  {active && <span className="absolute top-2 end-2 w-5 h-5 rounded-full bg-emerald-400 text-[#022c22] flex items-center justify-center"><UiIcon name="check" className="w-3.5 h-3.5" /></span>}
+                  <div className="h-14 flex items-end justify-center mb-2"><PrintSizeIcon id={id} /></div>
+                  <div className="text-[13px] font-bold ct-h">{s.label}</div>
+                  <div className={`text-[11px] font-semibold ${active ? "text-emerald-400" : "text-[#d4a94f]"}`}>{t(s.sub)}</div>
+                  <div className="text-[10.5px] ct-t3">{t(s.desc)}</div>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Include")}</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {includeDefs.map((d) => (
+              <PrintToggle key={d.key} on={!!prefs.include[d.key]} onChange={(v) => setInc(d.key, v)} label={d.label} sub={d.disabled ? d.disabledNote : d.sub} disabled={d.disabled} />
+            ))}
+          </div>
+
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Copies")}</div>
+          <div className="flex flex-wrap gap-2">
+            {[[1, "1 Copy"], [2, "2 Copies (Customer + Office)"]].map(([n, l]) => (
+              <button key={n} type="button" onClick={() => setCopies(n)}
+                className={`rounded-xl px-4 py-2.5 text-[13px] font-semibold transition ${prefs.copies === n ? "border-2 border-emerald-400 bg-emerald-400/10 ct-h" : "ct-chip border-2 border-transparent ct-t2"}`}>{t(l)}</button>
+            ))}
+          </div>
+
+          <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <button type="button" onClick={() => doPrint(false)} disabled={!!busy}
+              className="ct-em-btn flex items-center justify-center gap-2 rounded-xl py-3 text-[14px] font-bold hover:brightness-110 active:scale-[.98] transition disabled:opacity-60">
+              <UiIcon name="printer" className="w-4 h-4" />{busy === "print" ? t("Preparing…") : t("Print")}
+            </button>
+            <button type="button" onClick={() => doPrint(true)} disabled={!!busy}
+              className="ct-chip flex items-center justify-center gap-2 rounded-xl py-3 text-[14px] font-bold ct-h hover:opacity-90 active:scale-[.98] transition disabled:opacity-60">
+              <UiIcon name="download" className="w-4 h-4" />{busy === "pdf" ? t("Preparing…") : t("Save PDF")}
+            </button>
+            {waHref ? (
+              <a href={waHref} target="_blank" rel="noreferrer"
+                className="ct-chip flex items-center justify-center gap-2 rounded-xl py-3 text-[14px] font-bold text-emerald-400 hover:opacity-90 active:scale-[.98] transition">
+                <UiIcon name="wa" className="w-4 h-4" />{t("WhatsApp")}
+              </a>
+            ) : <span />}
+          </div>
+          <div className="mt-3 text-[11.5px] ct-t3 space-y-0.5">
+            <div>• {t("PDF is saved in the selected size — a thermal slip stays a slip, not a full A4 page.")}</div>
+            <div>• {t("In the print window choose “Save as PDF” as the printer.")}</div>
+            <div>• {t("Your last choice is remembered for next time.")}</div>
+          </div>
+        </div>
+
+        <div className="min-w-0">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase">{t("Live Preview")}</span>
+            <span className="text-[11px] font-bold text-emerald-400 bg-emerald-400/10 rounded-full px-2 py-0.5">{size.label}{prefs.copies === 2 ? " · ×2" : ""}</span>
+          </div>
+          <div ref={previewBoxRef} className="rounded-2xl bg-slate-950/40 border border-slate-500/20 p-3 overflow-hidden max-h-[70vh] overflow-y-auto ct-scroll">
+            <div style={{ height: docH ? docH * scale : undefined, display: "flex", justifyContent: "center" }}>
+              <div style={{ transform: `scale(${scale})`, transformOrigin: "top center" }}>
+                <div ref={previewDocRef} className="ct-paper shadow-[0_20px_40px_-16px_rgba(0,0,0,.7)]">
+                  {renderDoc(docProps)}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {createPortal(
+        <div ref={printRef} className="print-area ct-print-doc ct-paper" style={{ display: "none" }}>
+          {renderDoc(docProps)}
+        </div>,
+        document.body
+      )}
+    </Modal>
+  );
+}
+
+/* ---------------- Invoice / Receipt dialogs ---------------- */
+
+function InvoicePrintDialog({ invoice, settings, rs, onClose }) {
+  useLanguage();
+  const user = useRecvSessionUser();
+  const { proofs } = useRecvProofs(invoice.id, recvIsStaff(user));
+  const includeDefs = [
+    { key: "prevBalance", label: "Previous Balance", sub: "Old balance + net balance", default: true, disabled: invoice.customerType === "Cash", disabledNote: "Cash Customer / Walk-In" },
+    { key: "delivery", label: "Driver & Delivery", sub: "Driver, vehicle, rent", default: true },
+    { key: "recvProof", label: "Receiving Proof", sub: "Signed slip photo", default: true, disabled: proofs.length === 0, disabledNote: "Not Uploaded" },
+    { key: "issuedTo", label: "Material Issued To", sub: "Who collected the material", default: true },
+    { key: "signature", label: "Signature Line", sub: "Customer / authorized signature", default: true },
+    { key: "urdu", label: "Urdu Print", sub: "Print the document in Urdu", default: false },
+  ];
+  return (
+    <PrintDialog
+      kind="invoice"
+      title={`${t("Print / Save")} — ${t("Invoice")} ${invoice.number}`}
+      subtitle={`${invoice.customerName} · ${(invoice.items || []).length} ${t("Items")} · ${fmtMoney(invoice.total)}`}
+      includeDefs={includeDefs}
+      fileName={`Invoice-${invoice.number}`}
+      waHref={invoice.customerPhone ? waLink(invoice.customerPhone, buildInvoiceWaMessage(invoice, settings)) : ""}
+      onClose={onClose}
+      renderDoc={(p) => {
+        const inc = { ...p.include, prevBalance: p.include.prevBalance && invoice.customerType !== "Cash", recvProof: p.include.recvProof && proofs.length > 0 };
+        return PRINT_SIZES[p.size].thermal
+          ? <InvoiceThermalDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} />
+          : <InvoicePaperDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} rs={rs} />;
+      }}
+    />
+  );
+}
+
+function buildReceiptWaMessage(payment, customer, balances, settings) {
+  return [
+    `${settings.companyName} — ${t("Payment Receipt")} ${paymentReceiptNo(payment)}`,
+    `${fmtDate(payment.date)} · ${payment.method || "Cash"}`,
+    `${customer.name}`,
+    "",
+    `Received: ${fmtMoney(balances.received)}`,
+    `Previous Balance: ${fmtMoney(balances.previous)}`,
+    `Remaining Balance: ${fmtMoney(balances.remaining)}`,
+    "",
+    "Shukriya!",
+  ].join("\n");
+}
+
+function ReceiptPrintDialog({ payment, customer, settings, balances, proofRecord, onClose }) {
+  useLanguage();
+  const [proofUrl, setProofUrl] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setProofUrl("");
+    if (proofRecord && proofRecord.active) {
+      pproofImageUrl(proofRecord).then((u) => { if (!cancelled) setProofUrl(u); }).catch(() => {});
+    }
+    return () => { cancelled = true; };
+  }, [proofRecord && proofRecord.version, proofRecord && proofRecord.path]);
+  const hasProof = !!(proofRecord && proofRecord.active);
+  const includeDefs = [
+    { key: "proof", label: "Payment Screenshot / Proof", sub: "Image printed under the receipt", default: true, disabled: !hasProof, disabledNote: "No proof uploaded for this payment." },
+    { key: "balance", label: "Balance Summary", sub: "Previous · Received · Remaining", default: true },
+    { key: "signature", label: "Signature Line", sub: "Customer / authorized signature", default: true },
+    { key: "urdu", label: "Urdu Print", sub: "Print the document in Urdu", default: false },
+  ];
+  return (
+    <PrintDialog
+      kind="receipt"
+      title={`${t("Print / Save")} — ${t("Payment Receipt")}`}
+      subtitle={`${paymentReceiptNo(payment)} · ${customer.name || "-"} · ${fmtMoney(payment.amount)}`}
+      includeDefs={includeDefs}
+      fileName={`Payment-Receipt-${paymentReceiptNo(payment)}`}
+      waHref={customer.phone ? waLink(customer.phone, buildReceiptWaMessage(payment, customer, balances, settings)) : ""}
+      onClose={onClose}
+      renderDoc={(p) => (
+        <ReceiptDoc payment={payment} customer={customer} settings={settings} balances={balances} {...p}
+          include={{ ...p.include, proof: p.include.proof && hasProof }} proofUrl={proofUrl} proofRecord={proofRecord} />
+      )}
+    />
   );
 }
 
