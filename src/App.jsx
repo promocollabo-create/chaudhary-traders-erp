@@ -12310,10 +12310,10 @@ const PRINT_PX_PER_MM = 96 / 25.4;
 const PRINT_SIZES = {
   t58: { label: "Thermal 58mm", sub: "Mini printer", desc: "Portable · Bluetooth", widthMm: 58, padMm: 3, thermal: true, font: 10.5 },
   t80: { label: "Thermal 80mm", sub: "Recommended", desc: "Shop counter printer", widthMm: 80, padMm: 4, thermal: true, font: 12 },
-  a5: { label: "A5", sub: "Half page", desc: "148 × 210 mm", widthMm: 148, heightMm: 210, padMm: 9, thermal: false, font: 12 },
+  a5: { label: "A5", sub: "Invoice page", desc: "148 × 210 mm", widthMm: 148, heightMm: 210, padMm: 9, thermal: false, font: 12 },
   a4: { label: "A4", sub: "Full page", desc: "210 × 297 mm", widthMm: 210, heightMm: 297, padMm: 14, thermal: false, font: 14.5 },
 };
-const PRINT_SIZE_ORDER = ["t58", "t80", "a5", "a4"];
+const PRINT_SIZE_ORDER = ["t58", "t80", "a5"];
 
 const PRINT_URDU = {
   "Print / Save": "پرنٹ / محفوظ کریں",
@@ -12332,7 +12332,8 @@ const PRINT_URDU = {
   "Shop counter printer": "دکان کا کاؤنٹر پرنٹر",
   "Preparing…": "تیار ہو رہا ہے…",
   "Your last choice is remembered for next time.": "آپ کی آخری پسند اگلی بار کے لیے یاد رکھی جائے گی۔",
-  "PDF is saved in the selected size — a thermal slip stays a slip, not a full A4 page.": "پی ڈی ایف منتخب سائز میں محفوظ ہوگی — تھرمل سلپ، پورا A4 صفحہ نہیں۔",
+  "PDF is saved in the selected size — a thermal slip stays a slip, A5 stays one invoice page.": "پی ڈی ایف منتخب سائز میں محفوظ ہوگی — تھرمل سلپ رہے گی، A5 ایک انوائس صفحہ۔",
+  "Invoice page": "انوائس صفحہ",
   "In the print window choose “Save as PDF” as the printer.": "پرنٹ ونڈو میں پرنٹر کے طور پر “Save as PDF” منتخب کریں۔",
   "Previous Balance": "پچھلا بیلنس",
   "Driver & Delivery": "ڈرائیور اور ڈیلیوری",
@@ -12415,9 +12416,9 @@ function printLoadPrefs(kind, includeDefs) {
   try {
     const saved = JSON.parse(window.localStorage.getItem("ct-print-pref:" + kind) || "null");
     if (saved && typeof saved === "object") {
-      if (PRINT_SIZES[saved.size]) base.size = saved.size;
+      if (saved.size === "a4") base.size = "a5";
+      else if (PRINT_SIZE_ORDER.includes(saved.size)) base.size = saved.size;
       if (saved.copies === 2) base.copies = 2;
-      if (saved.fit === false) base.fit = false;
       if (saved.include && typeof saved.include === "object") {
         includeDefs.forEach((d) => { if (typeof saved.include[d.key] === "boolean") base.include[d.key] = saved.include[d.key]; });
       }
@@ -12480,7 +12481,7 @@ function printDocStyle(size, urdu, fit = true) {
   const s = PRINT_SIZES[size];
   return {
     width: `${s.widthMm}mm`,
-    minHeight: !s.thermal && !fit ? `${s.heightMm}mm` : undefined,
+    minHeight: !s.thermal && !fit ? `${s.heightMm - 1}mm` : undefined,
     padding: `${s.thermal ? 3 : s.padMm}mm ${s.padMm}mm`,
     boxSizing: "border-box",
     background: "#fff",
@@ -12684,7 +12685,7 @@ function InvoicePaperDoc({ invoice, settings, size, include, copies, urdu, recvP
               </div>
             )}
             {include.signature && (
-              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "14mm", color: "#4b5563" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10mm", color: "#4b5563" }}>
                 <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Received by")}</div>
                 <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Authorized")}</div>
               </div>
@@ -12795,12 +12796,12 @@ function ReceiptDoc({ payment, customer, settings, balances, size, include, copi
             {showProof && (
               <div style={{ marginTop: "4mm" }}>
                 <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Payment Proof")}{proofStatus ? ` · ${L(proofStatus)}` : ""}</div>
-                <img src={proofUrl} alt="" style={{ marginTop: "1.5mm", maxWidth: size === "a4" ? "70%" : "85%", maxHeight: size === "a4" ? "120mm" : "80mm", objectFit: "contain", border: "1px solid #e5e7eb" }} />
+                <img src={proofUrl} alt="" style={{ marginTop: "1.5mm", maxWidth: size === "a4" ? "70%" : "60%", maxHeight: size === "a4" ? "120mm" : "58mm", objectFit: "contain", border: "1px solid #e5e7eb" }} />
                 {proofRecord?.uploaded_by && <div style={{ fontSize: ".8em", color: "#6b7280" }}>{proofRecord.uploaded_by} · {fmtDateTime(proofRecord.uploaded_at)}</div>}
               </div>
             )}
             {include.signature && (
-              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "14mm", color: "#4b5563" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10mm", color: "#4b5563" }}>
                 <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Customer")}</div>
                 <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Authorized")}</div>
               </div>
@@ -12886,8 +12887,8 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
   const setSize = (id) => setPrefs((p) => ({ ...p, size: id }));
   const setInc = (key, val) => setPrefs((p) => ({ ...p, include: { ...p.include, [key]: val } }));
   const setCopies = (n) => setPrefs((p) => ({ ...p, copies: n }));
-  const docProps = { size: prefs.size, include: prefs.include, copies: prefs.copies, urdu: !!prefs.include.urdu, fit: prefs.fit !== false };
-  const setFit = (v) => setPrefs((p) => ({ ...p, fit: v }));
+  // A5 is always a real A5 sheet (148 × 210 mm); thermal rolls fit their content.
+  const docProps = { size: prefs.size, include: prefs.include, copies: prefs.copies, urdu: !!prefs.include.urdu, fit: !!size.thermal };
 
   async function doPrint(asPdf) {
     if (busy) return;
@@ -12897,7 +12898,7 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     const measured = previewDocRef.current ? previewDocRef.current.offsetHeight : 0;
     // Thermal rolls and "Fit to content" paper: the page is exactly as long as the document.
-    const fitPage = size.thermal || prefs.fit !== false;
+    const fitPage = !!size.thermal;
     const heightMm = Math.ceil(((measured || 600) / PRINT_PX_PER_MM) + (size.thermal ? 4 : 2));
     const pageSize = fitPage ? `${size.widthMm}mm ${heightMm}mm` : prefs.size === "a5" ? "A5 portrait" : "A4 portrait";
     const style = document.createElement("style");
@@ -12940,7 +12941,7 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5">
         <div className="min-w-0">
           <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{t("Paper Size")}</div>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+          <div className="grid grid-cols-3 gap-2.5">
             {PRINT_SIZE_ORDER.map((id) => {
               const s = PRINT_SIZES[id];
               const active = prefs.size === id;
@@ -12956,22 +12957,6 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
               );
             })}
           </div>
-
-          {!size.thermal && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <span className="text-[12px] ct-t2 font-semibold me-1">{t("Page Length")}:</span>
-              {[[true, "Fit to content", "No empty space below"], [false, "Full sheet", "Whole A4 / A5 page"]].map(([v, l, sub]) => {
-                const on = (prefs.fit !== false) === v;
-                return (
-                  <button key={l} type="button" onClick={() => setFit(v)}
-                    className={`rounded-xl px-3.5 py-2 text-start transition ${on ? "border-2 border-emerald-400 bg-emerald-400/10" : "ct-chip border-2 border-transparent"}`}>
-                    <div className={`text-[12.5px] font-semibold ${on ? "ct-h" : "ct-t2"}`}>{t(l)}</div>
-                    <div className="text-[10.5px] ct-t3">{t(sub)}</div>
-                  </button>
-                );
-              })}
-            </div>
-          )}
 
           <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Include")}</div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -13005,7 +12990,7 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
             ) : <span />}
           </div>
           <div className="mt-3 text-[11.5px] ct-t3 space-y-0.5">
-            <div>• {t("PDF is saved in the selected size — a thermal slip stays a slip, not a full A4 page.")}</div>
+            <div>• {t("PDF is saved in the selected size — a thermal slip stays a slip, A5 stays one invoice page.")}</div>
             <div>• {t("In the print window choose “Save as PDF” as the printer.")}</div>
             <div>• {t("Your last choice is remembered for next time.")}</div>
           </div>
