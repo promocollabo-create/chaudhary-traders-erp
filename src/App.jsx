@@ -12367,6 +12367,11 @@ const PRINT_URDU = {
   "Received": "وصول",
   "Paid": "ادا شدہ",
   "Delivery": "ڈیلیوری",
+  "Rickshaw & Delivery Details": "رکشہ اور ڈیلیوری تفصیل",
+  "Driver": "ڈرائیور",
+  "Rickshaw Rent": "رکشہ کرایہ",
+  "Delivery Charges": "ڈیلیوری چارجز",
+  "Payment Received By": "رقم وصول کنندہ",
   "Rent": "کرایہ",
   "Payment Proof": "ادائیگی کا ثبوت",
   "Verified": "تصدیق شدہ",
@@ -12414,11 +12419,10 @@ function printLoadPrefs(kind, includeDefs) {
   const base = { size: "t80", copies: 1, fit: true, include: {} };
   includeDefs.forEach((d) => { base.include[d.key] = d.default; });
   try {
-    const saved = JSON.parse(window.localStorage.getItem("ct-print-pref:" + kind) || "null");
+    const saved = JSON.parse(window.localStorage.getItem("ct-print-pref2:" + kind) || "null");
     if (saved && typeof saved === "object") {
       if (saved.size === "a4") base.size = "a5";
       else if (PRINT_SIZE_ORDER.includes(saved.size)) base.size = saved.size;
-      if (saved.copies === 2) base.copies = 2;
       if (saved.include && typeof saved.include === "object") {
         includeDefs.forEach((d) => { if (typeof saved.include[d.key] === "boolean") base.include[d.key] = saved.include[d.key]; });
       }
@@ -12428,7 +12432,7 @@ function printLoadPrefs(kind, includeDefs) {
 }
 
 function printSavePrefs(kind, prefs) {
-  try { window.localStorage.setItem("ct-print-pref:" + kind, JSON.stringify(prefs)); } catch {}
+  try { window.localStorage.setItem("ct-print-pref2:" + kind, JSON.stringify({ ...prefs, copies: 1 })); } catch {}
 }
 
 function printWaitImages(root, timeoutMs = 6000) {
@@ -12546,12 +12550,14 @@ function InvoiceThermalDoc({ invoice, settings, size, include, copies, urdu, rec
                 <PrintRow l={L("Net Balance")} v={fmtMoney(outstandingNow)} bold big />
               </>
             )}
-            {include.delivery && (invoice.driverName || invoice.vehicleNumber) && (
+            {include.delivery && (invoice.driverName || invoice.driverId || invoice.vehicleType || invoice.vehicleNumber || Number(invoice.rickshawRent) > 0 || Number(invoice.deliveryCharges) > 0 || invoice.receivedBy) && (
               <>
                 <PrintRule />
-                <div>{L("Delivery")}: <PrintLtr>{invoice.driverName || "-"}{invoice.driverId ? ` (${invoice.driverId})` : ""}</PrintLtr></div>
-                {(invoice.vehicleType || invoice.vehicleNumber) && <div><PrintLtr>{invoice.vehicleType} {invoice.vehicleNumber ? `[${invoice.vehicleNumber}]` : ""}</PrintLtr></div>}
-                {Number(invoice.rickshawRent) > 0 && <div>{L("Rent")}: <PrintLtr>{fmtMoney(invoice.rickshawRent)}</PrintLtr></div>}
+                <div style={{ fontWeight: 700 }}>{L("Rickshaw & Delivery Details")}</div>
+                <div>{L("Driver")}: <PrintLtr>{invoice.driverName || "-"}{invoice.driverId ? ` (${invoice.driverId})` : ""}{invoice.vehicleType ? ` — ${invoice.vehicleType}` : ""}{invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}</PrintLtr></div>
+                <PrintRow l={L("Rickshaw Rent")} v={fmtMoney(invoice.rickshawRent || 0)} />
+                <PrintRow l={L("Delivery Charges")} v={fmtMoney(invoice.deliveryCharges || 0)} />
+                <div>{L("Payment Received By")}: <PrintLtr>{invoice.receivedBy || "-"}</PrintLtr></div>
               </>
             )}
             {include.recvProof && recvProofs.length > 0 && (
@@ -12652,12 +12658,15 @@ function InvoicePaperDoc({ invoice, settings, size, include, copies, urdu, recvP
                 ))}
               </tbody>
             </table>
-            {include.delivery && (invoice.driverName || delivery > 0) && (
-              <div style={{ fontSize: ".9em", color: "#374151", marginBottom: "3mm" }}>
-                <b>{L("Delivery")}:</b> {invoice.driverName || "-"}{invoice.driverId ? ` (${invoice.driverId})` : ""}
-                {invoice.vehicleType ? ` — ${invoice.vehicleType}` : ""}{invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}
-                {delivery > 0 ? ` · ${L("Rickshaw + Delivery")}: ${fmtMoney(delivery)}` : ""}
-                {invoice.receivedBy ? ` · ${L("Received by")}: ${invoice.receivedBy}` : ""}
+            {include.delivery && (invoice.driverName || invoice.driverId || invoice.vehicleType || invoice.vehicleNumber || Number(invoice.rickshawRent) > 0 || Number(invoice.deliveryCharges) > 0 || invoice.receivedBy) && (
+              <div style={{ border: "1px solid #d1d5db", borderRadius: "2mm", padding: "2mm 3mm", fontSize: ".9em", color: "#111827", marginBottom: "3mm" }}>
+                <div style={{ fontWeight: 700, marginBottom: "1mm" }}>{L("Rickshaw & Delivery Details")}</div>
+                <div>{L("Driver")}: <PrintLtr>{invoice.driverName || "-"}{invoice.driverId ? ` (${invoice.driverId})` : ""}{invoice.vehicleType ? ` — ${invoice.vehicleType}` : ""}{invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}</PrintLtr></div>
+                <div style={{ display: "flex", flexWrap: "wrap", columnGap: "6mm" }}>
+                  <span>{L("Rickshaw Rent")}: <PrintLtr>{fmtMoney(invoice.rickshawRent || 0)}</PrintLtr></span>
+                  <span>{L("Delivery Charges")}: <PrintLtr>{fmtMoney(invoice.deliveryCharges || 0)}</PrintLtr></span>
+                  <span>{L("Payment Received By")}: <PrintLtr>{invoice.receivedBy || "-"}</PrintLtr></span>
+                </div>
               </div>
             )}
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
