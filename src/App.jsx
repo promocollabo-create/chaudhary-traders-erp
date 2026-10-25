@@ -12310,8 +12310,8 @@ const PRINT_PX_PER_MM = 96 / 25.4;
 const PRINT_SIZES = {
   t58: { label: "Thermal 58mm", sub: "Mini printer", desc: "Portable · Bluetooth", widthMm: 58, padMm: 3, thermal: true, font: 10.5 },
   t80: { label: "Thermal 80mm", sub: "Recommended", desc: "Shop counter printer", widthMm: 80, padMm: 4, thermal: true, font: 12 },
-  a5: { label: "A5", sub: "Half page", desc: "148 × 210 mm", widthMm: 148, heightMm: 210, padMm: 9, thermal: false, font: 10.5 },
-  a4: { label: "A4", sub: "Full page", desc: "210 × 297 mm", widthMm: 210, heightMm: 297, padMm: 13, thermal: false, font: 12.5 },
+  a5: { label: "A5", sub: "Half page", desc: "148 × 210 mm", widthMm: 148, heightMm: 210, padMm: 9, thermal: false, font: 12 },
+  a4: { label: "A4", sub: "Full page", desc: "210 × 297 mm", widthMm: 210, heightMm: 297, padMm: 14, thermal: false, font: 14.5 },
 };
 const PRINT_SIZE_ORDER = ["t58", "t80", "a5", "a4"];
 
@@ -12393,6 +12393,11 @@ const PRINT_URDU = {
   "Remaining": "باقی",
   "Booking": "بکنگ",
   "Ph": "فون",
+  "Page Length": "صفحے کی لمبائی",
+  "Fit to content": "مواد کے مطابق",
+  "Full sheet": "پورا صفحہ",
+  "No empty space below": "نیچے خالی جگہ نہیں",
+  "Whole A4 / A5 page": "پورا A4 / A5 صفحہ",
 };
 Object.entries(PRINT_URDU).forEach(([en, ur]) => {
   if (!(en in translations.ur)) translations.ur[en] = ur;
@@ -12405,13 +12410,14 @@ function printL(key, urdu) {
 }
 
 function printLoadPrefs(kind, includeDefs) {
-  const base = { size: "t80", copies: 1, include: {} };
+  const base = { size: "t80", copies: 1, fit: true, include: {} };
   includeDefs.forEach((d) => { base.include[d.key] = d.default; });
   try {
     const saved = JSON.parse(window.localStorage.getItem("ct-print-pref:" + kind) || "null");
     if (saved && typeof saved === "object") {
       if (PRINT_SIZES[saved.size]) base.size = saved.size;
       if (saved.copies === 2) base.copies = 2;
+      if (saved.fit === false) base.fit = false;
       if (saved.include && typeof saved.include === "object") {
         includeDefs.forEach((d) => { if (typeof saved.include[d.key] === "boolean") base.include[d.key] = saved.include[d.key]; });
       }
@@ -12470,10 +12476,11 @@ function PrintCopyWrap({ copies, thermal, children }) {
   );
 }
 
-function printDocStyle(size, urdu) {
+function printDocStyle(size, urdu, fit = true) {
   const s = PRINT_SIZES[size];
   return {
     width: `${s.widthMm}mm`,
+    minHeight: !s.thermal && !fit ? `${s.heightMm}mm` : undefined,
     padding: `${s.thermal ? 3 : s.padMm}mm ${s.padMm}mm`,
     boxSizing: "border-box",
     background: "#fff",
@@ -12568,7 +12575,7 @@ function InvoiceThermalDoc({ invoice, settings, size, include, copies, urdu, rec
   );
 }
 
-function InvoicePaperDoc({ invoice, settings, size, include, copies, urdu, recvProofs, rs }) {
+function InvoicePaperDoc({ invoice, settings, size, include, copies, urdu, recvProofs, rs, fit = true }) {
   const L = (k) => printL(k, urdu);
   const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
   const prevBal = (invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0);
@@ -12580,8 +12587,8 @@ function InvoicePaperDoc({ invoice, settings, size, include, copies, urdu, recvP
   const td = { padding: "1.6mm 2mm", borderBottom: "1px solid #e5e7eb" };
   const num = { textAlign: "end" };
   return (
-    <div style={printDocStyle(size, urdu)}>
-      <PrintCopyWrap copies={copies} thermal={false}>
+    <div style={printDocStyle(size, urdu, fit)}>
+      <PrintCopyWrap copies={copies} thermal={!!fit}>
         {(copyLabel) => (
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "3px solid #0f172a", paddingBottom: "3mm", marginBottom: "3mm" }}>
@@ -12691,7 +12698,7 @@ function InvoicePaperDoc({ invoice, settings, size, include, copies, urdu, recvP
 
 /* ---------------- Payment receipt documents ---------------- */
 
-function ReceiptDoc({ payment, customer, settings, balances, size, include, copies, urdu, proofUrl, proofRecord }) {
+function ReceiptDoc({ payment, customer, settings, balances, size, include, copies, urdu, proofUrl, proofRecord, fit = true }) {
   const L = (k) => printL(k, urdu);
   const s = PRINT_SIZES[size];
   const receiptNo = paymentReceiptNo(payment);
@@ -12699,8 +12706,8 @@ function ReceiptDoc({ payment, customer, settings, balances, size, include, copi
   const proofStatus = proofRecord?.verification_status;
   const showProof = include.proof && proofUrl;
   return (
-    <div style={printDocStyle(size, urdu)}>
-      <PrintCopyWrap copies={copies} thermal={s.thermal}>
+    <div style={printDocStyle(size, urdu, fit)}>
+      <PrintCopyWrap copies={copies} thermal={s.thermal || !!fit}>
         {(copyLabel) => s.thermal ? (
           <div>
             <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.3em" }}>{settings.companyName}</div>
@@ -12879,7 +12886,8 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
   const setSize = (id) => setPrefs((p) => ({ ...p, size: id }));
   const setInc = (key, val) => setPrefs((p) => ({ ...p, include: { ...p.include, [key]: val } }));
   const setCopies = (n) => setPrefs((p) => ({ ...p, copies: n }));
-  const docProps = { size: prefs.size, include: prefs.include, copies: prefs.copies, urdu: !!prefs.include.urdu };
+  const docProps = { size: prefs.size, include: prefs.include, copies: prefs.copies, urdu: !!prefs.include.urdu, fit: prefs.fit !== false };
+  const setFit = (v) => setPrefs((p) => ({ ...p, fit: v }));
 
   async function doPrint(asPdf) {
     if (busy) return;
@@ -12888,8 +12896,10 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
     await printWaitImages(node);
     await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
     const measured = previewDocRef.current ? previewDocRef.current.offsetHeight : 0;
-    const heightMm = size.thermal ? Math.ceil(((measured || 600) / PRINT_PX_PER_MM) + 4) : null;
-    const pageSize = size.thermal ? `${size.widthMm}mm ${heightMm}mm` : prefs.size === "a5" ? "A5 portrait" : "A4 portrait";
+    // Thermal rolls and "Fit to content" paper: the page is exactly as long as the document.
+    const fitPage = size.thermal || prefs.fit !== false;
+    const heightMm = Math.ceil(((measured || 600) / PRINT_PX_PER_MM) + (size.thermal ? 4 : 2));
+    const pageSize = fitPage ? `${size.widthMm}mm ${heightMm}mm` : prefs.size === "a5" ? "A5 portrait" : "A4 portrait";
     const style = document.createElement("style");
     style.setAttribute("data-ct-print", "1");
     style.textContent = `
@@ -12946,6 +12956,22 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
               );
             })}
           </div>
+
+          {!size.thermal && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className="text-[12px] ct-t2 font-semibold me-1">{t("Page Length")}:</span>
+              {[[true, "Fit to content", "No empty space below"], [false, "Full sheet", "Whole A4 / A5 page"]].map(([v, l, sub]) => {
+                const on = (prefs.fit !== false) === v;
+                return (
+                  <button key={l} type="button" onClick={() => setFit(v)}
+                    className={`rounded-xl px-3.5 py-2 text-start transition ${on ? "border-2 border-emerald-400 bg-emerald-400/10" : "ct-chip border-2 border-transparent"}`}>
+                    <div className={`text-[12.5px] font-semibold ${on ? "ct-h" : "ct-t2"}`}>{t(l)}</div>
+                    <div className="text-[10.5px] ct-t3">{t(sub)}</div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
 
           <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Include")}</div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
