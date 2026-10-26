@@ -1125,6 +1125,7 @@ function useTheme() {
 /* ---------------- Icons ---------------- */
 
 const UI_ICON_PATHS = {
+  scan: "M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2M7 12h10",
   voucher: "M5 2h14v20l-2.5-1.5L14 22l-2-1.5-2 1.5-2.5-1.5L5 22zM9 7h6M9 11h6M9 15h3",
   dashboard: "M3 3h7v9H3zM14 3h7v5h-7zM14 12h7v9h-7zM3 16h7v5H3z",
   users: "M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75",
@@ -1207,6 +1208,7 @@ const NAV_GROUPS = [
     { id: "outstandingTransfer", label: "Outstanding Transfer", icon: "transfer" },
     { id: "adjustments", label: "Adjustments", icon: "sliders" },
     { id: "vouchers", label: "Payment Vouchers", icon: "voucher" },
+    { id: "paymentsDue", label: "Payments Due", icon: "calendar" },
     { id: "cashbook", label: "Cash Book", icon: "cash" },
   ]},
   { title: "Business", items: [
@@ -1966,4 +1968,14866 @@ function returnsForInvoice(invoiceId, returns) {
 }
 // Returns the list of active (non-deleted) Exchanges for an invoice.
 function exchangesForInvoice(invoiceId, exchanges) {
-  return exch
+  return exchanges.filter((ex) => ex.invoiceId === invoiceId && ex.status !== "Deleted");
+}
+
+// Per line-item remaining quantity = original qty - qty returned (via Sales
+// Return) - qty returned-as-part-of-exchange (via Exchange's returnedItems).
+// Matching is done by itemIndex (stamped onto return/exchange line items
+// when they are created) so it stays correct even if two items share a name.
+//
+// BUGFIX (partial qty / partial length): products sold by Feet, Meter, KG,
+// Liter or Sq.Ft can be returned/exchanged in fractional amounts (e.g. a
+// customer returns 6 feet out of 39 feet sold across 3 pipes). The rate
+// used for every partial calculation is always
+//     Original Line Amount ÷ Original Sold Quantity  (= it.price, since
+//     it.total was originally computed as it.qty * it.price on the invoice)
+// — never re-derived from a piece count. All qty math below is rounded via
+// roundQty to eliminate floating point drift (e.g. 32.999999999996 → 33).
+function computeInvoiceItemBreakdown(invoice, returns, exchanges) {
+  const activeReturns = returnsForInvoice(invoice.id, returns);
+  const activeExchanges = exchangesForInvoice(invoice.id, exchanges);
+  return invoice.items.map((it, idx) => {
+    const returnedQty = roundQty(activeReturns.reduce((sum, r) => {
+      const line = (r.items || []).find((x) => x.itemIndex === idx);
+      return sum + (line ? Number(line.qtyReturned) || 0 : 0);
+    }, 0));
+    const exchangedQty = roundQty(activeExchanges.reduce((sum, ex) => {
+      const line = (ex.returnedItems || []).find((x) => x.itemIndex === idx);
+      return sum + (line ? Number(line.qty) || 0 : 0);
+    }, 0));
+    // Per-unit rate — always Original Line Amount ÷ Original Sold Quantity.
+    // it.price already equals that (total was qty*price at invoice time),
+    // but we recompute defensively from it.total/it.qty when available so
+    // this keeps working even for older records where price may be stale.
+    const perUnitRate = Number(it.qty) > 0 ? roundMoney(Number(it.total ?? it.qty * it.price) / Number(it.qty)) : Number(it.price) || 0;
+    const remainingQty = roundQty(Math.max(0, Number(it.qty) - returnedQty - exchangedQty));
+    return { ...it, itemIndex: idx, returnedQty, exchangedQty, remainingQty, perUnitRate };
+  });
+}
+
+// Computes the overall invoice status per Feature 4 / Feature 5:
+// Normal, Partially Returned, Fully Returned, Partially Exchanged,
+// Fully Exchanged, Returned + Exchanged.
+function computeInvoiceReturnStatus(invoice, returns, exchanges) {
+  const breakdown = computeInvoiceItemBreakdown(invoice, returns, exchanges);
+  const totalOriginal = roundQty(breakdown.reduce((s, it) => s + Number(it.qty), 0));
+  const totalReturned = roundQty(breakdown.reduce((s, it) => s + it.returnedQty, 0));
+  const totalExchanged = roundQty(breakdown.reduce((s, it) => s + it.exchangedQty, 0));
+  const totalRemaining = roundQty(breakdown.reduce((s, it) => s + it.remainingQty, 0));
+  const hasReturn = totalReturned > 0;
+  const hasExchange = totalExchanged > 0;
+  const isFullyConsumed = totalRemaining <= 0 && totalOriginal > 0;
+
+  let status = "Normal";
+  if (hasReturn && hasExchange) {
+    status = "Returned + Exchanged";
+  } else if (hasExchange) {
+    status = isFullyConsumed ? "Fully Exchanged" : "Partially Exchanged";
+  } else if (hasReturn) {
+    status = isFullyConsumed ? "Fully Returned" : "Partially Returned";
+  }
+
+  return {
+    breakdown, totalOriginal, totalReturned, totalExchanged, totalRemaining,
+    isFullyConsumed, isLocked: isFullyConsumed, status,
+  };
+}
+
+const RETURN_STATUS_TONE = {
+  "Normal": "bg-slate-100 text-slate-500",
+  "Partially Returned": "bg-blue-100 text-blue-700",
+  "Fully Returned": "bg-red-100 text-red-700",
+  "Partially Exchanged": "bg-blue-100 text-blue-700",
+  "Fully Exchanged": "bg-amber-100 text-amber-700",
+  "Returned + Exchanged": "bg-purple-100 text-purple-700",
+};
+
+/* ---------------- Promise To Pay helpers (Phase 3) ---------------- */
+
+const PROMISE_STATUS_TONE = {
+  "Pending": "bg-blue-100 text-blue-700",
+  "Partially Paid": "bg-amber-100 text-amber-700",
+  "Completed": "bg-emerald-100 text-emerald-700",
+  "Broken Promise": "bg-red-100 text-red-700",
+  "Cancelled": "bg-slate-200 text-slate-600",
+};
+
+// Feature 11 — Auto Status. Given a raw promise record, derives the
+// effective status: if manually Completed/Cancelled that's kept as-is;
+// otherwise Pending/Partially Paid flips to "Broken Promise" once the
+// Expected Payment Date has passed and money is still owed.
+function computePromiseStatus(promise) {
+  if (promise.status === "Completed" || promise.status === "Cancelled" || promise.status === "Deleted") {
+    return promise.status;
+  }
+  const paid = Number(promise.paidAmount) || 0;
+  const amount = Number(promise.amount) || 0;
+  const remaining = Math.max(0, amount - paid);
+  if (remaining <= 0) return "Completed";
+  const isOverdue = promise.expectedDate && todayISO() > promise.expectedDate;
+  if (isOverdue) return "Broken Promise";
+  return paid > 0 ? "Partially Paid" : "Pending";
+}
+
+function promiseWithComputed(promise) {
+  const paid = Number(promise.paidAmount) || 0;
+  const amount = Number(promise.amount) || 0;
+  const remaining = Math.max(0, amount - paid);
+  return { ...promise, paidAmount: paid, remainingAmount: remaining, status: computePromiseStatus(promise) };
+}
+
+/* ---------------- Outstanding Transfer helpers ---------------- */
+
+const TRANSFER_STATUS_TONE = {
+  Active: "bg-emerald-100 text-emerald-700",
+  Reversed: "bg-slate-200 text-slate-600",
+};
+
+/* ---------------- Adjustment helpers ---------------- */
+
+const ADJUSTMENT_CATEGORIES = [
+  "Service / Kaam", "Transport", "Loading", "Unloading", "Labour", "Repair",
+  "Extra Charges", "Discount", "Compensation", "Balance Correction", "Other",
+];
+
+const ADJUSTMENT_STATUS_TONE = {
+  Active: "bg-emerald-100 text-emerald-700",
+  Reversed: "bg-slate-200 text-slate-600",
+};
+
+/* ---------------- Commission Management helpers ---------------- */
+// Integrates with the existing Invoice/Customer/Payment systems without
+// altering any of them: commission is tracked as its own set of entities
+// (commissionAgents / commissionRules / commissionTransactions /
+// commissionPayments) that only ever READ invoice data. Commission is
+// never added to invoice.total, never changes customer ledgers, and
+// never touches the payments table used for customer payments.
+
+const COMMISSION_TYPES = ["percentage", "fixed", "per_bag", "per_item"];
+const COMMISSION_TYPE_LABELS = {
+  percentage: "Percentage",
+  fixed: "Fixed Amount",
+  per_bag: "Per Bag",
+  per_item: "Per Item",
+};
+const COMMISSION_STATUSES = ["Pending", "Approved", "Paid", "Cancelled"];
+const COMMISSION_STATUS_TONE = {
+  Pending: "bg-blue-100 text-blue-700",
+  Approved: "bg-amber-100 text-amber-700",
+  Paid: "bg-emerald-100 text-emerald-700",
+  Cancelled: "bg-slate-200 text-slate-600",
+};
+const COMMISSION_PAYMENT_METHODS = ["Cash", "Bank", "Online Transfer", "Other"];
+const ALL_PRODUCTS_KEY = "All Products";
+
+// Formats a commission rate for display, e.g. "2%" or "Rs 20 / Bag".
+function fmtCommissionRate(type, rate) {
+  const r = Number(rate) || 0;
+  if (type === "percentage") return `${r}%`;
+  if (type === "per_bag") return `${fmtMoney(r)} / Bag`;
+  if (type === "per_item") return `${fmtMoney(r)} / Item`;
+  return `${fmtMoney(r)} / Invoice`;
+}
+
+// Picks the single best-matching Active rule for one invoice line item,
+// per the priority ladder:
+//   1. Agent + specific Product (rule.productMatch === item.name)
+//   2. Agent + All Products      (rule.productMatch === "All Products")
+//   3. Agent's own default commissionType/commissionRate (from the Agent
+//      record itself) — used only when no Rule at all matches this agent.
+// Rules are further filtered to Active status and to the invoice date
+// falling inside [startDate, endDate] when those are set.
+function findMatchingRule(rules, agentId, productName, invoiceDate) {
+  const active = (rules || []).filter((r) => {
+    if (r.agentId !== agentId) return false;
+    if (r.status !== "Active") return false;
+    if (r.startDate && invoiceDate < r.startDate) return false;
+    if (r.endDate && invoiceDate > r.endDate) return false;
+    return true;
+  });
+  const specific = active.find((r) => r.productMatch === productName);
+  if (specific) return specific;
+  const allProducts = active.find((r) => r.productMatch === ALL_PRODUCTS_KEY);
+  if (allProducts) return allProducts;
+  return null;
+}
+
+// Computes commission for one invoice, given the agent and the current
+// (possibly return/exchange-adjusted) item breakdown. Returns both the
+// total and a per-source breakdown so the Commission Ledger / invoice
+// preview can show exactly how the number was built.
+//
+// - percentage / fixed rules are applied ONCE per matching rule-group
+//   (not once per line item), matching "2% of the sale" / "Rs 1,000 per
+//   invoice" semantics rather than accidentally multiplying by line count.
+// - per_bag / per_item rules are applied per matched quantity (rate × qty),
+//   which is what makes "recalculates automatically" (Feature 16) work:
+//   call this again with the post-return breakdown and it naturally
+//   produces the lower quantity's commission.
+// - minSaleAmount / maxCommission are enforced per rule-group.
+// - Falls back to the agent's own default commissionType/commissionRate
+//   (spread across the WHOLE invoice, like an implicit "All Products"
+//   rule) when no Rule matches this agent at all.
+function computeCommissionForInvoice(agent, rules, items, invoiceDate, subtotal) {
+  if (!agent) return { total: 0, lines: [] };
+  const cleanItems = (items || []).filter((it) => Number(it.qty) > 0);
+  const groups = {}; // ruleId (or "__default__") -> { rule, items: [] }
+
+  cleanItems.forEach((it) => {
+    const rule = findMatchingRule(rules, agent.id, it.name, invoiceDate);
+    const key = rule ? rule.id : "__default__";
+    if (!groups[key]) groups[key] = { rule, items: [] };
+    groups[key].items.push(it);
+  });
+
+  // Nothing matched any explicit Rule at all -> whole invoice falls back
+  // to the agent's own default commission type/rate (tier 4).
+  const matchedAnyRule = Object.values(groups).some((g) => g.rule);
+  if (!matchedAnyRule && agent.defaultCommissionType && Number(agent.defaultCommissionRate) > 0) {
+    groups.__default__ = { rule: null, items: cleanItems };
+  }
+
+  const lines = [];
+  Object.entries(groups).forEach(([key, group]) => {
+    const rule = group.rule;
+    const type = rule ? rule.commissionType : agent.defaultCommissionType;
+    const rate = Number(rule ? rule.commissionRate : agent.defaultCommissionRate) || 0;
+    if (!type || rate <= 0) return;
+    const matchedQty = roundQty(group.items.reduce((s, it) => s + Number(it.qty), 0));
+    const matchedAmount = roundMoney(group.items.reduce((s, it) => s + Number(it.total ?? it.qty * it.price), 0));
+    const minSale = rule && Number(rule.minSaleAmount) > 0 ? Number(rule.minSaleAmount) : 0;
+    const basisAmount = rule && rule.productMatch === ALL_PRODUCTS_KEY ? subtotal : matchedAmount;
+    if (minSale > 0 && basisAmount < minSale) return;
+
+    let commission = 0;
+    if (type === "percentage") {
+      commission = roundMoney((basisAmount * rate) / 100);
+    } else if (type === "fixed") {
+      commission = roundMoney(rate);
+    } else {
+      // per_bag / per_item — rate × matched quantity
+      commission = roundMoney(rate * matchedQty);
+    }
+    const maxCap = rule && Number(rule.maxCommission) > 0 ? Number(rule.maxCommission) : 0;
+    if (maxCap > 0 && commission > maxCap) commission = maxCap;
+    if (commission <= 0) return;
+
+    lines.push({
+      ruleId: rule ? rule.id : "",
+      source: rule ? (rule.productMatch === ALL_PRODUCTS_KEY ? "All Products Rule" : `${rule.productMatch} Rule`) : "Agent Default",
+      commissionType: type,
+      commissionRate: rate,
+      matchedQty,
+      matchedAmount,
+      commission,
+    });
+  });
+
+  const total = roundMoney(lines.reduce((s, l) => s + l.commission, 0));
+  return { total, lines };
+}
+
+// Recomputes a commission transaction's amount from the invoice's CURRENT
+// item breakdown (i.e. after any Sales Return / Exchange has reduced
+// remaining quantities), using the SAME rule the transaction was
+// originally created against wherever possible, so partial returns
+// correctly shrink (never silently zero out) the commission. This is
+// called after createSalesReturn / deleteSalesReturn / createExchangeFn /
+// deleteExchangeFn and after invoice edits that change items.
+function recalculatedCommissionAmount(agent, rules, invoice, returns, exchanges) {
+  const breakdown = computeInvoiceItemBreakdown(invoice, returns, exchanges);
+  const remainingItems = breakdown
+    .filter((it) => it.remainingQty > 0)
+    .map((it) => ({ name: it.name, qty: it.remainingQty, price: it.perUnitRate, total: roundMoney(it.remainingQty * it.perUnitRate) }));
+  const remainingSubtotal = roundMoney(remainingItems.reduce((s, it) => s + it.total, 0));
+  return computeCommissionForInvoice(agent, rules, remainingItems, invoice.date, remainingSubtotal);
+}
+
+// Ledger-style aggregation for one Commission Agent: every commission
+// transaction plus every commission payment against them, running
+// balance style, mirroring the customer ledger's shape/spirit but kept
+// completely separate from computeLedgerForCustomer (different entities,
+// different table).
+function computeCommissionSummaryForAgent(agentId, transactions, payments) {
+  const myTxns = (transactions || []).filter((tx) => tx.agentId === agentId && tx.status !== "Cancelled");
+  const totalCommission = roundMoney(myTxns.reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const totalPaid = roundMoney(myTxns.reduce((s, tx) => s + Number(tx.paidAmount || 0), 0));
+  const remaining = roundMoney(totalCommission - totalPaid);
+  const pending = roundMoney((transactions || []).filter((tx) => tx.agentId === agentId && tx.status === "Pending").reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const approved = roundMoney((transactions || []).filter((tx) => tx.agentId === agentId && tx.status === "Approved").reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const paidStatus = roundMoney((transactions || []).filter((tx) => tx.agentId === agentId && tx.status === "Paid").reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  return { totalCommission, totalPaid, remaining, pending, approved, paidStatus, transactions: myTxns };
+}
+
+/* ---------------- Dashboard ---------------- */
+
+/* ---------------- Dashboard (premium) ----------------
+   Read-only: every number below is computed from the same records the
+   rest of the ERP uses (invoices, payments, ledger outstanding,
+   promises, bookings). Nothing is written from this page. */
+
+const DASH_URDU = {
+  "Business overview": "کاروبار کا جائزہ",
+  "Today's Promise Collection": "آج کی وعدہ وصولی",
+  "Collected (This Week)": "وصولی (اس ہفتے)",
+  "Cash (This Month)": "نقد وصولی (اس ماہ)",
+  "This Month Sales": "اس ماہ کی فروخت",
+  "vs yesterday": "گزشتہ کل کے مقابلے",
+  "vs last week": "پچھلے ہفتے کے مقابلے",
+  "vs last month": "پچھلے ماہ کے مقابلے",
+  "invoices today": "آج کی انوائسز",
+  "payments": "ادائیگیاں",
+  "customers": "گاہک",
+  "Sales vs Collection": "فروخت بمقابلہ وصولی",
+  "Last 12 months": "پچھلے 12 ماہ",
+  "Collection": "وصولی",
+  "Smart Insights": "اسمارٹ انسائٹس",
+  "All good — nothing needs attention right now.": "سب ٹھیک ہے — ابھی کسی چیز پر توجہ کی ضرورت نہیں۔",
+  "Top Outstanding": "سب سے زیادہ بقایا",
+  "View all": "سب دیکھیں",
+  "Payment Reminders": "ادائیگی کی یاد دہانیاں",
+  "No payment for": "ادائیگی نہیں",
+  "days": "دن",
+  "Never paid": "کبھی ادائیگی نہیں",
+  "Top Products": "سرفہرست مصنوعات",
+  "This month · by revenue": "اس ماہ · آمدنی کے لحاظ سے",
+  "No sales this month yet.": "اس ماہ ابھی کوئی فروخت نہیں۔",
+  "Quick Actions": "فوری کام",
+  "Total": "کل",
+  "Others": "دیگر",
+  "Send reminder": "یاد دہانی بھیجیں",
+  "No overdue customers.": "کوئی واجب الادا گاہک نہیں۔",
+  "No outstanding balances.": "کوئی بقایا نہیں۔",
+  "Return": "واپسی",
+  "Booking": "بکنگ",
+};
+Object.entries(DASH_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
+
+function dashShortMoney(n) {
+  const v = Number(n) || 0;
+  const a = Math.abs(v);
+  if (a >= 10000000) return `Rs ${(v / 10000000).toFixed(2)}Cr`;
+  if (a >= 100000) return `Rs ${(v / 100000).toFixed(a >= 1000000 ? 1 : 2)}L`;
+  if (a >= 1000) return `Rs ${(v / 1000).toFixed(0)}K`;
+  return `Rs ${Math.round(v)}`;
+}
+
+function dashPct(now, before) {
+  if (!before) return now > 0 ? null : 0;
+  return Math.round(((now - before) / Math.abs(before)) * 1000) / 10;
+}
+
+function dashDaysAgoISO(n) {
+  const d = parseDateValue(todayISO());
+  d.setDate(d.getDate() - n);
+  return dateToLocalISO(d);
+}
+
+function Sparkline({ points, color, w = 72, h = 28 }) {
+  const pts = points && points.length ? points : [0, 0];
+  const max = Math.max(...pts), min = Math.min(...pts);
+  const d = pts.map((v, i) => `${i ? "L" : "M"}${((i / Math.max(1, pts.length - 1)) * w).toFixed(1)} ${(h - 2 - ((v - min) / (max - min || 1)) * (h - 4)).toFixed(1)}`).join(" ");
+  const gid = React.useMemo(() => "sp" + Math.random().toString(36).slice(2, 8), []);
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="shrink-0" aria-hidden="true">
+      <defs>
+        <linearGradient id={gid} x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0" stopColor={color} stopOpacity=".35" />
+          <stop offset="1" stopColor={color} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={`${d} L${w} ${h} L0 ${h}Z`} fill={`url(#${gid})`} className="ct-rise" />
+      <path d={d} fill="none" stroke={color} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" pathLength="1" className="ct-draw" />
+    </svg>
+  );
+}
+
+function DashTrend({ pct, invert }) {
+  if (pct === undefined) return null;
+  if (pct == null) return <span className="text-[11px] font-bold text-emerald-400">{t("New")}</span>;
+  if (pct === 0) return <span className="text-[11px] font-bold ct-t3">—</span>;
+  const up = pct > 0;
+  const good = invert ? !up : up;
+  return <span className={`text-[11px] font-bold ${good ? "text-emerald-400" : "text-rose-400"}`}>{up ? "▲" : "▼"} {Math.abs(pct)}%</span>;
+}
+
+function DashKpi({ label, value, money = true, pct, invert, spark, color, sub, delay = 0, tone, className = "" }) {
+  return (
+    <div className={`ct-card ct-lift ct-rise p-4 min-w-0 ${className}`} style={{ animationDelay: `${delay}s` }}>
+      <div className="flex items-start justify-between gap-2">
+        <div className="text-[12px] ct-t2 font-medium truncate min-w-0">{t(label)}</div>
+        <span className="shrink-0 whitespace-nowrap"><DashTrend pct={pct} invert={invert} /></span>
+      </div>
+      <div className="flex items-end justify-between gap-2 mt-2">
+        <div className={`ct-display text-[17px] sm:text-[21px] font-bold tabular-nums whitespace-nowrap ${tone || "ct-h"}`}>
+          <CountUp value={value} format={money ? fmtMoney : (n) => String(Math.round(n))} />
+        </div>
+        <span className="hidden sm:block"><Sparkline points={spark} color={color} w={60} h={26} /></span>
+      </div>
+      <div className="text-[11px] ct-t3 mt-1 truncate">{sub}</div>
+    </div>
+  );
+}
+
+function DashSectionTitle({ title, sub, right }) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <div className="ct-display text-[16px] font-bold ct-h">{t(title)}</div>
+        {sub && <div className="text-[12px] ct-t3">{sub}</div>}
+      </div>
+      {right}
+    </div>
+  );
+}
+
+function DashSalesChart({ months }) {
+  const W = 640, H = 170;
+  const max = Math.max(1, ...months.map((m) => Math.max(m.sales, m.collected))) * 1.12;
+  const bw = W / months.length;
+  const y = (v) => H - (v / max) * H;
+  const line = months.map((m, i) => `${i ? "L" : "M"}${(i * bw + bw / 2).toFixed(1)} ${y(m.collected).toFixed(1)}`).join(" ");
+  const last = months[months.length - 1];
+  return (
+    <svg className="w-full h-full min-h-[190px]" viewBox={`0 -40 ${W} ${H + 64}`} preserveAspectRatio="none" role="img" aria-label="Sales vs collection chart">
+      <defs>
+        <linearGradient id="ctBarHi" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stopColor="#6ee7b7" /><stop offset="1" stopColor="#059669" /></linearGradient>
+      </defs>
+      {[0, 1, 2, 3].map((k) => <line key={k} x1="0" x2={W} y1={(k * H) / 3} y2={(k * H) / 3} stroke="rgba(148,163,184,.12)" vectorEffect="non-scaling-stroke" />)}
+      {months.map((m, i) => (
+        <rect key={m.key} className="ct-bar" style={{ animationDelay: `${i * 0.04}s` }}
+          x={(i * bw + bw * 0.2).toFixed(1)} y={y(m.sales).toFixed(1)} width={(bw * 0.6).toFixed(1)} height={Math.max(0, H - y(m.sales)).toFixed(1)}
+          rx="5" fill={i === months.length - 1 ? "url(#ctBarHi)" : "rgba(148,163,184,.22)"}>
+          <title>{`${m.label}: ${fmtMoney(m.sales)} / ${fmtMoney(m.collected)}`}</title>
+        </rect>
+      ))}
+      <path d={line} fill="none" stroke="#a5b4fc" strokeWidth="2.5" strokeLinejoin="round" pathLength="1" className="ct-draw" vectorEffect="non-scaling-stroke" />
+      {months.map((m, i) => (
+        <circle key={m.key + "c"} cx={(i * bw + bw / 2).toFixed(1)} cy={y(m.collected).toFixed(1)} r="3.2" fill="#0b1220" stroke="#a5b4fc" strokeWidth="2" vectorEffect="non-scaling-stroke" className="ct-rise" style={{ animationDelay: `${0.6 + i * 0.04}s` }} />
+      ))}
+      <g transform={`translate(${Math.max(0, (months.length - 1) * bw - 64)},${Math.max(-38, y(last.sales) - 40)})`}>
+        <g className="ct-rise" style={{ animationDelay: ".9s" }}>
+          <rect width="108" height="30" rx="8" fill="#0f172a" stroke="rgba(52,211,153,.55)" />
+          <text x="54" y="19.5" textAnchor="middle" fontSize="12.5" fontWeight="700" fill="#fff">{dashShortMoney(last.sales)}</text>
+        </g>
+      </g>
+      {months.map((m, i) => (
+        <text key={m.key + "t"} x={(i * bw + bw / 2).toFixed(1)} y={H + 18} textAnchor="middle" fontSize="11.5" fill={i === months.length - 1 ? "#34d399" : "#64748b"} fontWeight={i === months.length - 1 ? 700 : 500}>{m.label}</text>
+      ))}
+    </svg>
+  );
+}
+
+function DashDonut({ segments, total }) {
+  const colors = ["#34d399", "#a5b4fc", "#e9c77b", "#38bdf8", "#64748b"];
+  let offset = 25;
+  return (
+    <svg width="112" height="112" viewBox="0 0 42 42" className="shrink-0" role="img" aria-label="Top products">
+      <circle cx="21" cy="21" r="15.9" fill="none" stroke="rgba(148,163,184,.12)" strokeWidth="5.5" />
+      {segments.map((s, i) => {
+        const v = total > 0 ? (s.value / total) * 100 : 0;
+        const el = (
+          <circle key={s.name} cx="21" cy="21" r="15.9" fill="none" stroke={colors[i % colors.length]} strokeWidth="5.5"
+            strokeDasharray={`${Math.max(0, v - 1)} ${100 - Math.max(0, v - 1)}`} strokeDashoffset={offset} className="ct-rise" style={{ animationDelay: `${0.2 + i * 0.1}s` }} />
+        );
+        offset -= v;
+        return el;
+      })}
+      <text x="21" y="20.5" textAnchor="middle" fontSize="5.2" fontWeight="800" className="fill-current ct-h">{dashShortMoney(total).replace("Rs ", "")}</text>
+      <text x="21" y="26" textAnchor="middle" fontSize="3.2" fill="#64748b">TOTAL</text>
+    </svg>
+  );
+}
+
+function Dashboard({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, settings, currentUser, onOpenPromises, onNavigate, onNewInvoice, onOpenInvoice }) {
+  const { language } = useLanguage();
+  const today = todayISO();
+  const go = (p) => { if (onNavigate) onNavigate(p); };
+
+  const data = useMemo(() => {
+    const liveInv = invoices.filter((i) => !isInvoiceCancelled(i));
+    const livePay = payments.filter((p) => !isPaymentLinkedToCancelledInvoice(p, invoices));
+    const payAmt = (p) => (p.kind === "Refund" ? -1 : 1) * (Number(p.amount) || 0);
+    const sumInv = (pred) => liveInv.reduce((s, i) => (pred(i.date || "") ? s + (Number(i.total) || 0) : s), 0);
+    const sumPay = (pred, extra = () => true) => livePay.reduce((s, p) => (pred(p.date || "") && extra(p) ? s + payAmt(p) : s), 0);
+
+    const days = Array.from({ length: 14 }, (_, k) => dashDaysAgoISO(13 - k));
+    const salesByDay = days.map((d) => sumInv((x) => x === d));
+    const payByDay = days.map((d) => sumPay((x) => x === d));
+    const yesterday = days[12];
+    const todaySales = salesByDay[13];
+    const todayCount = liveInv.filter((i) => i.date === today).length;
+    const weekStart = days[7], lastWeekStart = days[0];
+    const collectedWeek = sumPay((d) => d >= weekStart && d <= today);
+    const collectedLastWeek = sumPay((d) => d >= lastWeekStart && d < weekStart);
+    const weekPayCount = livePay.filter((p) => p.date >= weekStart && p.date <= today && p.kind !== "Refund").length;
+
+    const month = today.slice(0, 7);
+    const dayOfMonth = Number(today.slice(8, 10));
+    const prev = parseDateValue(month + "-01"); prev.setMonth(prev.getMonth() - 1);
+    const prevMonth = dateToLocalISO(prev).slice(0, 7);
+    const monthSales = sumInv((d) => d.startsWith(month));
+    const prevMonthSameDays = sumInv((d) => d.startsWith(prevMonth) && Number(d.slice(8, 10)) <= dayOfMonth);
+    const cashMonth = sumPay((d) => d.startsWith(month), (p) => String(p.method || "Cash").toLowerCase() === "cash");
+    const cashPrevSame = sumPay((d) => d.startsWith(prevMonth) && Number(d.slice(8, 10)) <= dayOfMonth, (p) => String(p.method || "Cash").toLowerCase() === "cash");
+
+    const months = Array.from({ length: 12 }, (_, k) => {
+      const d = parseDateValue(month + "-01"); d.setMonth(d.getMonth() - (11 - k));
+      const key = dateToLocalISO(d).slice(0, 7);
+      return {
+        key, label: d.toLocaleDateString("en-GB", { month: "short" }),
+        sales: sumInv((x) => x.startsWith(key)), collected: sumPay((x) => x.startsWith(key)),
+      };
+    });
+
+    const outById = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+    const withOut = customers.map((c) => ({ c, out: outById[c.id] || 0 })).filter((x) => x.out > 0.5).sort((a, b) => b.out - a.out);
+    const outstandingTotal = customers.reduce((s, c) => s + (outById[c.id] || 0), 0);
+    const overLimit = withOut.filter(({ c, out }) => Number(c.creditLimit) > 0 && out > Number(c.creditLimit));
+
+    const lastPay = {};
+    livePay.forEach((p) => { if (p.kind !== "Refund" && (!lastPay[p.customerId] || p.date > lastPay[p.customerId])) lastPay[p.customerId] = p.date; });
+    const firstInv = {};
+    liveInv.forEach((i) => { if (!firstInv[i.customerId] || i.date < firstInv[i.customerId]) firstInv[i.customerId] = i.date; });
+    const reminders = withOut
+      .map(({ c, out }) => {
+        const since = lastPay[c.id] || firstInv[c.id];
+        const daysSince = since ? -bookingDaysUntil(since) : null;
+        return { c, out, daysSince, neverPaid: !lastPay[c.id] };
+      })
+      .filter((r) => r.daysSince == null || r.daysSince >= 15)
+      .sort((a, b) => (b.daysSince || 9999) - (a.daysSince || 9999) || b.out - a.out)
+      .slice(0, 4);
+
+    const prodTotals = {};
+    liveInv.filter((i) => (i.date || "").startsWith(month)).forEach((i) => (i.items || []).forEach((it) => {
+      const k = String(it.name || "").trim() || "Item";
+      prodTotals[k] = (prodTotals[k] || 0) + (Number(it.total ?? it.qty * it.price) || 0);
+    }));
+    const prodList = Object.entries(prodTotals).sort((a, b) => b[1] - a[1]);
+    const prodTotal = prodList.reduce((s, [, v]) => s + v, 0);
+    const topProducts = prodList.slice(0, 4).map(([name, value]) => ({ name, value }));
+    const othersVal = prodList.slice(4).reduce((s, [, v]) => s + v, 0);
+    if (othersVal > 0) topProducts.push({ name: "Others", value: othersVal });
+
+    const qtyIn = (from, to) => {
+      const m = {};
+      liveInv.filter((i) => i.date >= from && i.date <= to).forEach((i) => (i.items || []).forEach((it) => {
+        const k = String(it.name || "").trim(); if (!k) return;
+        m[k] = (m[k] || 0) + (Number(it.qty) || 0);
+      }));
+      return m;
+    };
+    const qThis = qtyIn(weekStart, today), qLast = qtyIn(lastWeekStart, dashDaysAgoISO(7));
+    let demand = null;
+    Object.keys(qThis).forEach((k) => {
+      const p = qLast[k] ? ((qThis[k] - qLast[k]) / qLast[k]) * 100 : null;
+      if (p != null && Math.abs(p) >= 15 && (!demand || Math.abs(p) > Math.abs(demand.pct))) demand = { name: k, pct: Math.round(p) };
+    });
+
+    const act = promises.filter((p) => p.status !== "Deleted").map(promiseWithComputed);
+    const todaysPromises = act.filter((p) => p.expectedDate === today && (p.status === "Pending" || p.status === "Partially Paid"));
+    const broken = act.filter((p) => p.status === "Broken Promise");
+    const in7 = dashDaysAgoISO(-7);
+    const upcoming = act.filter((p) => p.expectedDate > today && p.expectedDate <= in7 && (p.status === "Pending" || p.status === "Partially Paid"));
+    const completedP = act.filter((p) => p.status === "Completed");
+    const keptBase = completedP.length + broken.length;
+
+    const bookingStates = bookings.map((b) => ({ b, s: computeBookingState(b, invoices, payments) }));
+    const expiring = bookingStates.filter((x) => x.s.expiringSoon);
+    const openBookings = bookingStates.filter((x) => x.s.isOpen).length;
+    const activeLeads = leads.filter((l) => l.status !== "Won" && l.status !== "Lost").length;
+
+    const insights = [];
+    if (overLimit.length) insights.push({ icon: "alert", tone: "text-rose-400", go: "customers",
+      title: `${overLimit.length} ${t("customers")} — ${t("Over limit")}`,
+      sub: overLimit.slice(0, 3).map((x) => x.c.name).join(", ") + ` · ${fmtMoney(overLimit.reduce((s, x) => s + x.out - Number(x.c.creditLimit), 0))}` });
+    if (todaysPromises.length) insights.push({ icon: "clock", tone: "text-[#e9c77b]", go: "promises",
+      title: `${t("Today's Promises")}: ${fmtMoney(todaysPromises.reduce((s, p) => s + p.remainingAmount, 0))}`,
+      sub: todaysPromises.slice(0, 3).map((p) => p.customerName).join(", ") });
+    if (broken.length) insights.push({ icon: "alert", tone: "text-rose-400", go: "promises",
+      title: `${broken.length} ${t("Broken Promises")}`,
+      sub: fmtMoney(broken.reduce((s, p) => s + p.remainingAmount, 0)) });
+    if (expiring.length) insights.push({ icon: "calendar", tone: "text-sky-400", go: "bookings",
+      title: `${expiring.length} ${t("Expiring Soon")} — ${t("Advance Booking")}`,
+      sub: expiring.slice(0, 3).map((x) => `${x.b.code} ${x.b.customerName}`).join(", ") });
+    if (demand) insights.push({ icon: demand.pct > 0 ? "trend" : "down", tone: demand.pct > 0 ? "text-emerald-400" : "text-amber-400", go: "reports",
+      title: `${demand.name} ${demand.pct > 0 ? "▲" : "▼"} ${Math.abs(demand.pct)}% ${t("vs last week")}`,
+      sub: `${fmtQty(qThis[demand.name])} · ${t("This Week")}` });
+
+    return {
+      todaySales, yesterdaySales: salesByDay[12], todayCount, salesSpark: salesByDay.slice(7),
+      collectedWeek, collectedLastWeek, weekPayCount, paySpark: payByDay.slice(7),
+      monthSales, prevMonthSameDays, cashMonth, cashPrevSame,
+      outstandingTotal, outCount: withOut.length, outSpark: months.slice(-7).map((m) => Math.max(0, m.sales - m.collected)),
+      months, top: withOut.slice(0, 5), topMax: withOut[0]?.out || 1, reminders, topProducts, prodTotal, insights,
+      todaysPromises, broken, upcoming, completedP, keptPct: keptBase ? Math.round((completedP.length / keptBase) * 100) : null,
+      promisedTotal: act.reduce((s, p) => s + (Number(p.amount) || 0), 0),
+      openBookings, activeLeads, yesterday,
+    };
+  }, [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, leads, bookings, today, language]);
+
+  const recentInvoices = useMemo(() => [...invoices].sort((a, b) => parseDateValue(b.date) - parseDateValue(a.date) || String(b.number).localeCompare(String(a.number))).slice(0, 6), [invoices]);
+  const hour = new Date().getHours();
+  const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
+  const name = currentUser?.name || currentUser?.username || "";
+
+  const statusPill = (inv) => {
+    if (inv.docStatus === "Cancelled") return ["Cancelled", "#94a3b8"];
+    if (inv.status === "Paid") return ["Paid", "#34d399"];
+    if (inv.status === "Partial") return ["Partial", "#38bdf8"];
+    return ["Unpaid", "#fb7185"];
+  };
+
+  const reminderMsg = (r) => `Assalam-o-Alaikum ${r.c.name},\n\n${settings?.companyName || ""} ki taraf se yaad dehani: aap ke account mein ${fmtMoney(r.out)} bakaya hain. Barah-e-karam jald ada kar dein.\n\nShukriya!`;
+
+  const quick = [
+    { icon: "plus", label: "New Invoice", onClick: onNewInvoice, primary: true, key: "N" },
+    { icon: "wallet", label: "Payments", onClick: () => go("payments"), key: "P" },
+    { icon: "calendar", label: "Booking", onClick: () => go("bookings"), key: "B" },
+    { icon: "undo", label: "Return", onClick: () => go("returns"), key: "R" },
+  ];
+
+  return (
+    <div className="space-y-4">
+      {/* Greeting + quick actions */}
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 ct-rise">
+        <div>
+          <div className="text-[13px] ct-t2">{fmtDate(today)} · {t(greeting)}{name ? `, ${name}` : ""} 👋</div>
+          <h2 className="ct-display text-[26px] sm:text-[30px] font-bold ct-h leading-tight">{t("Business overview")}</h2>
+        </div>
+        <div className="grid grid-cols-4 gap-2 md:flex">
+          {quick.map((q) => (
+            <button key={q.label} type="button" onClick={q.onClick}
+              className={`ct-lift flex flex-col md:flex-row items-center gap-1.5 md:gap-2 rounded-xl px-3 py-2.5 text-[12px] md:text-[13px] font-bold ${q.primary ? "ct-em-btn" : "ct-chip ct-h"}`}>
+              <UiIcon name={q.icon} className="w-[18px] h-[18px]" />
+              <span className="whitespace-nowrap">{t(q.label)}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {data.todaysPromises.length > 0 && (
+        <button type="button" onClick={onOpenPromises} className="ct-rise w-full text-start rounded-2xl border border-[#e9c77b]/30 bg-gradient-to-r from-[#e9c77b]/12 to-transparent px-4 py-3 flex items-center gap-3 ct-lift">
+          <span className="w-9 h-9 rounded-xl ct-gold-bg flex items-center justify-center shrink-0"><UiIcon name="clock" className="w-[18px] h-[18px]" /></span>
+          <div className="min-w-0">
+            <div className="text-[12px] font-bold text-[#e9c77b]">{t("Today's Promise Collection")}</div>
+            <div className="text-[13px] ct-h truncate">
+              {data.todaysPromises.map((p) => `${p.customerName} — ${fmtMoney(p.remainingAmount)}`).join("  ·  ")}
+            </div>
+          </div>
+          <span className="ms-auto ct-t2"><UiIcon name="right" className="w-4 h-4" /></span>
+        </button>
+      )}
+
+      {/* KPI row */}
+      <div className="grid grid-cols-2 lg:grid-cols-3 2xl:grid-cols-5 gap-3 sm:gap-4">
+        <DashKpi label="Today's Sales" value={data.todaySales} pct={dashPct(data.todaySales, data.yesterdaySales)} spark={data.salesSpark} color="#34d399" sub={`${data.todayCount} ${t("invoices today")}`} delay={0.02} />
+        <DashKpi label="Collected (This Week)" value={data.collectedWeek} pct={dashPct(data.collectedWeek, data.collectedLastWeek)} spark={data.paySpark} color="#34d399" sub={`${data.weekPayCount} ${t("payments")}`} delay={0.06} />
+        <DashKpi label="Total Outstanding" value={data.outstandingTotal} spark={data.outSpark} color="#fb7185" tone="text-rose-300" sub={`${data.outCount} ${t("customers")}`} delay={0.1} />
+        <DashKpi label="Cash (This Month)" value={data.cashMonth} pct={dashPct(data.cashMonth, data.cashPrevSame)} spark={data.paySpark} color="#a5b4fc" sub={t("vs last month")} delay={0.14} />
+        <DashKpi label="This Month Sales" value={data.monthSales} pct={dashPct(data.monthSales, data.prevMonthSameDays)} spark={data.months.slice(-7).map((m) => m.sales)} color="#e9c77b" sub={t("vs last month")} delay={0.18} className="col-span-2 lg:col-span-1" />
+      </div>
+
+      {/* Chart + insights + top outstanding */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+        <section className="ct-card ct-rise xl:col-span-6 p-5 flex flex-col min-h-[300px]" style={{ animationDelay: ".1s" }}>
+          <DashSectionTitle
+            title="Sales vs Collection"
+            sub={`${t("Last 12 months")}`}
+            right={(
+              <div className="flex items-center gap-3 text-[11.5px] ct-t2">
+                <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-gradient-to-b from-emerald-300 to-emerald-600" />{t("Sales")}</span>
+                <span className="flex items-center gap-1.5"><span className="w-3 h-[2px] rounded bg-indigo-300" />{t("Collection")}</span>
+              </div>
+            )}
+          />
+          <div className="flex-1 mt-2"><DashSalesChart months={data.months} /></div>
+        </section>
+
+        <section className="ct-card ct-rise xl:col-span-3 p-5 relative overflow-hidden" style={{ animationDelay: ".14s" }}>
+          <div className="absolute -top-16 -right-16 w-48 h-48 rounded-full bg-[#e9c77b]/10 blur-2xl" />
+          <div className="relative flex items-center gap-2 ct-display text-[16px] font-bold ct-h">
+            <span className="w-7 h-7 rounded-lg ct-gold-bg flex items-center justify-center"><UiIcon name="spark" className="w-4 h-4" /></span>
+            {t("Smart Insights")}
+          </div>
+          <div className="relative mt-3 space-y-2.5">
+            {data.insights.length === 0 && (
+              <div className="rounded-xl ct-chip p-3 text-[12.5px] ct-t2 flex items-center gap-2"><span className="text-emerald-400"><UiIcon name="check" className="w-4 h-4" /></span>{t("All good — nothing needs attention right now.")}</div>
+            )}
+            {data.insights.slice(0, 4).map((ins, i) => (
+              <button key={i} type="button" onClick={() => go(ins.go)} className="ct-lift ct-rise w-full text-start flex gap-3 rounded-xl ct-chip p-2.5" style={{ animationDelay: `${0.2 + i * 0.07}s` }}>
+                <span className={`${ins.tone} mt-0.5`}><UiIcon name={ins.icon} className="w-4 h-4" /></span>
+                <div className="min-w-0">
+                  <div className="text-[12.5px] ct-h font-semibold leading-snug">{ins.title}</div>
+                  {ins.sub && <div className="text-[11px] ct-t3 mt-0.5 truncate">{ins.sub}</div>}
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="ct-card ct-rise xl:col-span-3 p-5 flex flex-col" style={{ animationDelay: ".18s" }}>
+          <DashSectionTitle title="Top Outstanding" right={<button type="button" onClick={() => go("customers")} className="text-[12px] font-semibold text-emerald-400 hover:underline">{t("View all")}</button>} />
+          <div className="mt-3 space-y-3">
+            {data.top.length === 0 && <div className="text-[12.5px] ct-t3">{t("No outstanding balances.")}</div>}
+            {data.top.map(({ c, out }, i) => (
+              <div key={c.id} className="flex items-center gap-3">
+                <div className={`w-8 h-8 rounded-lg bg-gradient-to-br ${uiAvatarGradient(c.id)} text-white text-[11px] font-bold flex items-center justify-center shrink-0`}>{uiInitials(c.name, "?")}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex justify-between gap-2 text-[12.5px]">
+                    <span className="ct-h font-semibold truncate">{c.name}</span>
+                    <b className="ct-display text-rose-300 whitespace-nowrap">{fmtMoney(out)}</b>
+                  </div>
+                  <div className="mt-1.5 h-1.5 rounded-full bg-slate-500/15 overflow-hidden">
+                    <div className="ct-barx h-full rounded-full bg-gradient-to-r from-rose-500 to-orange-400" style={{ width: `${Math.max(4, (out / data.topMax) * 100)}%`, animationDelay: `${0.3 + i * 0.08}s` }} />
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          {data.outCount > 0 && (
+            <div className="mt-auto pt-4">
+              <div className="flex items-center justify-between rounded-xl bg-rose-500/10 border border-rose-400/20 px-3.5 py-2.5">
+                <span className="text-[12px] ct-t2">{t("Total")} · {data.outCount} {t("customers")}</span>
+                <b className="ct-display text-[16px] text-rose-300">{fmtMoney(data.outstandingTotal)}</b>
+              </div>
+            </div>
+          )}
+        </section>
+      </div>
+
+      {/* Recent invoices + reminders + products/promises */}
+      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
+        <section className="ct-card ct-rise xl:col-span-6 overflow-hidden" style={{ animationDelay: ".2s" }}>
+          <div className="px-5 py-4"><DashSectionTitle title="Recent Invoices" right={<button type="button" onClick={() => go("invoices")} className="text-[12px] font-semibold text-emerald-400 hover:underline">{t("View all")}</button>} /></div>
+          {recentInvoices.length === 0 && <div className="px-5 pb-6 text-[13px] ct-t3">{t("Koi invoice nahi bana abhi tak.")}</div>}
+          {recentInvoices.map((inv, i) => {
+            const [label, col] = statusPill(inv);
+            return (
+              <div key={inv.id} className="ct-rise flex items-center gap-3 px-5 py-2.5 border-t ct-line hover:bg-slate-500/5 cursor-pointer" style={{ animationDelay: `${0.25 + i * 0.04}s` }} onClick={() => onOpenInvoice && onOpenInvoice(inv.id)}>
+                <div className={`w-9 h-9 rounded-xl bg-gradient-to-br ${uiAvatarGradient(inv.customerId)} text-white text-[11px] font-bold flex items-center justify-center shrink-0`}>{uiInitials(inv.customerName, "?")}</div>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[13px] ct-h font-semibold truncate">{inv.customerName}</div>
+                  <div className="text-[11px] ct-t3">{inv.number} · {fmtDate(inv.date)}</div>
+                </div>
+                <span className="hidden sm:inline-block text-[10.5px] font-bold rounded-full px-2.5 py-0.5" style={{ color: col, background: `${col}1f`, border: `1px solid ${col}38` }}>{tStatus(label)}</span>
+                <div className="text-end ct-display font-semibold ct-h tabular-nums text-[13.5px] whitespace-nowrap">{fmtMoney(inv.total)}</div>
+                {inv.customerPhone ? (
+                  <a href={waLink(inv.customerPhone, buildInvoiceWaMessage(inv, settings || {}))} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}
+                    className="w-8 h-8 rounded-lg ct-chip flex items-center justify-center text-emerald-400 hover:scale-105 transition shrink-0" title={t("Share on WhatsApp")}>
+                    <UiIcon name="wa" className="w-4 h-4" />
+                  </a>
+                ) : <span className="w-8 shrink-0" />}
+              </div>
+            );
+          })}
+        </section>
+
+        <section className="ct-card ct-rise xl:col-span-3 p-5 flex flex-col" style={{ animationDelay: ".24s" }}>
+          <DashSectionTitle title="Payment Reminders" />
+          <div className="mt-3 space-y-2.5">
+            {data.reminders.length === 0 && <div className="text-[12.5px] ct-t3">{t("No overdue customers.")}</div>}
+            {data.reminders.map((r) => (
+              <div key={r.c.id} className="flex items-center gap-2.5">
+                <span className="w-2 h-2 rounded-full bg-rose-400 shadow-[0_0_8px_#fb7185] shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-[12.5px] ct-h font-semibold truncate">{r.c.name}</div>
+                  <div className="text-[11px] ct-t3">{r.neverPaid ? t("Never paid") : `${t("No payment for")} ${r.daysSince} ${t("days")}`}</div>
+                </div>
+                <div className="ct-display text-[13px] font-bold text-rose-300 whitespace-nowrap">{dashShortMoney(r.out)}</div>
+                {r.c.phone ? (
+                  <a href={waLink(r.c.phone, reminderMsg(r))} target="_blank" rel="noreferrer" className="w-8 h-8 rounded-lg ct-em-btn flex items-center justify-center shrink-0" title={t("Send reminder")}>
+                    <UiIcon name="wa" className="w-4 h-4" />
+                  </a>
+                ) : <span className="w-8 shrink-0" />}
+              </div>
+            ))}
+          </div>
+          <div className="mt-auto pt-4 grid grid-cols-3 gap-2 text-center">
+            {[["Today's Promises", data.todaysPromises.length, "text-[#e9c77b]"], ["Upcoming (7 Days)", data.upcoming.length, "ct-h"], ["Broken Promises", data.broken.length, "text-rose-400"]].map(([l, v, c]) => (
+              <button key={l} type="button" onClick={onOpenPromises} className="rounded-xl ct-chip px-2 py-2 ct-lift">
+                <div className={`ct-display text-[18px] font-bold ${c}`}><CountUp value={v} /></div>
+                <div className="text-[10px] ct-t3 leading-tight">{t(l)}</div>
+              </button>
+            ))}
+          </div>
+        </section>
+
+        <section className="ct-card ct-rise xl:col-span-3 p-5" style={{ animationDelay: ".28s" }}>
+          <DashSectionTitle title="Top Products" sub={t("This month · by revenue")} />
+          {data.topProducts.length === 0 ? (
+            <div className="mt-4 text-[12.5px] ct-t3">{t("No sales this month yet.")}</div>
+          ) : (
+            <div className="flex items-center gap-4 mt-3">
+              <DashDonut segments={data.topProducts} total={data.prodTotal} />
+              <div className="space-y-1.5 text-[12px] min-w-0 flex-1">
+                {data.topProducts.map((p, i) => (
+                  <div key={p.name} className="flex items-center gap-2">
+                    <span className="w-2.5 h-2.5 rounded-sm shrink-0" style={{ background: ["#34d399", "#a5b4fc", "#e9c77b", "#38bdf8", "#64748b"][i] }} />
+                    <span className="ct-t2 truncate flex-1">{p.name === "Others" ? t("Others") : p.name}</span>
+                    <b className="ct-h">{Math.round((p.value / (data.prodTotal || 1)) * 100)}%</b>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-2 mt-4">
+            <button type="button" onClick={() => go("bookings")} className="rounded-xl ct-chip px-3 py-2.5 text-start ct-lift">
+              <div className="text-[11px] ct-t3">{t("Open Bookings")}</div>
+              <div className="ct-display text-[18px] font-bold ct-h"><CountUp value={data.openBookings} /></div>
+            </button>
+            <button type="button" onClick={() => go("leads")} className="rounded-xl ct-chip px-3 py-2.5 text-start ct-lift">
+              <div className="text-[11px] ct-t3">{t("Active Leads")}</div>
+              <div className="ct-display text-[18px] font-bold ct-h"><CountUp value={data.activeLeads} /></div>
+            </button>
+          </div>
+        </section>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Customers ---------------- */
+
+function CustomerForm({ initial, branches, currentUser, onSave, onCancel }) {
+  const [form, setForm] = useState(
+    initial || { name: "", phone: "", address: "", creditLimit: 0, openingBalance: 0, audienceType: "Builder", portalUsername: "", portalPassword: "", branchId: currentUser?.branchId || "" }
+  );
+  const isLocked = !!currentUser?.branchId;
+  return (
+    <div>
+      <Field label="Customer Name">
+        <input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+      </Field>
+      <Field label="Phone (with WhatsApp, e.g. 03001234567)">
+        <input className={inputCls} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+      </Field>
+      <Field label="Address">
+        <input className={inputCls} value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+      </Field>
+      {branches.length > 0 && (
+        <Field label="Branch">
+          {isLocked ? (
+            <div className="text-sm font-bold text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2">
+              {branches.find((b) => b.id === currentUser.branchId)?.name || "Your Branch"}
+            </div>
+          ) : (
+            <select className={inputCls} value={form.branchId || ""} onChange={(e) => setForm({ ...form, branchId: e.target.value })}>
+              <option value="">Unassigned (visible to Super Admin only)</option>
+              {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+            </select>
+          )}
+        </Field>
+      )}
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Credit Limit (Rs)">
+          <input type="number" className={inputCls} value={form.creditLimit}
+            onChange={(e) => setForm({ ...form, creditLimit: Number(e.target.value) })} />
+        </Field>
+        <Field label="Opening Balance (Rs)">
+          <input type="number" className={inputCls} value={form.openingBalance}
+            onChange={(e) => setForm({ ...form, openingBalance: Number(e.target.value) })} />
+        </Field>
+      </div>
+      <Field label="Audience Type (for Sales Assistant)">
+        <select className={inputCls} value={form.audienceType || "Builder"} onChange={(e) => setForm({ ...form, audienceType: e.target.value })}>
+          {AUDIENCE_TYPES.map((a) => <option key={a}>{a}</option>)}
+        </select>
+      </Field>
+      <div className="border-t border-slate-200 mt-3 pt-3">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2">Customer Portal Login (optional)</div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Portal Username">
+            <input className={inputCls} value={form.portalUsername || ""} onChange={(e) => setForm({ ...form, portalUsername: e.target.value })} />
+          </Field>
+          <Field label="Portal Password">
+            <input className={inputCls} value={form.portalPassword || ""} onChange={(e) => setForm({ ...form, portalPassword: e.target.value })} />
+          </Field>
+        </div>
+      </div>
+      <div className="flex gap-2 mt-2">
+        <Btn onClick={() => form.name.trim() && onSave(form)}>Save Customer</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function Customers({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, saveCustomer, deleteCustomer, openLedger, branches, currentUser }) {
+  const [modal, setModal] = useState(null); // null | 'new' | customer object
+  const [q, setQ] = useState("");
+
+  // Balances are computed once per data change, not on every search keystroke.
+  const outstandingById = useMemo(
+    () => computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments),
+    [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments]
+  );
+  const qLower = q.toLowerCase();
+  const rows = customers
+    .filter((c) => c.name.toLowerCase().includes(qLower) || (c.phone || "").includes(q))
+    .map((c) => ({ ...c, outstanding: outstandingById[c.id] }));
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-black uppercase tracking-tight">Customers</h2>
+        <Btn onClick={() => setModal("new")}>+ New Customer</Btn>
+      </div>
+      <input
+        className={`${inputCls} mb-3 max-w-xs`}
+        placeholder="Search name or phone..."
+        value={q}
+        onChange={(e) => setQ(e.target.value)}
+      />
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Name</th>
+              <th className="px-4 py-2">Phone</th>
+              <th className="px-4 py-2 text-right">Credit Limit</th>
+              <th className="px-4 py-2 text-right">Outstanding</th>
+              <th className="px-4 py-2"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr><td colSpan={5} className="px-4 py-6 text-center text-slate-400">Koi customer nahi mila.</td></tr>
+            )}
+            {rows.map((c) => (
+              <tr key={c.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-bold cursor-pointer hover:text-blue-700" onClick={() => openLedger(c.id)}>{c.name}</td>
+                <td className="px-4 py-2 text-slate-500">{c.phone}</td>
+                <td className="px-4 py-2 text-right">{fmtMoney(c.creditLimit)}</td>
+                <td className={`px-4 py-2 text-right font-bold ${c.outstanding > (c.creditLimit || Infinity) ? "text-red-600" : ""}`}>
+                  {fmtMoney(c.outstanding)}
+                  {c.creditLimit > 0 && c.outstanding > c.creditLimit && (
+                    <div className="text-[10px] font-bold text-red-600 uppercase">Over limit</div>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => setModal(c)}>Edit</button>
+                  <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete ${c.name}?`)) deleteCustomer(c.id); }}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {modal && (
+        <Modal title={modal === "new" ? "New Customer" : "Edit Customer"} onClose={() => setModal(null)}>
+          <CustomerForm
+            initial={modal === "new" ? null : modal}
+            branches={branches}
+            currentUser={currentUser}
+            onCancel={() => setModal(null)}
+            onSave={(data) => { saveCustomer(modal === "new" ? { ...data, id: uid("c") } : data); setModal(null); }}
+          />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Ledger view ---------------- */
+
+function LedgerView({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, focusId, setFocusId, settings, currentUser, onCreateAdjustment, onUpdateAdjustment, onReverseAdjustment }) {
+  const customer = customers.find((c) => c.id === focusId) || customers[0];
+  const [showAdjForm, setShowAdjForm] = useState(false);
+  const [editingAdj, setEditingAdj] = useState(null);
+  const [reversingAdj, setReversingAdj] = useState(null);
+  const [adjReverseReason, setAdjReverseReason] = useState("");
+  const canManageAdj = currentUser?.role === "admin";
+  // Month-wise download: "" means the full ledger (all time); otherwise a
+  // "YYYY-MM" value scopes both the on-screen table and the printed/PDF
+  // output to that single month, with the Opening Balance row showing the
+  // true running balance carried forward from just before that month.
+  const [monthFilter, setMonthFilter] = useState("");
+
+  if (!customer) return <div className="text-slate-400">Pehle koi customer add karein.</div>;
+  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  const myPromises = (promises || []).filter((p) => p.customerId === customer.id && p.status !== "Deleted").map(promiseWithComputed);
+  const myAdjustments = (adjustments || []).filter((a) => a.customerId === customer.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  function fmtMonthLabel(m) {
+    if (!m) return "All Time";
+    const [y, mo] = m.split("-");
+    return new Date(Number(y), Number(mo) - 1, 1).toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+  }
+  const monthOptions = Array.from(new Set(entries.map((e) => e.date.slice(0, 7)))).sort();
+  const filteredEntries = monthFilter ? entries.filter((e) => e.date.slice(0, 7) === monthFilter) : entries;
+  const openingForPeriod = monthFilter
+    ? (() => {
+        const before = entries.filter((e) => e.date.slice(0, 7) < monthFilter);
+        return before.length ? before[before.length - 1].balance : Number(customer.openingBalance) || 0;
+      })()
+    : Number(customer.openingBalance) || 0;
+
+  function downloadPDF() {
+    window.print();
+  }
+
+  function confirmReverseAdj() {
+    if (!adjReverseReason.trim()) { alert("Reverse ki wajah likhein."); return; }
+    onReverseAdjustment(reversingAdj, adjReverseReason.trim());
+    setReversingAdj(null); setAdjReverseReason("");
+  }
+
+  // BUGFIX: quantity moved (Invoice / Sales Return / Exchange) is now shown
+  // alongside the money columns so staff can see how many units (feet,
+  // meter, kg, liter, bags, etc.) each ledger line represents.
+  function qtyCell(e) {
+    if (e.type === "Invoice") return e.qty ? fmtQty(e.qty) : "-";
+    if (e.type === "Sales Return") return e.qty ? `-${fmtQty(e.qty)}` : "-";
+    if (e.type && e.type.startsWith("Exchange")) {
+      return `Ret ${fmtQty(e.returnedQty || 0)} / New ${fmtQty(e.newQty || 0)}`;
+    }
+    return "-";
+  }
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-4">Ledger</h2>
+      <div className="flex gap-3 items-center mb-4 flex-wrap">
+        <select className={`${inputCls} max-w-xs`} value={customer.id} onChange={(e) => setFocusId(e.target.value)}>
+          {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <div className="text-sm">
+          Outstanding: <span className={`font-black ${outstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(outstanding)}</span>
+        </div>
+        <select className={`${inputCls} max-w-[170px]`} value={monthFilter} onChange={(e) => setMonthFilter(e.target.value)}>
+          <option value="">All Time</option>
+          {monthOptions.map((m) => <option key={m} value={m}>{fmtMonthLabel(m)}</option>)}
+        </select>
+        <Btn variant="dark" onClick={downloadPDF}>{monthFilter ? `Download PDF (${fmtMonthLabel(monthFilter)})` : "Download PDF"}</Btn>
+        <Btn onClick={() => { setEditingAdj(null); setShowAdjForm(true); }}>+ Adjustment</Btn>
+      </div>
+      {monthFilter && (
+        <div className="text-xs text-blue-700 font-bold mb-3">
+          Showing {fmtMonthLabel(monthFilter)} only — opening balance below is carried forward from before this month. <button className="underline ml-1" onClick={() => setMonthFilter("")}>Show All Time</button>
+        </div>
+      )}
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Date</th>
+              <th className="px-4 py-2">Type</th>
+              <th className="px-4 py-2">Ref</th>
+              <th className="px-4 py-2 text-right">Qty</th>
+              <th className="px-4 py-2 text-right">Debit</th>
+              <th className="px-4 py-2 text-right">Credit</th>
+              <th className="px-4 py-2 text-right">Balance</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-t border-slate-100 bg-slate-50">
+              <td className="px-4 py-2 text-slate-500" colSpan={6}>Opening Balance</td>
+              <td className="px-4 py-2 text-right font-bold">{fmtMoney(openingForPeriod)}</td>
+            </tr>
+            {filteredEntries.map((e) => (
+              <tr key={e.id} className="border-t border-slate-100">
+                <td className="px-4 py-2">{fmtDate(e.date)}</td>
+                <td className="px-4 py-2">
+                  {e.type}{e.invoiceNumber ? <span className="text-slate-400"> ({e.invoiceNumber})</span> : ""}
+                  {e.counterparty ? <span className="text-slate-400"> — {e.counterparty}</span> : ""}
+                </td>
+                <td className="px-4 py-2 text-slate-500">{e.ref}</td>
+                <td className="px-4 py-2 text-right text-slate-500 text-xs">{qtyCell(e)}</td>
+                <td className="px-4 py-2 text-right text-red-600">{e.debit ? fmtMoney(e.debit) : ""}</td>
+                <td className="px-4 py-2 text-right text-emerald-600">{e.credit ? fmtMoney(e.credit) : ""}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(e.balance)}</td>
+              </tr>
+            ))}
+            {filteredEntries.length === 0 && (
+              <tr><td colSpan={7} className="px-4 py-6 text-center text-slate-400">Koi entry nahi.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Feature 5 — Customer Profile: Promise History */}
+      <div className="mt-6 bg-white border border-slate-200 overflow-x-auto print:hidden">
+        <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Promise History</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Promise No</th><th className="px-4 py-2 text-right">Amount</th>
+              <th className="px-4 py-2">Promise Date</th><th className="px-4 py-2">Expected Date</th>
+              <th className="px-4 py-2">Status</th><th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Remaining</th>
+            </tr>
+          </thead>
+          <tbody>
+            {myPromises.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-slate-400">Koi promise nahi.</td></tr>}
+            {myPromises.map((p) => (
+              <tr key={p.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-black text-blue-700">{p.code}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.amount)}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(p.promiseDate)}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(p.expectedDate)}</td>
+                <td className="px-4 py-2"><span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${PROMISE_STATUS_TONE[p.status]}`}>{p.status}</span></td>
+                <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(p.paidAmount)}</td>
+                <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(p.remainingAmount)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Adjustment History for this customer */}
+      <div className="mt-6 bg-white border border-slate-200 overflow-x-auto print:hidden">
+        <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Adjustment History</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Adj #</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">Type</th>
+              <th className="px-4 py-2">Category</th><th className="px-4 py-2 text-right">Amount</th>
+              <th className="px-4 py-2">Reason</th><th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {myAdjustments.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi adjustment nahi.</td></tr>}
+            {myAdjustments.map((a) => (
+              <tr key={a.id} className={`border-t border-slate-100 ${a.status === "Reversed" ? "opacity-50" : ""}`}>
+                <td className="px-4 py-2 font-black text-blue-700">{a.code}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(a.date)}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${a.type === "Add" ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"}`}>
+                    {a.type === "Add" ? "Add (+)" : "Reduce (-)"}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-slate-500">{a.category}</td>
+                <td className={`px-4 py-2 text-right font-bold ${a.type === "Add" ? "text-red-600" : "text-emerald-600"}`}>{a.type === "Add" ? "+" : "-"}{fmtMoney(a.amount)}</td>
+                <td className="px-4 py-2 text-slate-500 text-xs">{a.reason}</td>
+                <td className="px-4 py-2"><span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${ADJUSTMENT_STATUS_TONE[a.status] || "bg-slate-100 text-slate-500"}`}>{a.status}</span></td>
+                <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                  {a.status !== "Reversed" && canManageAdj && (
+                    <>
+                      <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => { setEditingAdj(a); setShowAdjForm(true); }}>Edit</button>
+                      <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setReversingAdj(a)}>Reverse</button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {showAdjForm && (
+        <Modal title={editingAdj ? `Edit Adjustment ${editingAdj.code}` : "New Adjustment"} onClose={() => { setShowAdjForm(false); setEditingAdj(null); }}>
+          <AdjustmentForm
+            customers={customers}
+            defaultCustomerId={customer.id}
+            invoices={invoices}
+            payments={payments}
+            returns={returns}
+            exchanges={exchanges}
+            promises={promises}
+            transfers={transfers}
+            adjustments={adjustments}
+            initial={editingAdj}
+            currentUser={currentUser}
+            onCancel={() => { setShowAdjForm(false); setEditingAdj(null); }}
+            onSave={(data) => {
+              if (editingAdj) onUpdateAdjustment(editingAdj, data);
+              else onCreateAdjustment(data);
+              setShowAdjForm(false); setEditingAdj(null);
+            }}
+          />
+        </Modal>
+      )}
+
+      {reversingAdj && (
+        <Modal title={`Reverse Adjustment ${reversingAdj.code}`} onClose={() => setReversingAdj(null)}>
+          <div className="text-sm text-slate-600 mb-3">
+            Ye adjustment reverse karne se <span className="font-bold">{reversingAdj.customerName}</span> ka balance is adjustment se pehle wali state mein wapis chala jayega.
+          </div>
+          <Field label="Reverse Reason">
+            <input className={inputCls} value={adjReverseReason} onChange={(e) => setAdjReverseReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmReverseAdj}>Confirm Reverse</Btn>
+            <Btn variant="ghost" onClick={() => setReversingAdj(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {/* Print/PDF-only ledger — hidden on screen (display:none), forced
+          visible by the @media print rule in <PrintStyles/> via the
+          "print-area" class, so window.print() outputs ONLY this clean
+          template instead of the sidebar/app chrome around it. */}
+      <div id="print-ledger" className="print-area" style={{ display: "none" }}>
+        <div className="bg-white">
+          <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
+            <div className="flex items-center gap-3">
+              {settings?.logoUrl ? (
+                <img src={settings.logoUrl} alt="Logo" className="w-14 h-14 object-contain" />
+              ) : (
+                <div className="w-14 h-14 bg-slate-900 flex items-center justify-center font-black text-xl text-white">CT</div>
+              )}
+              <div>
+                <div className="text-xl font-black uppercase tracking-tight text-slate-900">{settings?.companyName}</div>
+                <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">Construction Materials Supplier</div>
+              </div>
+            </div>
+            <div className="text-right text-xs text-slate-500">
+              <div>{settings?.companyAddress}</div>
+              {settings?.companyPhone && <div>Ph: {settings.companyPhone}</div>}
+            </div>
+          </div>
+
+          <div className="flex justify-between items-start mb-4">
+            <div className="text-sm">
+              <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-0.5">Customer Ledger</div>
+              <div className="font-bold text-slate-900">{customer.name}</div>
+              {customer.phone && <div className="text-slate-500">{customer.phone}</div>}
+              {customer.address && <div className="text-slate-500">{customer.address}</div>}
+            </div>
+            <div className="text-right text-xs text-slate-500">
+              <div>Period: <span className="font-bold text-slate-700">{fmtMonthLabel(monthFilter)}</span></div>
+              <div>Date: <span className="font-bold text-slate-700">{fmtDate(todayISO())}</span></div>
+            </div>
+          </div>
+
+          <table className="w-full text-sm mb-4">
+            <thead>
+              <tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
+                <th className="py-2 px-2 text-left">Date</th>
+                <th className="py-2 px-2 text-left">Type</th>
+                <th className="py-2 px-2 text-left">Ref</th>
+                <th className="py-2 px-2 text-right">Debit</th>
+                <th className="py-2 px-2 text-right">Credit</th>
+                <th className="py-2 px-2 text-right">Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr className="border-b border-slate-100 bg-slate-50">
+                <td className="py-2 px-2 text-slate-500" colSpan={5}>Opening Balance</td>
+                <td className="py-2 px-2 text-right font-bold">{fmtMoney(openingForPeriod)}</td>
+              </tr>
+              {filteredEntries.map((e) => (
+                <tr key={e.id} className="border-b border-slate-100">
+                  <td className="py-2 px-2">{fmtDate(e.date)}</td>
+                  <td className="py-2 px-2">{e.type}</td>
+                  <td className="py-2 px-2 text-slate-500">{e.ref}</td>
+                  <td className="py-2 px-2 text-right text-red-600">{e.debit ? fmtMoney(e.debit) : ""}</td>
+                  <td className="py-2 px-2 text-right text-emerald-600">{e.credit ? fmtMoney(e.credit) : ""}</td>
+                  <td className="py-2 px-2 text-right font-bold">{fmtMoney(e.balance)}</td>
+                </tr>
+              ))}
+              {filteredEntries.length === 0 && (
+                <tr><td colSpan={6} className="py-4 px-2 text-center text-slate-400">Koi entry nahi.</td></tr>
+              )}
+            </tbody>
+          </table>
+
+          <div className="flex justify-end">
+            <div className="w-72 text-sm space-y-1.5">
+              {monthFilter && (
+                <div className="flex justify-between">
+                  <span className="text-slate-500">Closing Balance ({fmtMonthLabel(monthFilter)})</span>
+                  <span className="font-bold">{fmtMoney(filteredEntries.length ? filteredEntries[filteredEntries.length - 1].balance : openingForPeriod)}</span>
+                </div>
+              )}
+              <div className="flex justify-between border-t-2 border-slate-900 pt-2 mt-1">
+                <span className="font-black uppercase text-blue-700">Total Outstanding (All Time)</span>
+                <span className="font-black text-lg text-blue-700">{fmtMoney(outstanding)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Invoices ---------------- */
+
+function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
+  const isEdit = !!editingInvoice;
+  // ---- Advance Booking delivery (additive) ----
+  // A new invoice opened from "Convert to Invoice", or an existing invoice
+  // that was saved as a booking delivery (has bookingQty).
+  const bookingSourceId = editingInvoice
+    ? (editingInvoice.bookingQty != null ? editingInvoice.fromBookingId : "")
+    : (prefill?.sourceType === "booking" ? prefill.sourceId : "");
+  const linkedBooking = bookingSourceId ? (bookings || []).find((b) => b.id === bookingSourceId) : null;
+  const bookingMode = !!linkedBooking;
+  const bookingState = linkedBooking ? computeBookingState(linkedBooking, invoices, payments, { excludeInvoiceId: editingInvoice?.id }) : null;
+  const [advanceApplied, setAdvanceApplied] = useState(
+    editingInvoice ? (Number(editingInvoice.advanceApplied) || 0) : (prefill?.sourceType === "booking" ? (Number(prefill.suggestedAdvance) || 0) : 0)
+  );
+  const submittingRef = React.useRef(false);
+  // Cash Customer / Walk-In: customerType is "Regular" (existing workflow,
+  // unchanged) or "Cash" (no customer account required). The type is fixed
+  // once an invoice is created, so the toggle is only shown for new invoices.
+  const [customerType, setCustomerType] = useState(editingInvoice?.customerType || "Regular");
+  const canChangeCustomerType = !isEdit && !bookingMode;
+  const [customerId, setCustomerId] = useState(editingInvoice?.customerId || prefill?.customerId || customers[0]?.id || "");
+  const [cashName, setCashName] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerName || "") : "");
+  const [cashPhone, setCashPhone] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerPhone || "") : "");
+  const [cashAddress, setCashAddress] = useState(editingInvoice?.customerType === "Cash" ? (editingInvoice?.customerAddress || "") : "");
+  const [date, setDate] = useState(editingInvoice?.date || todayISO());
+  const [items, setItems] = useState(
+    editingInvoice
+      ? editingInvoice.items.map((it) => ({ id: uid("it"), productId: "", name: it.name, unit: it.unit || "Bag", qty: it.qty, price: it.price, bookingLine: !!it.bookingLine }))
+      : prefill
+      ? [{ id: uid("it"), productId: prefill.productId || "", name: prefill.productName || "", unit: prefill.unit || "Bag", qty: prefill.qty || 1, price: prefill.rate || 0, bookingLine: prefill.sourceType === "booking" }]
+      : [{ id: uid("it"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]
+  );
+  const [rickshawRent, setRickshawRent] = useState(editingInvoice?.rickshawRent || 0);
+  const [deliveryCharges, setDeliveryCharges] = useState(editingInvoice?.deliveryCharges || 0);
+  const [discount, setDiscount] = useState(editingInvoice?.discount || 0);
+  const [driverIdInput, setDriverIdInput] = useState(editingInvoice?.driverId || "");
+  const [manualDriverName, setManualDriverName] = useState(editingInvoice && !editingInvoice.driverId ? editingInvoice.driverName || "" : "");
+  const [paymentReceived, setPaymentReceived] = useState(editingInvoice?.paymentReceived || 0);
+  const [receivedBy, setReceivedBy] = useState(editingInvoice?.receivedBy || "");
+  const [issuedToName, setIssuedToName] = useState(editingInvoice?.issuedTo?.name || "");
+  const [issuedToPhone, setIssuedToPhone] = useState(editingInvoice?.issuedTo?.phone || "");
+  const [issuedToRelation, setIssuedToRelation] = useState(editingInvoice?.issuedTo?.relation || "");
+  const [issuedToRemarks, setIssuedToRemarks] = useState(editingInvoice?.issuedTo?.remarks || "");
+  // Commission integration (additive, read-only preview here): selecting an
+  // agent never changes subtotal/total/paymentReceived/balanceDue — the
+  // actual commission transaction is created/synced by the App layer after
+  // save, exactly the way a "payment" record is auto-created today.
+  const [commissionAgentId, setCommissionAgentId] = useState(editingInvoice?.commissionAgentId || "");
+
+  const matchedDriver = drivers.find((d) => d.code.toLowerCase() === driverIdInput.trim().toLowerCase());
+
+  const selectedCustomer = customerType === "Regular" ? customers.find((c) => c.id === customerId) : null;
+  // Cash Customer / Walk-In never carries an outstanding balance — it has
+  // no customer account, no opening balance, and no ledger of its own.
+  const previousOutstanding = customerType === "Cash"
+    ? 0
+    : isEdit
+    ? (editingInvoice.previousOutstanding || 0)
+    : selectedCustomer
+    ? computeLedgerForCustomer(selectedCustomer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding
+    : 0;
+
+  // Previously used "Issued To" names for this customer, so staff can
+  // quickly re-select someone who has collected material before.
+  const previousIssuedTo = Array.from(
+    new Set(
+      invoices
+        .filter((inv) => inv.customerId === customerId && inv.issuedTo?.name && inv.id !== editingInvoice?.id)
+        .map((inv) => inv.issuedTo.name)
+    )
+  );
+
+  const subtotal = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.price) || 0), 0);
+  const total = subtotal + (Number(rickshawRent) || 0) + (Number(deliveryCharges) || 0) - (Number(discount) || 0);
+  const advanceAppliedNum = bookingMode ? roundMoney(Number(advanceApplied) || 0) : 0;
+  const balanceDue = total - (Number(paymentReceived) || 0) - advanceAppliedNum;
+  const bookingLineQty = roundQty(items.filter((it) => it.bookingLine).reduce((s, it) => s + (Number(it.qty) || 0), 0));
+  const bookingMaxAdvance = bookingState
+    ? roundMoney(Math.max(0, Math.min(bookingState.unusedAdvance, total - (Number(paymentReceived) || 0))))
+    : 0;
+  // If the invoice gets smaller (partial qty), never keep more advance applied than allowed.
+  useEffect(() => {
+    if (bookingMode && Number(advanceApplied) > bookingMaxAdvance + 0.005) setAdvanceApplied(bookingMaxAdvance);
+  }, [bookingMode, bookingMaxAdvance]);
+
+  // Cash Customer / Walk-In: Invoice Total = Cash Received, always. Keep
+  // the payment field synced to the total so the invoice is always fully
+  // paid with zero outstanding, per the Cash Sale workflow.
+  useEffect(() => {
+    if (customerType === "Cash") {
+      setPaymentReceived(total);
+    }
+  }, [customerType, total]);
+
+  const selectedAgent = commissionAgentId ? (commissionAgents || []).find((a) => a.id === commissionAgentId) : null;
+  const commissionPreviewItems = items
+    .filter((it) => it.name && Number(it.qty) > 0)
+    .map((it) => ({ name: it.name, qty: Number(it.qty) || 0, price: Number(it.price) || 0, total: (Number(it.qty) || 0) * (Number(it.price) || 0) }));
+  const commissionPreview = selectedAgent
+    ? computeCommissionForInvoice(selectedAgent, commissionRules, commissionPreviewItems, date, subtotal)
+    : { total: 0, lines: [] };
+
+  function updateItem(id, patch) {
+    setItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+  }
+  function addItem() {
+    setItems((prev) => [...prev, { id: uid("it"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]);
+  }
+  function removeItem(id) {
+    // The booking delivery line stays (its qty is what is delivered against the booking).
+    setItems((prev) => (prev.length > 1 ? prev.filter((it) => it.id !== id || it.bookingLine) : prev));
+  }
+  function pickProduct(id, productId) {
+    if (items.some((it) => it.id === id && it.bookingLine)) return; // booking line keeps the booked product
+    const p = products.find((p) => p.id === productId);
+    updateItem(id, { productId, name: p ? p.name : "", unit: p ? p.unit : "Bag", price: p ? p.price : 0 });
+  }
+
+  function submit() {
+    if (submittingRef.current) return;
+    let customer = null;
+    if (customerType === "Regular") {
+      customer = customers.find((c) => c.id === customerId);
+      if (!customer) { alert("Pehle customer select karein."); return; }
+    }
+    const cleanItems = items.filter((it) => it.name && Number(it.qty) > 0);
+    if (cleanItems.length === 0) { alert("Kam az kam ek item add karein."); return; }
+    let bookingFields = {};
+    if (bookingMode) {
+      if (customerType !== "Regular" || customerId !== linkedBooking.customerId) {
+        alert(`This delivery must be invoiced to the booking's customer (${linkedBooking.customerName}).`); return;
+      }
+      const bookingLine = cleanItems.find((it) => it.bookingLine);
+      const bQty = roundQty(cleanItems.filter((it) => it.bookingLine).reduce((s, it) => s + (Number(it.qty) || 0), 0));
+      if (!bookingLine || bQty <= 0) { alert(`Enter the quantity delivered against booking ${linkedBooking.code}.`); return; }
+      if (!isEdit && !bookingState.isOpen) { alert(`Booking ${linkedBooking.code} is ${bookingState.status} — it cannot be delivered.`); return; }
+      if (bQty > bookingState.remainingQty + BOOKING_EPS) {
+        alert(`Only ${fmtQty(bookingState.remainingQty)} ${linkedBooking.unit || ""} remain undelivered on booking ${linkedBooking.code}.`); return;
+      }
+      if (advanceAppliedNum < 0 || advanceAppliedNum > bookingMaxAdvance + 0.005) {
+        alert(`Advance applied must be between Rs 0 and ${fmtMoney(bookingMaxAdvance)}.`); return;
+      }
+      bookingFields = {
+        fromBookingId: linkedBooking.id, bookingRef: linkedBooking.code,
+        bookingQty: bQty, bookingRate: roundMoney(Number(bookingLine.price) || linkedBooking.rate),
+        advanceApplied: advanceAppliedNum,
+      };
+    }
+    const issuedTo = issuedToName.trim()
+      ? { name: issuedToName.trim(), phone: issuedToPhone.trim(), relation: issuedToRelation, remarks: issuedToRemarks.trim() }
+      : null;
+
+    // Cash Customer / Walk-In: no customer account required. Name/phone/
+    // address are optional free-text fields, defaulting to "Cash Customer"
+    // when no name is entered. Invoice Total = Cash Received, so the
+    // invoice is always fully paid with zero outstanding balance.
+    const finalCustomerId = customerType === "Cash" ? (isEdit ? editingInvoice.customerId : uid("cash")) : customerId;
+    const finalCustomerName = customerType === "Cash" ? (cashName.trim() || "Cash Customer") : customer.name;
+    const finalCustomerPhone = customerType === "Cash" ? cashPhone.trim() : (customer.phone || "");
+    const finalCustomerAddress = customerType === "Cash" ? cashAddress.trim() : (customer.address || "");
+    const finalPaymentReceived = customerType === "Cash" ? total : (Number(paymentReceived) || 0);
+    const finalBalanceDue = total - finalPaymentReceived - (bookingMode ? advanceAppliedNum : 0);
+
+    const base = {
+      customerId: finalCustomerId,
+      customerName: finalCustomerName,
+      customerPhone: finalCustomerPhone,
+      customerAddress: finalCustomerAddress,
+      customerType,
+      // A Cash Customer / Walk-In invoice belongs to the branch that
+      // created it (there is no customer record to derive the branch
+      // from), so it stays visible in that branch's invoice list.
+      branchId: currentUser?.branchId || "",
+      previousOutstanding: customerType === "Cash" ? 0 : previousOutstanding,
+      date,
+      // BUGFIX: item qty (which may be a fractional Feet/Meter/KG/Liter/
+      // Sq.Ft amount) and total are rounded so the per-unit rate derived
+      // later (total ÷ qty) is stable instead of drifting.
+      items: cleanItems.map((it) => ({ name: it.name, unit: it.unit || "", qty: roundQty(it.qty), price: roundMoney(it.price), total: roundMoney(roundQty(it.qty) * Number(it.price)), ...(it.bookingLine ? { bookingLine: true } : {}) })),
+      rickshawRent: Number(rickshawRent) || 0,
+      deliveryCharges: Number(deliveryCharges) || 0,
+      discount: Number(discount) || 0,
+      driverId: matchedDriver ? matchedDriver.code : "",
+      driverName: matchedDriver ? matchedDriver.name : manualDriverName,
+      vehicleType: matchedDriver ? matchedDriver.vehicleType : "",
+      vehicleNumber: matchedDriver ? matchedDriver.vehicleNumber : "",
+      receivedBy,
+      subtotal,
+      total,
+      paymentReceived: finalPaymentReceived,
+      balanceDue: finalBalanceDue,
+      status: customerType === "Cash" ? "Paid" : (finalBalanceDue <= 0 ? "Paid" : (finalPaymentReceived > 0 || (bookingMode && advanceAppliedNum > 0)) ? "Partial" : "Unpaid"),
+      issuedTo,
+      // Commission is a reference only — never affects subtotal/total above.
+      commissionAgentId: commissionAgentId || "",
+      // Advance Booking delivery link (empty object for normal invoices).
+      ...bookingFields,
+    };
+
+    submittingRef.current = true;
+    if (isEdit) {
+      onSave({
+        ...editingInvoice,
+        ...base,
+        // Preserve identity + lifecycle fields
+        id: editingInvoice.id,
+        number: editingInvoice.number,
+      });
+    } else {
+      onSave({
+        id: uid("inv"),
+        number: nextNumber,
+        ...base,
+        docStatus: "Active",
+        editHistory: [],
+        fromBookingId: prefill?.sourceType === "booking" ? prefill.sourceId : "",
+        bookingRef: prefill?.sourceType === "booking" ? prefill.sourceCode : "",
+        fromOrderId: prefill?.sourceType === "order" ? prefill.sourceId : "",
+        orderRef: prefill?.sourceType === "order" ? prefill.sourceCode : "",
+      });
+    }
+  }
+
+  return (
+    <div>
+      {prefill && (
+        <div className="bg-blue-50 border border-blue-200 p-3 mb-3 text-xs">
+          <div className="font-black uppercase text-blue-700">
+            {prefill.sourceType === "booking" ? `Advance Booking ${prefill.sourceCode} se banaya ja raha hai` : `Order ${prefill.sourceCode} se banaya ja raha hai`}
+          </div>
+          {prefill.sourceType === "booking" && (
+            <div className="text-blue-700 mt-0.5">Rate lock hai — is item ka daam invoice mein change na karein, warna customer se galat charge hoga.</div>
+          )}
+        </div>
+      )}
+      {bookingMode && bookingState && (
+        <InvoiceBookingPanel
+          booking={linkedBooking} state={bookingState} products={products}
+          advanceApplied={advanceApplied} setAdvanceApplied={setAdvanceApplied}
+          maxAdvance={bookingMaxAdvance} bookingLineQty={bookingLineQty}
+        />
+      )}
+      {canChangeCustomerType ? (
+        <Field label="Customer Type">
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setCustomerType("Regular")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${customerType === "Regular" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>Regular Customer</button>
+            <button type="button" onClick={() => setCustomerType("Cash")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${customerType === "Cash" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>Cash Customer / Walk-In</button>
+          </div>
+        </Field>
+      ) : (
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-2">
+          {customerType === "Cash" ? "Cash Customer / Walk-In Invoice" : "Regular Customer Invoice"}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        {customerType === "Regular" && (
+          <Field label="Customer">
+            <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+        )}
+        <Field label="Date">
+          <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+      </div>
+
+      {customerType === "Cash" && (
+        <div className="bg-blue-50 border border-blue-200 p-3 mb-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700 mb-2">Cash Customer / Walk-In Details (Optional)</div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Customer Name (optional)">
+              <input className={inputCls} placeholder="Cash Customer" value={cashName} onChange={(e) => setCashName(e.target.value)} />
+            </Field>
+            <Field label="Phone Number (optional)">
+              <input className={inputCls} value={cashPhone} onChange={(e) => setCashPhone(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Address (optional)">
+            <input className={inputCls} value={cashAddress} onChange={(e) => setCashAddress(e.target.value)} />
+          </Field>
+          <div className="text-[11px] text-blue-700">Customer account, portal, credit limit ya outstanding ledger nahi banega — sirf cash sale invoice.</div>
+        </div>
+      )}
+
+      {selectedCustomer && (
+        <div className="bg-slate-50 border border-slate-200 p-3 mb-3 text-sm">
+          <div className="grid grid-cols-2 gap-y-1">
+            <div><span className="text-slate-500">Phone:</span> <span className="font-bold">{selectedCustomer.phone || "-"}</span></div>
+            <div><span className="text-slate-500">Credit Limit:</span> <span className="font-bold">{fmtMoney(selectedCustomer.creditLimit)}</span></div>
+            <div className="col-span-2"><span className="text-slate-500">Address:</span> <span className="font-bold">{selectedCustomer.address || "-"}</span></div>
+            <div className="col-span-2 pt-1 border-t border-slate-200 mt-1">
+              <span className="text-slate-500">Current Outstanding {isEdit ? "(before this invoice, at time of creation)" : "(before this invoice)"}:</span>{" "}
+              <span className={`font-black ${previousOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(previousOutstanding)}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1 mt-3">Items</div>
+      <div className="text-[10px] text-slate-400 mb-2">Tip: for products sold by Feet / Meter / KG / Liter / Sq.Ft, enter Qty as the total measurable quantity (e.g. 39 for 3 pipes × 13 feet), not the piece count — this is what makes partial returns/exchanges calculate correctly.</div>
+      <div className="space-y-2 mb-2">
+        {items.map((it) => (
+          <div key={it.id} className="flex gap-2 items-center">
+            <select className={`${inputCls} w-36`} value={it.productId} onChange={(e) => pickProduct(it.id, e.target.value)}>
+              <option value="">Custom item</option>
+              {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <input className={`${inputCls} flex-1 ${it.bookingLine ? "bg-amber-50" : ""}`} placeholder="Item name" value={it.name} readOnly={!!it.bookingLine}
+              onChange={(e) => updateItem(it.id, { name: e.target.value })} />
+            <input list="unit-suggestions" className={`${inputCls} w-24`} placeholder="Unit" value={it.unit || ""} onChange={(e) => updateItem(it.id, { unit: e.target.value })} />
+            <input type="number" step="any" className={`${inputCls} w-20`} placeholder="Qty" value={it.qty}
+              onChange={(e) => updateItem(it.id, { qty: e.target.value })} />
+            <input type="number" step="any" className={`${inputCls} w-24 ${it.bookingLine ? "bg-amber-50" : ""}`} placeholder="Price" value={it.price} readOnly={!!it.bookingLine}
+              title={it.bookingLine ? "Locked booking rate — an admin can change it from the booking with a reason" : undefined}
+              onChange={(e) => updateItem(it.id, { price: e.target.value })} />
+            <div className="w-24 text-right text-sm font-bold">{fmtMoney((it.qty || 0) * (it.price || 0))}</div>
+            <button onClick={() => removeItem(it.id)} className="text-slate-400 hover:text-red-600 text-lg leading-none">×</button>
+          </div>
+        ))}
+      </div>
+      <datalist id="unit-suggestions">{UNIT_OPTS.map((u) => <option key={u} value={u} />)}</datalist>
+      <Btn variant="ghost" small onClick={addItem}>+ Add Item</Btn>
+
+      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1 mt-4">Rickshaw &amp; Delivery</div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Rickshaw Rent (Rs)">
+          <input type="number" className={inputCls} value={rickshawRent} onChange={(e) => setRickshawRent(e.target.value)} />
+        </Field>
+        <Field label="Delivery Charges (Rs)">
+          <input type="number" className={inputCls} value={deliveryCharges} onChange={(e) => setDeliveryCharges(e.target.value)} />
+        </Field>
+        <Field label="Driver ID">
+          <input
+            className={inputCls}
+            list="driver-id-list"
+            placeholder="e.g. DRV-0001"
+            value={driverIdInput}
+            onChange={(e) => setDriverIdInput(e.target.value)}
+          />
+          <datalist id="driver-id-list">
+            {drivers.map((d) => <option key={d.id} value={d.code}>{d.name} — {d.vehicleType}</option>)}
+          </datalist>
+          {driverIdInput.trim() && (
+            matchedDriver ? (
+              <div className="text-xs text-emerald-600 font-bold mt-1">
+                {matchedDriver.name} · {matchedDriver.vehicleType}{matchedDriver.vehicleNumber ? ` (${matchedDriver.vehicleNumber})` : ""}
+              </div>
+            ) : (
+              <div className="text-xs text-red-600 font-bold mt-1">ID nahi mila — Drivers tab mein add karein, ya neeche naam type karein.</div>
+            )
+          )}
+        </Field>
+        {!matchedDriver && (
+          <Field label="Driver Name (agar ID na ho)">
+            <input className={inputCls} value={manualDriverName} onChange={(e) => setManualDriverName(e.target.value)} />
+          </Field>
+        )}
+        <Field label="Payment Received By">
+          <input className={inputCls} value={receivedBy} onChange={(e) => setReceivedBy(e.target.value)} />
+        </Field>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Discount (Rs)">
+          <input type="number" className={inputCls} value={discount} onChange={(e) => setDiscount(e.target.value)} />
+        </Field>
+        {customerType === "Regular" ? (
+          <Field label="Payment Received Now (Rs)">
+            <input type="number" className={inputCls} value={paymentReceived} onChange={(e) => setPaymentReceived(e.target.value)} />
+          </Field>
+        ) : (
+          <Field label="Cash Received (Auto = Total)">
+            <input type="number" className={`${inputCls} bg-slate-100`} value={total} disabled readOnly />
+          </Field>
+        )}
+      </div>
+
+      {(commissionAgents || []).length > 0 && (
+        <div className="border-t border-slate-200 mt-3 pt-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Commission Agent (Optional)</div>
+          <div className="text-[11px] text-slate-400 mb-2">Commission is tracked separately as a business payable — it never changes the customer's invoice total above.</div>
+          <Field label="Commission Agent">
+            <select className={inputCls} value={commissionAgentId} onChange={(e) => setCommissionAgentId(e.target.value)}>
+              <option value="">No Agent</option>
+              {(commissionAgents || []).filter((a) => a.status === "Active").map((a) => (
+                <option key={a.id} value={a.id}>{a.name} ({a.id})</option>
+              ))}
+            </select>
+          </Field>
+          {selectedAgent && (
+            <div className="bg-amber-50 border border-amber-200 p-3 text-sm space-y-1">
+              {commissionPreview.lines.length === 0 && (
+                <div className="text-slate-500 text-xs">Is agent/invoice ke liye koi active commission rule match nahi hui.</div>
+              )}
+              {commissionPreview.lines.map((l, idx) => (
+                <div key={idx} className="flex justify-between text-xs text-slate-600">
+                  <span>{l.source} ({fmtCommissionRate(l.commissionType, l.commissionRate)})</span>
+                  <span className="font-bold">{fmtMoney(l.commission)}</span>
+                </div>
+              ))}
+              <div className="flex justify-between border-t border-amber-300 pt-1 mt-1">
+                <span className="font-black uppercase text-amber-700 text-xs">Estimated Commission</span>
+                <span className="font-black text-amber-700">{fmtMoney(commissionPreview.total)}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="border-t border-slate-200 mt-3 pt-3">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Material Issued To (agar account owner khud collect nahi kar raha)</div>
+        <div className="text-[11px] text-slate-400 mb-2">Customer account waisa hi rahega — sirf ye note hoga ke material kis ne collect kiya.</div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Issued To Name">
+            <input className={inputCls} list="issued-to-list" placeholder="e.g. Aslam" value={issuedToName} onChange={(e) => setIssuedToName(e.target.value)} />
+            <datalist id="issued-to-list">{previousIssuedTo.map((n) => <option key={n} value={n} />)}</datalist>
+          </Field>
+          <Field label="Mobile Number (Optional)">
+            <input className={inputCls} value={issuedToPhone} onChange={(e) => setIssuedToPhone(e.target.value)} />
+          </Field>
+          <Field label="Relation">
+            <select className={inputCls} value={issuedToRelation} onChange={(e) => setIssuedToRelation(e.target.value)}>
+              <option value="">Select</option>
+              <option>Worker</option><option>Mistri</option><option>Driver</option><option>Supervisor</option><option>Family</option><option>Other</option>
+            </select>
+          </Field>
+          <Field label="Remarks">
+            <input className={inputCls} value={issuedToRemarks} onChange={(e) => setIssuedToRemarks(e.target.value)} />
+          </Field>
+        </div>
+      </div>
+
+      <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
+        <div className="flex justify-between text-slate-500"><span>Previous Balance</span><span>{fmtMoney(previousOutstanding + advanceAppliedNum)}</span></div>
+        <div className="flex justify-between"><span>New Purchase</span><span className="font-bold">{fmtMoney(subtotal)}</span></div>
+        <div className="flex justify-between"><span>Rickshaw + Delivery</span><span className="font-bold">{fmtMoney((Number(rickshawRent) || 0) + (Number(deliveryCharges) || 0))}</span></div>
+        <div className="flex justify-between"><span>Discount</span><span className="font-bold">-{fmtMoney(discount)}</span></div>
+        <div className="flex justify-between"><span>Payment Received</span><span className="font-bold">-{fmtMoney(paymentReceived)}</span></div>
+        {advanceAppliedNum > 0 && (
+          <div className="flex justify-between"><span>Advance Applied ({linkedBooking?.code})</span><span className="font-bold text-emerald-700">-{fmtMoney(advanceAppliedNum)}</span></div>
+        )}
+        {bookingMode && (
+          <div className="flex justify-between text-slate-500"><span>This Invoice Payable</span><span className="font-bold">{fmtMoney(balanceDue)}</span></div>
+        )}
+        <div className="flex justify-between text-base border-t border-slate-300 pt-1"><span className="font-bold">Outstanding Balance</span><span className="font-black text-red-600">{fmtMoney(previousOutstanding + balanceDue + advanceAppliedNum)}</span></div>
+      </div>
+
+      <div className="flex gap-2 mt-4">
+        <Btn onClick={submit}>{isEdit ? `Save Changes to Invoice ${editingInvoice.number}` : `Save Invoice ${nextNumber}`}</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function invoiceStatusBanner(invoice) {
+  if (invoice.docStatus === "Cancelled") return { text: "Invoice Cancelled — Reversed From Ledger", tone: "slate" };
+  const thisPaid = invoice.balanceDue <= 0;
+  const prevDue = (invoice.previousOutstanding || 0) > 0;
+  if (thisPaid && !prevDue) return { text: "Paid in Full", tone: "emerald" };
+  if (thisPaid && prevDue) return { text: "This Invoice Paid \u00B7 Previous Outstanding Still Due", tone: "amber" };
+  if (invoice.paymentReceived > 0 || Number(invoice.advanceApplied) > 0) return { text: `Partial Payment Received \u2014 Balance Due on Current Purchase${prevDue ? " \u00B7 Previous Outstanding Still Due" : ""}`, tone: "amber" };
+  return { text: `Unpaid \u2014 Balance Due on Current Purchase${prevDue ? " \u00B7 Previous Outstanding Still Due" : ""}`, tone: "red" };
+}
+
+function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, onClose, onEdit, onCancelInvoice, onGoToReturn, onGoToExchange, onCreateNewFromInvoice }) {
+  const [printOpen, setPrintOpen] = useState(false);
+  const banner = invoiceStatusBanner(invoice);
+  const bannerCls = {
+    emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
+    amber: "bg-blue-50 text-blue-700 border-blue-200",
+    red: "bg-red-50 text-red-700 border-red-200",
+    slate: "bg-slate-100 text-slate-600 border-slate-300",
+  }[banner.tone];
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
+  const hasDelivery = invoice.rickshawRent > 0 || invoice.deliveryCharges > 0 || invoice.driverName || invoice.receivedBy;
+  const isCancelled = invoice.docStatus === "Cancelled";
+
+  const rs = (returns && exchanges) ? computeInvoiceReturnStatus(invoice, returns, exchanges) : null;
+  const myReturns = returns ? returnsForInvoice(invoice.id, returns) : [];
+  const myExchanges = exchanges ? exchangesForInvoice(invoice.id, exchanges) : [];
+
+  return (
+    <Modal title={`Invoice ${invoice.number}`} onClose={onClose} wide>
+      <div id="print-invoice" className="print-area bg-white">
+        <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
+          <div className="flex items-center gap-3">
+            {settings.logoUrl ? (
+              <img src={settings.logoUrl} alt="Logo" className="w-14 h-14 object-contain" />
+            ) : (
+              <div className="w-14 h-14 bg-slate-900 flex items-center justify-center font-black text-xl text-white">CT</div>
+            )}
+            <div>
+              <div className="text-xl font-black uppercase tracking-tight text-slate-900">{settings.companyName}</div>
+              <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">Construction Materials Supplier</div>
+            </div>
+          </div>
+          <div className="text-right text-xs text-slate-500">
+            <div>{settings.companyAddress}</div>
+            {settings.companyPhone && <div>Ph: {settings.companyPhone}</div>}
+          </div>
+        </div>
+
+        <div className="flex justify-between items-start mb-4">
+          <div className="text-sm">
+            <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-0.5">Bill To</div>
+            <div className="font-bold text-slate-900">{invoice.customerName}</div>
+            {invoice.customerPhone && <div className="text-slate-500">{invoice.customerPhone}</div>}
+            {invoice.customerAddress && <div className="text-slate-500">{invoice.customerAddress}</div>}
+            {invoice.issuedTo?.name && (
+              <div className="mt-2 text-xs bg-blue-50 border border-blue-200 px-2 py-1 inline-block">
+                <span className="text-blue-700 font-bold uppercase">Material Issued To:</span>{" "}
+                <span className="font-bold text-slate-900">{invoice.issuedTo.name}</span>
+                {invoice.issuedTo.relation && <span className="text-slate-500"> ({invoice.issuedTo.relation})</span>}
+                {invoice.issuedTo.phone && <span className="text-slate-500"> · {invoice.issuedTo.phone}</span>}
+              </div>
+            )}
+          </div>
+          <div className="text-right">
+            <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{invoice.number}</div>
+            <div className="text-xs text-slate-500 mt-1">Date: <span className="font-bold text-slate-700">{fmtDate(invoice.date)}</span></div>
+            {invoice.bookingRef && (
+              <div className="text-[10px] font-bold uppercase text-amber-700 mt-1">Booking: {invoice.bookingRef}{invoice.bookingQty != null ? ` · ${fmtQty(invoice.bookingQty)} delivered` : ""}</div>
+            )}
+            {invoice.customerType === "Cash" && (
+              <div className="inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</div>
+            )}
+            {rs && rs.status !== "Normal" && (
+              <div className={`inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 ${RETURN_STATUS_TONE[rs.status]}`}>{rs.status}</div>
+            )}
+          </div>
+        </div>
+
+        <table className="w-full text-sm mb-4">
+          <thead>
+            <tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
+              <th className="py-2 px-2 text-left">Item</th>
+              <th className="py-2 px-2 text-right">Qty (Sold)</th>
+              <th className="py-2 px-2 text-right">Unit</th>
+              <th className="py-2 px-2 text-right">Rate / Unit</th>
+              <th className="py-2 px-2 text-right">Amount</th>
+              {rs && <th className="py-2 px-2 text-right">Returned</th>}
+              {rs && <th className="py-2 px-2 text-right">Remaining</th>}
+            </tr>
+          </thead>
+          <tbody>
+            {(rs ? rs.breakdown : invoice.items).map((it, idx) => (
+              <tr key={idx} className="border-b border-slate-100">
+                <td className="py-2 px-2">{it.name}</td>
+                <td className="py-2 px-2 text-right">{fmtQty(it.qty)}</td>
+                <td className="py-2 px-2 text-right text-slate-500">{it.unit || "-"}</td>
+                <td className="py-2 px-2 text-right">{fmtMoney(it.price)}</td>
+                <td className="py-2 px-2 text-right font-bold">{fmtMoney(it.total)}</td>
+                {rs && <td className="py-2 px-2 text-right text-slate-500">{(it.returnedQty || 0) + (it.exchangedQty || 0) > 0 ? fmtQty(it.returnedQty + it.exchangedQty) : "-"}</td>}
+                {rs && <td className="py-2 px-2 text-right text-slate-500">{fmtQty(it.remainingQty)}</td>}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+
+        {hasDelivery && (
+          <div className="mb-4 text-sm">
+            <div className="font-bold text-slate-900 mb-1">Rickshaw &amp; Delivery Details</div>
+            <div className="text-xs text-slate-500 space-y-0.5">
+              {invoice.driverName && (
+                <div>
+                  Driver: {invoice.driverName}
+                  {invoice.driverId ? ` (${invoice.driverId})` : ""}
+                  {invoice.vehicleType ? ` — ${invoice.vehicleType}` : ""}
+                  {invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}
+                </div>
+              )}
+              <div>Rickshaw Rent: {fmtMoney(invoice.rickshawRent)}</div>
+              <div>Delivery Charges: {fmtMoney(invoice.deliveryCharges)}</div>
+              <div>Payment Received By: {invoice.receivedBy || "-"}</div>
+            </div>
+          </div>
+        )}
+
+        <div className="flex justify-end">
+          <div className="w-72 text-sm space-y-1.5">
+            <div className="flex justify-between"><span className="text-slate-500">Previous Balance</span><span className="font-bold">{fmtMoney((invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0))}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">New Purchase</span><span className="font-bold">{fmtMoney(invoice.subtotal)}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Rickshaw + Delivery</span><span className="font-bold">{fmtMoney((invoice.rickshawRent || 0) + (invoice.deliveryCharges || 0))}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Discount</span><span className="font-bold">-{fmtMoney(invoice.discount || 0)}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Payment Received</span><span className="font-bold">-{fmtMoney(invoice.paymentReceived)}</span></div>
+            {Number(invoice.advanceApplied) > 0 && (
+              <div className="flex justify-between"><span className="text-slate-500">Advance Applied ({invoice.bookingRef})</span><span className="font-bold">-{fmtMoney(invoice.advanceApplied)}</span></div>
+            )}
+            <div className="flex justify-between border-t-2 border-slate-900 pt-2 mt-1">
+              <span className="font-black uppercase text-blue-700">Outstanding Balance</span>
+              <span className="font-black text-lg text-blue-700">{fmtMoney(outstandingNow)}</span>
+            </div>
+          </div>
+        </div>
+
+        <div className={`mt-4 border px-3 py-2 text-xs font-bold text-center ${bannerCls}`}>
+          ⚠ {banner.text}
+        </div>
+        {/* Receiving Proof (add-only): print / PDF only, invisible on screen */}
+        <RecvInvoicePrintProof invoice={invoice} />
+      </div>
+
+      {/* Receiving Proof (add-only): admin / staff option + Receiving button, hidden in print */}
+      <RecvInvoiceSection invoice={invoice} settings={settings} />
+
+      {commissionInfo && (
+        <div className="mt-4 text-xs bg-amber-50 border border-amber-200 px-3 py-2 print:hidden flex items-center justify-between">
+          <div>
+            <span className="font-black uppercase text-amber-700">Commission:</span>{" "}
+            <span className="font-bold text-slate-700">{commissionInfo.agentName}</span>{" "}
+            <span className="font-bold">{fmtMoney(commissionInfo.commissionAmount)}</span>
+          </div>
+          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${COMMISSION_STATUS_TONE[commissionInfo.status] || "bg-slate-100 text-slate-500"}`}>{tStatus(commissionInfo.status)}</span>
+        </div>
+      )}
+
+      {(myReturns.length > 0 || myExchanges.length > 0) && (
+        <div className="mt-4 print:hidden">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Sales Return &amp; Exchange History</div>
+          <div className="border border-slate-200 divide-y divide-slate-100">
+            {myReturns.map((r) => (
+              <div key={r.id} className="px-3 py-2 text-xs flex justify-between items-center">
+                <div>
+                  <span className="font-black text-blue-700">{r.code}</span> — Sales Return
+                  <div className="text-slate-400">{fmtDate(r.date)} · {r.reason}{r.status === "Deleted" ? " · DELETED" : ""} · Qty {fmtQty((r.items || []).reduce((s, it) => s + (Number(it.qtyReturned) || 0), 0))}</div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="font-bold text-emerald-600">{fmtMoney(r.amount)}</span>
+                  {onGoToReturn && <button className="font-bold text-blue-700 hover:underline" onClick={() => onGoToReturn(r)}>View</button>}
+                </div>
+              </div>
+            ))}
+            {myExchanges.map((ex) => (
+              <div key={ex.id} className="px-3 py-2 text-xs flex justify-between items-center">
+                <div>
+                  <span className="font-black text-blue-700">{ex.code}</span> — Exchange
+                  <div className="text-slate-400">{fmtDate(ex.date)} · {ex.reason}{ex.status === "Deleted" ? " · DELETED" : ""} · Ret Qty {fmtQty((ex.returnedItems || []).reduce((s, it) => s + (Number(it.qty) || 0), 0))} / New Qty {fmtQty((ex.newItems || []).reduce((s, it) => s + (Number(it.qty) || 0), 0))}</div>
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className={`font-bold ${ex.difference >= 0 ? "text-red-600" : "text-emerald-600"}`}>{ex.difference >= 0 ? "+" : "-"}{fmtMoney(Math.abs(ex.difference))}</span>
+                  {onGoToExchange && <button className="font-bold text-blue-700 hover:underline" onClick={() => onGoToExchange(ex)}>View</button>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {rs && rs.isLocked && (
+        <div className="mt-4 bg-red-50 border border-red-200 text-red-700 text-xs font-bold px-3 py-2 print:hidden">
+          This invoice has been fully returned. Please create a new invoice.
+          {onCreateNewFromInvoice && (
+            <button className="ml-2 underline" onClick={() => onCreateNewFromInvoice(invoice)}>Create New Invoice</button>
+          )}
+        </div>
+      )}
+
+      {invoice.editHistory && invoice.editHistory.length > 0 && (
+        <div className="mt-4 print:hidden">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Edit History</div>
+          <div className="border border-slate-200 divide-y divide-slate-100 max-h-40 overflow-y-auto">
+            {[...invoice.editHistory].reverse().map((h, idx) => (
+              <div key={idx} className="px-3 py-2 text-xs">
+                <div className="font-bold text-slate-700">{h.action} — {h.editedBy}</div>
+                <div className="text-slate-400">{fmtDateTime(h.editedAt)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4 flex gap-2 flex-wrap print:hidden">
+        <Btn onClick={() => setPrintOpen(true)}>Print / Save as PDF</Btn>
+        <a href={waLink(invoice.customerPhone, buildInvoiceWaMessage(invoice, settings))} target="_blank" rel="noreferrer">
+          <Btn variant="dark">Share on WhatsApp</Btn>
+        </a>
+        {!isCancelled && onEdit && <Btn variant="ghost" onClick={() => onEdit(invoice)}>Edit Invoice</Btn>}
+        {!isCancelled && onCancelInvoice && (
+          <Btn variant="danger" onClick={() => { if (confirm(`Invoice ${invoice.number} cancel karein? Ye ledger se reverse ho jayegi.`)) onCancelInvoice(invoice); }}>
+            Cancel Invoice
+          </Btn>
+        )}
+        <Btn variant="ghost" onClick={onClose}>Close</Btn>
+      </div>
+      {!invoice.customerPhone && (
+        <div className="text-xs text-red-600 mt-2 print:hidden">Is customer ka phone number save nahi hai — WhatsApp share ke liye Customers tab mein add karein.</div>
+      )}
+      {printOpen && <InvoicePrintDialog invoice={invoice} settings={settings} rs={rs} onClose={() => setPrintOpen(false)} />}
+    </Modal>
+  );
+}
+
+function buildInvoiceWaMessage(invoice, settings) {
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
+  const lines = [
+    `${settings.companyName} — Invoice ${invoice.number}${invoice.docStatus === "Cancelled" ? " (CANCELLED)" : ""}`,
+    `Date: ${fmtDate(invoice.date)}`,
+    `Customer: ${invoice.customerName}`,
+    ...(invoice.issuedTo?.name ? [`Material Issued To: ${invoice.issuedTo.name}${invoice.issuedTo.relation ? ` (${invoice.issuedTo.relation})` : ""}`] : []),
+    "",
+    ...invoice.items.map((it) => `${it.name} x${it.qty}${it.unit ? " " + it.unit : ""} = ${fmtMoney(it.total)}`),
+    "",
+    `New Purchase: ${fmtMoney(invoice.subtotal)}`,
+    `Received: ${fmtMoney(invoice.paymentReceived)}`,
+    ...(Number(invoice.advanceApplied) > 0 ? [`Booking Advance Applied (${invoice.bookingRef}): ${fmtMoney(invoice.advanceApplied)}`] : []),
+    `Balance Due (this invoice): ${fmtMoney(invoice.balanceDue)}`,
+    `Total Outstanding Balance: ${fmtMoney(outstandingNow)}`,
+  ];
+  return lines.join("\n");
+}
+
+function Invoices({ customers, products, drivers, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, commissionTransactions, bookings, settings, currentUser, saveInvoice, updateInvoice, cancelInvoice, prefill, onClearPrefill, onBookingFulfilled, onOrderFulfilled, focusInvoiceId, setFocusInvoiceId, onGoToReturn, onGoToExchange, newInvoiceSignal = 0 }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editingInvoice, setEditingInvoice] = useState(null);
+  const [viewing, setViewing] = useState(null);
+  const nextNumber = "CT-" + String(settings.invoiceCounter).padStart(4, "0");
+
+  useEffect(() => {
+    if (prefill) setShowForm(true);
+  }, [prefill]);
+
+  // "New Invoice" pressed in the header, dashboard or mobile "+" button.
+  useEffect(() => {
+    if (newInvoiceSignal) { setViewing(null); setEditingInvoice(null); setShowForm(true); }
+  }, [newInvoiceSignal]);
+
+  // Opened from global search / linked-record navigation.
+  useEffect(() => {
+    if (focusInvoiceId) {
+      const inv = invoices.find((i) => i.id === focusInvoiceId);
+      if (inv) setViewing(inv);
+      setFocusInvoiceId(null);
+    }
+  }, [focusInvoiceId]);
+
+  function closeForm() {
+    setShowForm(false);
+    setEditingInvoice(null);
+    if (prefill) onClearPrefill();
+  }
+
+  function openEdit(inv) {
+    setViewing(null);
+    setEditingInvoice(inv);
+    setShowForm(true);
+  }
+
+  function handleCancelInvoice(inv) {
+    cancelInvoice(inv);
+    setViewing({ ...inv, docStatus: "Cancelled" });
+  }
+
+  function commissionInfoFor(inv) {
+    const tx = (commissionTransactions || []).find((c) => c.invoiceId === inv.id && c.status !== "Cancelled");
+    if (!tx) return null;
+    const agent = (commissionAgents || []).find((a) => a.id === tx.agentId);
+    return { agentName: agent ? agent.name : tx.agentName, commissionAmount: tx.commissionAmount, status: tx.status };
+  }
+
+  // Sorting and Return/Exchange status are computed once per data change, not
+  // on every render (opening a modal used to recompute every invoice's status).
+  const { sorted, returnStatusById } = useMemo(() => {
+    const byInvoice = (list) => {
+      const map = new Map();
+      (list || []).forEach((r) => {
+        let arr = map.get(r.invoiceId);
+        if (!arr) { arr = []; map.set(r.invoiceId, arr); }
+        arr.push(r);
+      });
+      return map;
+    };
+    const retBy = byInvoice(returns);
+    const exBy = byInvoice(exchanges);
+    const statusById = new Map();
+    invoices.forEach((inv) => {
+      statusById.set(inv.id, computeInvoiceReturnStatus(inv, retBy.get(inv.id) || [], exBy.get(inv.id) || []));
+    });
+    return { sorted: [...invoices].sort((a, b) => new Date(b.date) - new Date(a.date)), returnStatusById: statusById };
+  }, [invoices, returns, exchanges]);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-black uppercase tracking-tight">Invoices</h2>
+        <Btn onClick={() => setShowForm(true)}>+ New Invoice</Btn>
+      </div>
+      {customers.length === 0 && <div className="text-slate-400 mb-3">Regular customer ke liye pehle Customers tab mein customer add karein — Cash Customer / Walk-In invoice abhi bhi bana sakte hain.</div>}
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Number</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Type</th><th className="px-4 py-2">Date</th>
+              <th className="px-4 py-2 text-right">Total</th><th className="px-4 py-2 text-right">Due</th><th className="px-4 py-2">Status</th><th className="px-4 py-2">Return/Exchange</th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi invoice nahi bana.</td></tr>}
+            {sorted.map((inv) => {
+              const rs = returnStatusById.get(inv.id) || computeInvoiceReturnStatus(inv, returns, exchanges);
+              return (
+                <tr key={inv.id} className={`border-t border-slate-100 cursor-pointer hover:bg-slate-50 ${inv.docStatus === "Cancelled" ? "opacity-50" : ""}`} onClick={() => setViewing(inv)}>
+                  <td className="px-4 py-2 font-bold text-blue-700">{inv.number}</td>
+                  <td className="px-4 py-2">{inv.customerName}</td>
+                  <td className="px-4 py-2">
+                    {inv.customerType === "Cash" ? (
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</span>
+                    ) : (
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-100 text-slate-500">Regular</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2 text-slate-500">{fmtDate(inv.date)}</td>
+                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(inv.total)}</td>
+                  <td className="px-4 py-2 text-right text-red-600 font-bold">{inv.docStatus !== "Cancelled" && inv.balanceDue > 0 ? fmtMoney(inv.balanceDue) : "-"}</td>
+                  <td className="px-4 py-2">
+                    {inv.docStatus === "Cancelled" ? (
+                      <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-200 text-slate-600">Cancelled</span>
+                    ) : (
+                      <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${inv.status === "Paid" ? "bg-emerald-100 text-emerald-700" : inv.status === "Partial" ? "bg-blue-100 text-blue-700" : "bg-red-100 text-red-700"}`}>{inv.status}</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-2">
+                    {rs.status !== "Normal" && (
+                      <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${RETURN_STATUS_TONE[rs.status]}`}>{rs.status}</span>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {showForm && (
+        <Modal title={editingInvoice ? `Edit Invoice ${editingInvoice.number}` : prefill ? `New Invoice — from ${prefill.sourceCode}` : "New Invoice"} onClose={closeForm} wide>
+          <InvoiceForm
+            customers={customers}
+            products={products}
+            drivers={drivers}
+            bookings={bookings}
+            invoices={invoices}
+            payments={payments}
+            returns={returns}
+            exchanges={exchanges}
+            promises={promises}
+            transfers={transfers}
+            adjustments={adjustments}
+            commissionAgents={commissionAgents}
+            commissionRules={commissionRules}
+            prefill={editingInvoice ? null : prefill}
+            editingInvoice={editingInvoice}
+            currentUser={currentUser}
+            nextNumber={nextNumber}
+            onCancel={closeForm}
+            onSave={(inv) => {
+              if (editingInvoice) {
+                updateInvoice(inv, editingInvoice);
+              } else {
+                saveInvoice(inv);
+                if (prefill) {
+                  if (prefill.sourceType === "order") onOrderFulfilled(prefill.sourceId);
+                  else onBookingFulfilled(prefill.sourceId);
+                  onClearPrefill();
+                }
+              }
+              setShowForm(false);
+              setEditingInvoice(null);
+            }}
+          />
+        </Modal>
+      )}
+      {viewing && (
+        <InvoiceDetail
+          invoice={viewing}
+          settings={settings}
+          returns={returns}
+          exchanges={exchanges}
+          commissionInfo={commissionInfoFor(viewing)}
+          onClose={() => setViewing(null)}
+          onEdit={openEdit}
+          onCancelInvoice={handleCancelInvoice}
+          onGoToReturn={onGoToReturn}
+          onGoToExchange={onGoToExchange}
+          onCreateNewFromInvoice={(inv) => { setViewing(null); setShowForm(true); }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Invoice History (Phase 1) ---------------- */
+
+function InvoiceHistoryPage({ invoices, auditLog }) {
+  const rows = [];
+  invoices.forEach((inv) => {
+    (inv.editHistory || []).forEach((h) => {
+      rows.push({ ...h, invoiceNumber: inv.number, customerName: inv.customerName, invoiceId: inv.id });
+    });
+  });
+  rows.sort((a, b) => new Date(b.editedAt) - new Date(a.editedAt));
+
+  const auditRows = [...(auditLog || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-4">Invoice History</h2>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Har invoice edit aur cancellation yahan log hoti hai — kis ne, kab, aur kya badla.
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Invoice</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Action</th>
+              <th className="px-4 py-2">Edited By</th><th className="px-4 py-2">Date/Time</th><th className="px-4 py-2">Details</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-slate-400">Abhi tak koi edit ya cancellation nahi hui.</td></tr>}
+            {rows.map((r, idx) => (
+              <tr key={idx} className="border-t border-slate-100 align-top">
+                <td className="px-4 py-2 font-bold text-blue-700">{r.invoiceNumber}</td>
+                <td className="px-4 py-2">{r.customerName}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${r.action === "Cancelled" ? "bg-red-100 text-red-700" : "bg-blue-100 text-blue-700"}`}>{r.action}</span>
+                </td>
+                <td className="px-4 py-2">{r.editedBy}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDateTime(r.editedAt)}</td>
+                <td className="px-4 py-2 text-xs text-slate-500">
+                  {r.previousValues && r.newValues ? (
+                    <div>
+                      {Object.keys(r.newValues).map((k) => (
+                        <div key={k}><span className="font-bold">{k}:</span> {String(r.previousValues[k])} → {String(r.newValues[k])}</div>
+                      ))}
+                    </div>
+                  ) : "-"}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <h2 className="text-xl font-black uppercase tracking-tight mb-2">Audit Log</h2>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Sales Return, Exchange, Delete Return, Delete Exchange, Promise To Pay, Outstanding Transfer, Adjustment, Commission, aur Invoice Status Change ki har action yahan record hoti hai — user, date, time aur reason ke saath.
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Action</th><th className="px-4 py-2">Reference</th><th className="px-4 py-2">User</th>
+              <th className="px-4 py-2">Date/Time</th><th className="px-4 py-2">Reason</th>
+            </tr>
+          </thead>
+          <tbody>
+            {auditRows.length === 0 && <tr><td colSpan={5} className="px-4 py-6 text-center text-slate-400">Abhi tak koi audit entry nahi.</td></tr>}
+            {auditRows.map((a) => (
+              <tr key={a.id} className="border-t border-slate-100 align-top">
+                <td className="px-4 py-2">
+                  <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-100 text-slate-700">{a.action}</span>
+                </td>
+                <td className="px-4 py-2 font-bold text-blue-700">{a.reference}</td>
+                <td className="px-4 py-2">{a.user}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDateTime(a.at)}</td>
+                <td className="px-4 py-2 text-slate-500">{a.reason || "-"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Sales Return (Phase 2 + Upgrade) ---------------- */
+
+function SalesReturnPage({ customers, invoices, returns, exchanges, onCreateReturn, onDeleteReturn, currentUser }) {
+  const [customerId, setCustomerId] = useState(customers[0]?.id || "");
+  const [invoiceId, setInvoiceId] = useState("");
+  const [returnQtys, setReturnQtys] = useState({});
+  const [reason, setReason] = useState("");
+  const [notes, setNotes] = useState("");
+  const [returnDate, setReturnDate] = useState(todayISO());
+  const [deletingReturn, setDeletingReturn] = useState(null);
+  const [deleteReason, setDeleteReason] = useState("");
+
+  const customerInvoices = invoices.filter((i) => i.customerId === customerId && i.docStatus !== "Cancelled");
+  const invoice = customerInvoices.find((i) => i.id === invoiceId);
+  const rs = invoice ? computeInvoiceReturnStatus(invoice, returns, exchanges) : null;
+
+  useEffect(() => { setInvoiceId(""); setReturnQtys({}); }, [customerId]);
+  useEffect(() => { setReturnQtys({}); }, [invoiceId]);
+
+  // BUGFIX (partial qty/length): Return Amount = Returned Qty × Per Unit
+  // Rate, where Per Unit Rate = Original Line Amount ÷ Original Sold Qty
+  // (it.perUnitRate, computed in computeInvoiceItemBreakdown). We never
+  // multiply by a piece count — only by the qty entered here, which is
+  // expected in the same unit the item was originally sold in (Feet,
+  // Meter, KG, Liter, Sq.Ft, Bag, etc). Rounded with roundMoney to avoid
+  // floating point drift (e.g. Rs 738.4799999999999 → Rs 738.48).
+  const returnAmount = invoice && rs
+    ? roundMoney(rs.breakdown.reduce((sum, it) => sum + roundQty(Number(returnQtys[it.itemIndex]) || 0) * it.perUnitRate, 0))
+    : 0;
+
+  function submit() {
+    if (!invoice || !rs) { alert("Pehle invoice select karein."); return; }
+    if (rs.isLocked) { alert("Ye invoice fully returned ho chuki hai. Nayi invoice banayein."); return; }
+    const items = rs.breakdown
+      .map((it) => ({
+        itemIndex: it.itemIndex, name: it.name, unit: it.unit,
+        qtyReturned: roundQty(Number(returnQtys[it.itemIndex]) || 0),
+        price: it.perUnitRate,
+        total: roundMoney(roundQty(Number(returnQtys[it.itemIndex]) || 0) * it.perUnitRate),
+      }))
+      .filter((it) => it.qtyReturned > 0);
+    if (items.length === 0) { alert("Kam az kam ek item ki return qty daalein."); return; }
+    const invalidQty = items.some((it) => {
+      const line = rs.breakdown.find((b) => b.itemIndex === it.itemIndex);
+      return it.qtyReturned > line.remainingQty + 0.0005; // small epsilon for float-safe comparison
+    });
+    if (invalidQty) { alert("Return qty remaining quantity se zyada nahi ho sakti."); return; }
+    if (!reason.trim()) { alert("Return ki wajah likhein."); return; }
+    const customer = customers.find((c) => c.id === customerId);
+    onCreateReturn({
+      customerId, customerName: customer.name, invoiceId: invoice.id, invoiceNumber: invoice.number,
+      date: returnDate, items, reason: reason.trim(), notes: notes.trim(), amount: returnAmount,
+    });
+    setInvoiceId(""); setReturnQtys({}); setReason(""); setNotes(""); setReturnDate(todayISO());
+  }
+
+  function confirmDelete() {
+    if (!deleteReason.trim()) { alert("Delete ki wajah likhein."); return; }
+    const blockingExchange = exchanges.find((ex) =>
+      ex.status !== "Deleted" && ex.invoiceId === deletingReturn.invoiceId &&
+      (ex.returnedItems || []).some((exi) => (deletingReturn.items || []).some((ri) => ri.itemIndex === exi.itemIndex))
+    );
+    if (blockingExchange) {
+      alert("This Sales Return has linked Exchange records. Delete the Exchange first.");
+      return;
+    }
+    onDeleteReturn(deletingReturn, deleteReason.trim());
+    setDeletingReturn(null); setDeleteReason("");
+  }
+
+  const sorted = [...returns].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-2">Sales Return</h2>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Customer se wapis aane wale items yahan record karein — outstanding balance turant kam ho jayega aur ek Credit Note ban jayegi. Feet / Meter / KG / Liter / Sq.Ft jaise items ke liye fractional (decimal) qty bhi daal sakte hain — rate hamesha (Original Line Amount ÷ Original Sold Qty) se calculate hota hai, piece count se nahi.
+      </div>
+
+      <div className="bg-white border border-slate-200 p-4 mb-6 max-w-2xl">
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Customer">
+            <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Invoice">
+            <select className={inputCls} value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)}>
+              <option value="">Select Invoice</option>
+              {customerInvoices.map((i) => {
+                const s = computeInvoiceReturnStatus(i, returns, exchanges);
+                return <option key={i.id} value={i.id} disabled={s.isLocked}>{i.number} — {fmtDate(i.date)} — {fmtMoney(i.total)}{s.isLocked ? " (Fully Returned)" : ""}</option>;
+              })}
+            </select>
+          </Field>
+        </div>
+
+        {invoice && rs && rs.isLocked && (
+          <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-bold px-3 py-2 mb-2">
+            This invoice has been fully returned. Please create a new invoice.
+          </div>
+        )}
+
+        {invoice && rs && !rs.isLocked && (
+          <div className="mt-2">
+            <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Items — Return Qty Daalein (Remaining Qty se zyada nahi; decimal allowed, e.g. 6.5)</div>
+            <div className="space-y-2">
+              {rs.breakdown.map((it) => (
+                <div key={it.itemIndex} className="flex gap-2 items-center border border-slate-200 p-2">
+                  <div className="flex-1 text-sm">
+                    <div className="font-bold">{it.name}</div>
+                    <div className="text-xs text-slate-400">Original Sold Qty: {fmtQty(it.qty)} {it.unit} · Remaining: {fmtQty(it.remainingQty)} · Per Unit Rate: {fmtMoney(it.perUnitRate)}</div>
+                  </div>
+                  <input
+                    type="number" step="any" min="0" max={it.remainingQty}
+                    disabled={it.remainingQty <= 0}
+                    className={`${inputCls} w-24`}
+                    placeholder="Return Qty"
+                    value={returnQtys[it.itemIndex] || ""}
+                    onChange={(e) => setReturnQtys({ ...returnQtys, [it.itemIndex]: Math.min(Number(e.target.value) || 0, it.remainingQty) })}
+                  />
+                  <div className="w-24 text-right text-sm font-bold">{fmtMoney(roundQty(Number(returnQtys[it.itemIndex]) || 0) * it.perUnitRate)}</div>
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-3 mt-2">
+              <Field label="Return Date">
+                <input type="date" className={inputCls} value={returnDate} onChange={(e) => setReturnDate(e.target.value)} />
+              </Field>
+              <Field label="Return Reason">
+                <input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Extra order ho gaya tha" />
+              </Field>
+            </div>
+            <Field label="Notes (optional)">
+              <input className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} />
+            </Field>
+            <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm flex justify-between">
+              <span className="font-bold">Total Return Amount</span>
+              <span className="font-black text-emerald-600">{fmtMoney(returnAmount)}</span>
+            </div>
+            <Btn onClick={submit}>Save Return &amp; Generate Credit Note</Btn>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Return #</th><th className="px-4 py-2">Original Invoice</th><th className="px-4 py-2">Customer</th>
+            <th className="px-4 py-2">Date</th><th className="px-4 py-2 text-right">Qty Returned</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2">Status</th><th></th>
+          </tr></thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={9} className="px-4 py-6 text-center text-slate-400">Koi return record nahi.</td></tr>}
+            {sorted.map((r) => (
+              <tr key={r.id} className={`border-t border-slate-100 ${r.status === "Deleted" ? "opacity-50" : ""}`}>
+                <td className="px-4 py-2 font-black text-blue-700">{r.code}</td>
+                <td className="px-4 py-2 text-slate-500">{r.invoiceNumber}</td>
+                <td className="px-4 py-2 font-bold">{r.customerName}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(r.date)}</td>
+                <td className="px-4 py-2 text-right text-slate-500">{fmtQty((r.items || []).reduce((s, it) => s + (Number(it.qtyReturned) || 0), 0))}</td>
+                <td className="px-4 py-2 text-right font-bold text-emerald-600">{fmtMoney(r.amount)}</td>
+                <td className="px-4 py-2 text-slate-500">{r.reason}</td>
+                <td className="px-4 py-2">
+                  {r.status === "Deleted" ? (
+                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-200 text-slate-600">Deleted</span>
+                  ) : (
+                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-emerald-100 text-emerald-700">Active</span>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  {r.status !== "Deleted" && currentUser?.role === "admin" && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setDeletingReturn(r)}>Delete</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {deletingReturn && (
+        <Modal title={`Delete Return ${deletingReturn.code}`} onClose={() => setDeletingReturn(null)}>
+          <div className="text-sm text-slate-600 mb-3">Ye return delete karne se ledger reverse ho jayega, invoice qty aur customer balance wapis restore ho jayega.</div>
+          <Field label="Delete Reason">
+            <input className={inputCls} value={deleteReason} onChange={(e) => setDeleteReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmDelete}>Confirm Delete</Btn>
+            <Btn variant="ghost" onClick={() => setDeletingReturn(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Exchange (Phase 2 + Upgrade) ---------------- */
+
+function ExchangePage({ customers, products, invoices, returns, exchanges, onCreateExchange, onDeleteExchange, currentUser }) {
+  const [customerId, setCustomerId] = useState(customers[0]?.id || "");
+  const [invoiceId, setInvoiceId] = useState("");
+  const [returnQtys, setReturnQtys] = useState({});
+  const [newItems, setNewItems] = useState([{ id: uid("ni"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]);
+  const [reason, setReason] = useState("");
+  const [deletingExchange, setDeletingExchange] = useState(null);
+  const [deleteReason, setDeleteReason] = useState("");
+
+  const customerInvoices = invoices.filter((i) => i.customerId === customerId && i.docStatus !== "Cancelled");
+  const invoice = customerInvoices.find((i) => i.id === invoiceId);
+  const rs = invoice ? computeInvoiceReturnStatus(invoice, returns, exchanges) : null;
+
+  useEffect(() => { setInvoiceId(""); setReturnQtys({}); }, [customerId]);
+  useEffect(() => { setReturnQtys({}); }, [invoiceId]);
+
+  // BUGFIX (partial qty/length): exactly the same rule as Sales Return —
+  // Returned Value = Returned Qty × Per Unit Rate (Original Line Amount ÷
+  // Original Sold Qty), never re-derived from a piece count.
+  const returnedTotal = invoice && rs
+    ? roundMoney(rs.breakdown.reduce((sum, it) => sum + roundQty(Number(returnQtys[it.itemIndex]) || 0) * it.perUnitRate, 0))
+    : 0;
+  const newTotal = roundMoney(newItems.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.price) || 0), 0));
+  const difference = roundMoney(newTotal - returnedTotal);
+
+  function updateNewItem(id, patch) {
+    setNewItems((prev) => prev.map((it) => (it.id === id ? { ...it, ...patch } : it)));
+  }
+  function addNewItem() {
+    setNewItems((prev) => [...prev, { id: uid("ni"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]);
+  }
+  function removeNewItem(id) {
+    setNewItems((prev) => (prev.length > 1 ? prev.filter((it) => it.id !== id) : prev));
+  }
+  function pickProduct(id, productId) {
+    const p = products.find((p) => p.id === productId);
+    updateNewItem(id, { productId, name: p ? p.name : "", unit: p ? p.unit : "Bag", price: p ? p.price : 0 });
+  }
+
+  function submit() {
+    if (!invoice || !rs) { alert("Pehle invoice select karein."); return; }
+    if (rs.isLocked) { alert("Ye invoice fully returned/exchanged ho chuki hai. Nayi invoice banayein."); return; }
+    const returnedItems = rs.breakdown
+      .map((it) => ({
+        itemIndex: it.itemIndex, name: it.name, unit: it.unit,
+        qty: roundQty(Number(returnQtys[it.itemIndex]) || 0),
+        price: it.perUnitRate,
+        total: roundMoney(roundQty(Number(returnQtys[it.itemIndex]) || 0) * it.perUnitRate),
+      }))
+      .filter((it) => it.qty > 0);
+    const cleanNewItems = newItems.filter((it) => it.name && Number(it.qty) > 0).map((it) => ({ name: it.name, unit: it.unit, qty: roundQty(it.qty), price: roundMoney(it.price), total: roundMoney(roundQty(it.qty) * Number(it.price)) }));
+    if (returnedItems.length === 0) { alert("Kam az kam ek returned item ki qty daalein."); return; }
+    const invalidQty = returnedItems.some((it) => {
+      const line = rs.breakdown.find((b) => b.itemIndex === it.itemIndex);
+      return it.qty > line.remainingQty + 0.0005; // small epsilon for float-safe comparison
+    });
+    if (invalidQty) { alert("Returned qty remaining quantity se zyada nahi ho sakti."); return; }
+    if (cleanNewItems.length === 0) { alert("Kam az kam ek naya item daalein jo customer ko diya ja raha hai."); return; }
+    if (!reason.trim()) { alert("Exchange ki wajah likhein."); return; }
+    const customer = customers.find((c) => c.id === customerId);
+    onCreateExchange({
+      customerId, customerName: customer.name, invoiceId: invoice.id, invoiceNumber: invoice.number,
+      date: todayISO(), returnedItems, newItems: cleanNewItems,
+      returnedTotal, newTotal, difference, reason: reason.trim(),
+    });
+    setInvoiceId(""); setReturnQtys({}); setNewItems([{ id: uid("ni"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]); setReason("");
+  }
+
+  function confirmDelete() {
+    if (!deleteReason.trim()) { alert("Delete ki wajah likhein."); return; }
+    onDeleteExchange(deletingExchange, deleteReason.trim());
+    setDeletingExchange(null); setDeleteReason("");
+  }
+
+  const sorted = [...exchanges].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-2">Exchange Items</h2>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Customer purane items wapis kar ke naye le raha hai — difference apne aap calculate ho kar ledger mein adjust ho jayega. Feet / Meter / KG / Liter / Sq.Ft jaise items ke liye fractional qty bhi daal sakte hain.
+      </div>
+
+      <div className="bg-white border border-slate-200 p-4 mb-6 max-w-3xl">
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Customer">
+            <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Original Invoice">
+            <select className={inputCls} value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)}>
+              <option value="">Select Invoice</option>
+              {customerInvoices.map((i) => {
+                const s = computeInvoiceReturnStatus(i, returns, exchanges);
+                return <option key={i.id} value={i.id} disabled={s.isLocked}>{i.number} — {fmtDate(i.date)}{s.isLocked ? " (Fully Returned)" : ""}</option>;
+              })}
+            </select>
+          </Field>
+        </div>
+
+        {invoice && rs && rs.isLocked && (
+          <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-bold px-3 py-2 mb-2">
+            This invoice has been fully returned. Please create a new invoice.
+          </div>
+        )}
+
+        {invoice && rs && !rs.isLocked && (
+          <div className="mt-2">
+            <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Customer Kya Wapis Kar Raha Hai (Remaining Qty se zyada nahi; decimal allowed)</div>
+            <div className="space-y-2 mb-3">
+              {rs.breakdown.map((it) => (
+                <div key={it.itemIndex} className="flex gap-2 items-center border border-slate-200 p-2">
+                  <div className="flex-1 text-sm">
+                    <div className="font-bold">{it.name}</div>
+                    <div className="text-xs text-slate-400">Original Sold Qty: {fmtQty(it.qty)} {it.unit} · Remaining: {fmtQty(it.remainingQty)} · Per Unit Rate: {fmtMoney(it.perUnitRate)}</div>
+                  </div>
+                  <input type="number" step="any" min="0" max={it.remainingQty} disabled={it.remainingQty <= 0} className={`${inputCls} w-24`} placeholder="Return Qty"
+                    value={returnQtys[it.itemIndex] || ""}
+                    onChange={(e) => setReturnQtys({ ...returnQtys, [it.itemIndex]: Math.min(Number(e.target.value) || 0, it.remainingQty) })} />
+                  <div className="w-24 text-right text-sm font-bold">{fmtMoney(roundQty(Number(returnQtys[it.itemIndex]) || 0) * it.perUnitRate)}</div>
+                </div>
+              ))}
+            </div>
+
+            <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Customer Ko Kya Naya Mil Raha Hai</div>
+            <div className="space-y-2 mb-2">
+              {newItems.map((it) => (
+                <div key={it.id} className="flex gap-2 items-center">
+                  <select className={`${inputCls} w-36`} value={it.productId} onChange={(e) => pickProduct(it.id, e.target.value)}>
+                    <option value="">Custom item</option>
+                    {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                  <input className={`${inputCls} flex-1`} placeholder="Item name" value={it.name} onChange={(e) => updateNewItem(it.id, { name: e.target.value })} />
+                  <input className={`${inputCls} w-20`} placeholder="Unit" value={it.unit} onChange={(e) => updateNewItem(it.id, { unit: e.target.value })} />
+                  <input type="number" step="any" className={`${inputCls} w-16`} placeholder="Qty" value={it.qty} onChange={(e) => updateNewItem(it.id, { qty: e.target.value })} />
+                  <input type="number" step="any" className={`${inputCls} w-24`} placeholder="Price" value={it.price} onChange={(e) => updateNewItem(it.id, { price: e.target.value })} />
+                  <div className="w-24 text-right text-sm font-bold">{fmtMoney((it.qty || 0) * (it.price || 0))}</div>
+                  <button onClick={() => removeNewItem(it.id)} className="text-slate-400 hover:text-red-600 text-lg leading-none">×</button>
+                </div>
+              ))}
+            </div>
+            <Btn variant="ghost" small onClick={addNewItem}>+ Add Item</Btn>
+
+            <Field label="Exchange Reason">
+              <input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} />
+            </Field>
+
+            <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
+              <div className="flex justify-between"><span>Returned Value</span><span className="font-bold">-{fmtMoney(returnedTotal)}</span></div>
+              <div className="flex justify-between"><span>New Items Value</span><span className="font-bold">{fmtMoney(newTotal)}</span></div>
+              <div className="flex justify-between border-t border-slate-300 pt-1">
+                <span className="font-bold">{difference >= 0 ? "Extra Charge to Customer" : "Refund Credit to Customer"}</span>
+                <span className={`font-black ${difference >= 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(Math.abs(difference))}</span>
+              </div>
+            </div>
+            <Btn onClick={submit}>Save Exchange</Btn>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Exchange #</th><th className="px-4 py-2">Original Invoice</th><th className="px-4 py-2">Customer</th>
+            <th className="px-4 py-2">Date</th><th className="px-4 py-2 text-right">Ret Qty</th><th className="px-4 py-2 text-right">New Qty</th><th className="px-4 py-2 text-right">Difference</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2">Status</th><th></th>
+          </tr></thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-slate-400">Koi exchange record nahi.</td></tr>}
+            {sorted.map((ex) => (
+              <tr key={ex.id} className={`border-t border-slate-100 ${ex.status === "Deleted" ? "opacity-50" : ""}`}>
+                <td className="px-4 py-2 font-black text-blue-700">{ex.code}</td>
+                <td className="px-4 py-2 text-slate-500">{ex.invoiceNumber}</td>
+                <td className="px-4 py-2 font-bold">{ex.customerName}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(ex.date)}</td>
+                <td className="px-4 py-2 text-right text-slate-500">{fmtQty((ex.returnedItems || []).reduce((s, it) => s + (Number(it.qty) || 0), 0))}</td>
+                <td className="px-4 py-2 text-right text-slate-500">{fmtQty((ex.newItems || []).reduce((s, it) => s + (Number(it.qty) || 0), 0))}</td>
+                <td className={`px-4 py-2 text-right font-bold ${ex.difference >= 0 ? "text-red-600" : "text-emerald-600"}`}>{ex.difference >= 0 ? "+" : "-"}{fmtMoney(Math.abs(ex.difference))}</td>
+                <td className="px-4 py-2 text-slate-500">{ex.reason}</td>
+                <td className="px-4 py-2">
+                  {ex.status === "Deleted" ? (
+                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-200 text-slate-600">Deleted</span>
+                  ) : (
+                    <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-emerald-100 text-emerald-700">Active</span>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  {ex.status !== "Deleted" && currentUser?.role === "admin" && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setDeletingExchange(ex)}>Delete</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {deletingExchange && (
+        <Modal title={`Delete Exchange ${deletingExchange.code}`} onClose={() => setDeletingExchange(null)}>
+          <div className="text-sm text-slate-600 mb-3">Ye exchange delete karne se invoice bilkul waisa ho jayega jaisa exchange se pehle tha — ledger aur outstanding balance restore ho jayenge.</div>
+          <Field label="Delete Reason">
+            <input className={inputCls} value={deleteReason} onChange={(e) => setDeleteReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmDelete}>Confirm Delete</Btn>
+            <Btn variant="ghost" onClick={() => setDeletingExchange(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Credit Notes (Phase 2) ---------------- */
+
+function CreditNotesPage({ creditNotes, onLinkInvoice }) {
+  const [linkingId, setLinkingId] = useState(null);
+  const [linkInvoiceNumber, setLinkInvoiceNumber] = useState("");
+
+  const sorted = [...creditNotes].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  function startLink(cn) {
+    setLinkingId(cn.id);
+    setLinkInvoiceNumber("");
+  }
+
+  function confirmLink(cn) {
+    if (!linkInvoiceNumber.trim()) return;
+    onLinkInvoice(cn.id, linkInvoiceNumber.trim());
+    setLinkingId(null);
+  }
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-2">Credit Notes</h2>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Har Sales Return ke baad yahan automatically ek Credit Note ban jati hai. Balance us waqt hi ledger mein adjust ho chuka hota hai — yahan aap sirf reference ke liye kisi future invoice se link kar sakte hain.
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Credit Note #</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">Customer</th>
+            <th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Reason</th><th className="px-4 py-2">Status</th><th></th>
+          </tr></thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-slate-400">Koi credit note nahi bani.</td></tr>}
+            {sorted.map((cn) => (
+              <tr key={cn.id} className="border-t border-slate-100 align-top">
+                <td className="px-4 py-2 font-black text-blue-700">{cn.number}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(cn.date)}</td>
+                <td className="px-4 py-2 font-bold">{cn.customerName}</td>
+                <td className="px-4 py-2 text-right font-bold text-emerald-600">{fmtMoney(cn.amount)}</td>
+                <td className="px-4 py-2 text-slate-500">{cn.reason}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${cn.status === "Reversed" ? "bg-slate-200 text-slate-600" : "bg-emerald-100 text-emerald-700"}`}>{cn.status}</span>
+                  {cn.linkedInvoiceNumber && <div className="text-[10px] text-blue-700 font-bold mt-1">Ref: {cn.linkedInvoiceNumber}</div>}
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  {cn.status !== "Reversed" && (linkingId === cn.id ? (
+                    <div className="flex gap-1 items-center justify-end">
+                      <input className="text-xs border border-slate-300 px-1.5 py-1 w-24" placeholder="Invoice #" value={linkInvoiceNumber} onChange={(e) => setLinkInvoiceNumber(e.target.value)} />
+                      <button className="text-xs font-bold text-blue-700 hover:underline" onClick={() => confirmLink(cn)}>Save</button>
+                      <button className="text-xs font-bold text-slate-400 hover:underline" onClick={() => setLinkingId(null)}>×</button>
+                    </div>
+                  ) : (
+                    <button className="text-xs font-bold text-blue-700 hover:underline" onClick={() => startLink(cn)}>Link to Invoice</button>
+                  ))}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Payments ---------------- */
+
+// ---- Payment Edit / Payment Receiving helpers ----------------------------
+// These are additive helpers used only by the Payments page. They never
+// change how the ledger is computed — the receipt reads its balances
+// straight out of computeLedgerForCustomer so it can never disagree with
+// the Ledger page.
+
+// Receipt No. — derived from the payment's own unique id, so every payment
+// (including ones recorded before this feature existed, and the payments
+// auto-created from invoices) has a stable receipt number that can never
+// be duplicated and never changes when the payment is edited.
+function paymentReceiptNo(payment) {
+  const raw = String(payment?.id || "");
+  const core = raw.replace(/^pay_/, "").replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+  return "RCV-" + (core || "0000");
+}
+
+// The invoice a payment was recorded against (explicit invoiceId on new
+// records, legacy "Against <number>" note on old ones) — same matching
+// rule as isPaymentLinkedToCancelledInvoice above.
+function findInvoiceForPayment(payment, invoices) {
+  if (!payment) return null;
+  if (payment.invoiceId) return (invoices || []).find((i) => i.id === payment.invoiceId) || null;
+  if (payment.note && payment.note.startsWith("Against ")) {
+    const num = payment.note.replace("Against ", "").trim();
+    return (invoices || []).find((i) => i.number === num) || null;
+  }
+  return null;
+}
+
+// A promise-linked payment stores its note as
+// "Payment against Promise <code> — <user note>". When editing we show only
+// the user's own note, and rebuild the prefix on save (so changing the
+// promise never leaves a stale promise code in the note).
+function paymentUserNote(payment) {
+  const note = payment?.note || "";
+  if (!payment?.promiseId) return note;
+  return note.replace(/^Payment against Promise ?[^\s—]*(?: — )?/, "");
+}
+
+// Outstanding Balance / Payment Received / Remaining Balance for ONE payment.
+// The payment is located inside the customer's ledger (where it appears
+// exactly once), so Remaining = the running balance right after it and
+// Previous = that balance with this payment's credit added back. Nothing
+// is subtracted twice.
+function computePaymentReceiptBalances(payment, customer, invoices, payments, returns, exchanges, promises, transfers, adjustments) {
+  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  const entry = entries.find((e) => e.id === payment.id && (e.type === "Payment" || e.type === "Payment Against Promise" || e.type === "Booking Advance"));
+  if (!entry) {
+    // Not in the ledger = reversed because its invoice was cancelled.
+    return { reversed: true, previous: outstanding, received: Number(payment.amount) || 0, remaining: outstanding };
+  }
+  // Previous Balance = the customer's balance just before this payment.
+  // Remaining Balance = Previous Balance − this payment, deducted exactly once.
+  const received = Number(entry.credit) || 0;
+  const previous = roundMoney(entry.balance + received);
+  return { reversed: false, previous, received, remaining: roundMoney(previous - received) };
+}
+
+function PaymentReceiptBody({ payment, customer, settings, balances }) {
+  const receiptNo = paymentReceiptNo(payment);
+  const note = String(payment.note || "").trim();
+  const sectionCls = "mt-1.5 pt-1.5 border-t border-slate-200";
+  const headCls = "text-[10px] uppercase tracking-wide font-bold text-slate-400";
+  const rowCls = "flex justify-between gap-3";
+  return (
+    <div className="bg-white text-slate-900 text-xs leading-snug max-w-sm mx-auto" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <div className="flex items-center justify-between gap-2 pb-1.5 border-b-2 border-slate-900">
+        <div className="text-sm font-black uppercase tracking-tight text-slate-900">{settings?.companyName}</div>
+        <div className="text-right text-[10px] leading-tight text-slate-500">
+          <div>{settings?.companyAddress}</div>
+          {settings?.companyPhone && <div>Ph: {settings.companyPhone}</div>}
+        </div>
+      </div>
+      <div className="mt-1.5 bg-slate-900 text-white text-center text-sm font-black uppercase tracking-wide py-1">Payment Receipt</div>
+
+      {balances.reversed && (
+        <div className="mt-1.5 border border-red-200 bg-red-50 text-red-700 text-[10px] font-bold px-2 py-1">
+          Ye payment reverse ho chuki hai kyun ke is ki invoice cancel ho gayi thi — ye customer ke balance mein shamil nahi hai.
+        </div>
+      )}
+
+      <div className="mt-1.5">
+        <div className={headCls}>Customer Details</div>
+        <div className={rowCls}><span className="text-slate-500">Customer Name</span><span className="font-bold text-right">{customer.name || "-"}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Phone</span><span className="font-bold text-right">{customer.phone || "-"}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Address</span><span className="font-bold text-right">{customer.address || "-"}</span></div>
+      </div>
+
+      <div className={sectionCls}>
+        <div className={headCls}>Payment Details</div>
+        <div className={rowCls}><span className="text-slate-500">Receipt No.</span><span className="font-bold text-right">{receiptNo}</span></div>
+        {payment.bookingCode && <div className={rowCls}><span className="text-slate-500">Booking Ref</span><span className="font-bold text-right">{payment.bookingCode}</span></div>}
+        <div className={rowCls}><span className="text-slate-500">Payment Date</span><span className="font-bold text-right">{fmtDate(payment.date)}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Payment Method</span><span className="font-bold text-right">{payment.method || "Cash"}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Payment Received</span><span className="font-bold text-right">{fmtMoney(balances.received)}</span></div>
+      </div>
+
+      <div className={sectionCls}>
+        <div className={headCls}>Balance Summary</div>
+        <div className={rowCls}><span className="text-slate-500">Outstanding Balance</span><span className="font-bold">{fmtMoney(balances.previous)}</span></div>
+        <div className={rowCls}><span className="text-slate-500">Payment Received</span><span className="font-bold text-emerald-600">{fmtMoney(balances.received)}</span></div>
+        <div className={`${rowCls} items-baseline border-t-2 border-slate-900 pt-1 mt-1`}>
+          <span className="font-black uppercase text-blue-700">Remaining Balance</span>
+          <span className="font-black text-sm text-blue-700">{fmtMoney(balances.remaining)}{balances.remaining < 0 ? " (Advance)" : ""}</span>
+        </div>
+      </div>
+
+      {note && (
+        <div className={sectionCls}>
+          <span className={headCls}>Note</span>
+          <div className="text-slate-700 break-words">{note}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PaymentReceipt({ payment, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, settings, onClose, proofRecord, showProof, onViewProof }) {
+  const linkedInvoice = findInvoiceForPayment(payment, invoices);
+  // Cash / walk-in invoice payments have no customer account, so fall back
+  // to the details saved on the payment and its invoice.
+  const customer = customers.find((c) => c.id === payment.customerId) || {
+    id: payment.customerId, name: payment.customerName,
+    phone: linkedInvoice?.customerPhone || "", address: linkedInvoice?.customerAddress || "", openingBalance: 0,
+  };
+  const balances = computePaymentReceiptBalances(payment, customer, invoices, payments, returns, exchanges, promises || [], transfers, adjustments);
+  const receiptNo = paymentReceiptNo(payment);
+  const bodyProps = { payment, customer, settings, balances };
+  const [printOpen, setPrintOpen] = useState(false);
+
+  // Print and Save as PDF both go through the app's existing window.print()
+  // mechanism. For Save as PDF the page title is switched for the duration
+  // of the print so the browser suggests a sensible PDF file name.
+  const savedTitle = React.useRef(null);
+  function restoreTitle() {
+    if (savedTitle.current !== null) { document.title = savedTitle.current; savedTitle.current = null; }
+    window.removeEventListener("afterprint", restoreTitle);
+  }
+  // Safety net: if the browser never fires "afterprint", the title is put
+  // back when the receipt is closed.
+  useEffect(() => restoreTitle, []);
+  function printReceipt(asPdf) {
+    if (asPdf && typeof document !== "undefined") {
+      if (savedTitle.current === null) savedTitle.current = document.title;
+      window.addEventListener("afterprint", restoreTitle);
+      document.title = `Payment-Receipt-${receiptNo}`;
+    }
+    window.print();
+  }
+
+  return (
+    <>
+      <Modal title="Payment Receipt" onClose={onClose}>
+        <PaymentReceiptBody {...bodyProps} />
+        {showProof && <PaymentProofReceiptLine record={proofRecord} onView={onViewProof} />}
+        <div className="mt-4 flex gap-2 flex-wrap">
+          <Btn onClick={() => setPrintOpen(true)}>Print / Save as PDF</Btn>
+          <Btn variant="ghost" onClick={onClose}>Close</Btn>
+        </div>
+        {printOpen && (
+          <ReceiptPrintDialog payment={payment} customer={customer} settings={settings} balances={balances}
+            proofRecord={proofRecord || null} onClose={() => setPrintOpen(false)} />
+        )}
+      </Modal>
+      {/* Print/PDF-only copy — same pattern as the Ledger's #print-ledger:
+          hidden on screen, forced visible by the @media print rule in
+          <PrintStyles/> via the "print-area" class, so window.print()
+          outputs ONLY the compact receipt. */}
+      <div id="print-receipt" className="print-area" style={{ display: "none" }}>
+        <PaymentReceiptBody {...bodyProps} />
+      </div>
+    </>
+  );
+}
+
+function Payments({ customers, payments, promises, savePayment, updatePayment, invoices = [], returns = [], exchanges = [], transfers = [], adjustments = [], settings = {}, currentUser = null, logProofAudit }) {
+  const [form, setForm] = useState({ customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "", reference: "" });
+  // Payment Proof (screenshot) — see the "PAYMENT PROOF" block near the end of this file.
+  const proofs = usePaymentProofs();
+  const [proofFile, setProofFile] = useState(null);
+  const [proofBusy, setProofBusy] = useState(false);
+  const [proofFlash, setProofFlash] = useState(null); // { tone: "ok" | "error", text }
+  const [proofPaymentId, setProofPaymentId] = useState(null);
+  const canUploadProof = pproofCan(currentUser, "upload");
+  const proofPayment = proofPaymentId ? payments.find((p) => p.id === proofPaymentId) : null;
+  const [editing, setEditing] = useState(null);
+  const [receiptId, setReceiptId] = useState(null);
+  const formRef = React.useRef(null);
+  const sorted = [...payments].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  // Edit mode — a payment that was recorded on an invoice stays tied to
+  // that invoice: its customer and "Against <invoice>" note are fixed
+  // (that note is how older records are matched to their invoice), and a
+  // Cash / walk-in invoice is always fully paid so its amount is fixed too.
+  const editingInvoice = editing ? findInvoiceForPayment(editing, invoices) : null;
+  const editingLinked = !!editing && (!!editing.invoiceId || !!editingInvoice);
+  const amountLocked = editingLinked && editingInvoice?.customerType === "Cash";
+  const receiptPayment = receiptId ? payments.find((p) => p.id === receiptId) : null;
+
+  // Feature 7 — promises for the selected customer that still have a
+  // remaining amount, so staff can apply this payment against one.
+  // While editing, the promise this payment is already applied to is always
+  // listed (even if this very payment completed it), with this payment's
+  // own amount added back to its remaining figure.
+  const customerPromises = (promises || [])
+    .filter((p) => p.customerId === form.customerId && p.status !== "Deleted")
+    .map(promiseWithComputed)
+    .map((p) => (editing && editing.promiseId === p.id
+      ? { ...p, remainingAmount: Math.max(0, roundMoney((Number(p.amount) || 0) - Math.max(0, p.paidAmount - (Number(editing.amount) || 0)))) }
+      : p))
+    .filter((p) => (p.remainingAmount > 0 && p.status !== "Cancelled") || (editing && editing.promiseId === p.id));
+
+  function blankForm() {
+    return { customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "", reference: "" };
+  }
+
+  function startEdit(p) {
+    const linked = !!p.invoiceId || !!findInvoiceForPayment(p, invoices);
+    setEditing(p);
+    setForm({
+      customerId: p.customerId || "", date: p.date || todayISO(), amount: String(p.amount ?? ""),
+      method: p.method || "Cash", note: linked ? (p.note || "") : paymentUserNote(p), promiseId: p.promiseId || "",
+      reference: p.reference || "",
+    });
+    if (formRef.current && formRef.current.scrollIntoView) formRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  function cancelEdit() {
+    setEditing(null);
+    setForm(blankForm());
+  }
+
+  async function submit() {
+    if (proofBusy) return; // a screenshot is still uploading for the previous payment
+    if (!form.customerId || !Number(form.amount)) { alert("Customer aur amount zaroori hai."); return; }
+    const customer = customers.find((c) => c.id === form.customerId);
+    if (editing) {
+      if (Number(form.amount) <= 0) { alert("Amount 0 se zyada hona chahiye."); return; }
+      if (!form.date) { alert("Payment date zaroori hai."); return; }
+      const promiseId = editingLinked ? (editing.promiseId || "") : (form.promiseId || "");
+      updatePayment(editing, {
+        customerId: form.customerId,
+        customerName: customer ? customer.name : editing.customerName,
+        date: form.date,
+        amount: Number(form.amount),
+        method: form.method,
+        promiseId,
+        reference: String(form.reference || "").trim(),
+        note: editingLinked
+          ? (editing.note || "")
+          : (promiseId ? `Payment against Promise ${customerPromises.find((p) => p.id === promiseId)?.code || ""}${form.note ? " — " + form.note : ""}` : form.note),
+      });
+      setEditing(null);
+      setForm(blankForm());
+      return;
+    }
+    const newPayment = {
+      id: uid("pay"), ...form, amount: Number(form.amount), customerName: customer.name,
+      promiseId: form.promiseId || "",
+      reference: String(form.reference || "").trim(),
+      note: form.promiseId ? `Payment against Promise ${customerPromises.find((p) => p.id === form.promiseId)?.code || ""}${form.note ? " — " + form.note : ""}` : form.note,
+    };
+    savePayment(newPayment);
+    setForm({ ...form, amount: "", note: "", promiseId: "", reference: "" });
+    // Screenshot (optional): uploaded AFTER the payment is saved and linked to
+    // that payment's id. It never changes the payment. If the upload fails the
+    // payment stays recorded and staff are told plainly so they can retry.
+    const picked = proofFile;
+    if (!picked) { setProofFlash({ tone: "ok", text: "Payment recorded." }); return; }
+    setProofFile(null);
+    setProofBusy(true);
+    setProofFlash(null);
+    try {
+      await pproofUpload(currentUser, newPayment, picked, null);
+      setProofFlash({ tone: "ok", text: "Payment recorded. Screenshot uploaded — Pending Verification." });
+      if (logProofAudit) logProofAudit("Payment Proof Uploaded", `${paymentReceiptNo(newPayment)} — ${newPayment.customerName}`, "");
+    } catch (e) {
+      setProofFlash({ tone: "error", text: [t("Payment recorded, but the screenshot was NOT uploaded:"), t(pproofMessage(e, "Upload failed. Please check your internet and try again.")), t("Use Upload Proof in the Payment Proof column to try again.")].join(" ") });
+    } finally {
+      if (picked.previewUrl) URL.revokeObjectURL(picked.previewUrl);
+      setProofBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-4">Payments</h2>
+      <div ref={formRef} className={`bg-white border p-4 mb-6 max-w-xl ${editing ? "border-blue-700" : "border-slate-200"}`}>
+        {editing && (
+          <div className="flex items-center justify-between gap-2 flex-wrap mb-3 pb-2 border-b border-slate-200">
+            <div className="font-black uppercase tracking-tight text-slate-900">Edit Payment</div>
+            <div className="text-[11px] font-bold text-blue-700">{paymentReceiptNo(editing)}</div>
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Customer">
+            <select className={inputCls} value={form.customerId} disabled={editingLinked} onChange={(e) => setForm({ ...form, customerId: e.target.value, promiseId: "" })}>
+              {editing && !customers.some((c) => c.id === editing.customerId) && <option value={editing.customerId}>{editing.customerName}</option>}
+              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          <Field label="Date">
+            <input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+          </Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Amount (Rs)">
+            <input type="number" className={inputCls} value={form.amount} disabled={amountLocked} onChange={(e) => setForm({ ...form, amount: e.target.value })} />
+          </Field>
+          <Field label="Method">
+            <select className={inputCls} value={form.method} onChange={(e) => setForm({ ...form, method: e.target.value })}>
+              <option>Cash</option><option>Bank Transfer</option><option>Cheque</option><option>Easypaisa/JazzCash</option>
+              {editing && !["Cash", "Bank Transfer", "Cheque", "Easypaisa/JazzCash"].includes(form.method) && <option>{form.method}</option>}
+            </select>
+          </Field>
+        </div>
+        {customerPromises.length > 0 && !editingLinked && (
+          <Field label="Apply Against Promise (optional)">
+            <select className={inputCls} value={form.promiseId} onChange={(e) => setForm({ ...form, promiseId: e.target.value })}>
+              <option value="">None — general payment</option>
+              {customerPromises.map((p) => (
+                <option key={p.id} value={p.id}>{p.code} — Remaining {fmtMoney(p.remainingAmount)} (Due {fmtDate(p.expectedDate)})</option>
+              ))}
+            </select>
+          </Field>
+        )}
+        <Field label="Transaction Reference (optional)">
+          <input className={inputCls} value={form.reference || ""} placeholder="e.g. TID / cheque no." onChange={(e) => setForm({ ...form, reference: e.target.value })} data-pproof="reference" />
+        </Field>
+        <Field label="Note">
+          <input className={inputCls} value={form.note} disabled={editingLinked} onChange={(e) => setForm({ ...form, note: e.target.value })} />
+        </Field>
+        {!editing && canUploadProof && (
+          <div className="mb-3">
+            <span className="block text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Upload Payment Screenshot")}</span>
+            <PaymentProofPicker value={proofFile} onChange={setProofFile} disabled={proofBusy} />
+          </div>
+        )}
+        {editing && (
+          <div className="text-[11px] text-slate-400 mb-3">{t("Payment Proof")}: {proofs.recordFor(editing.id) ? t("Proof attached") : t("No proof attached")}</div>
+        )}
+        {editingLinked && (
+          <div className="text-xs text-slate-500 mb-3">
+            Ye payment Invoice {editingInvoice?.number || ""} par record hui thi, is liye customer aur note yahan change nahi ho sakte.
+            {amountLocked
+              ? " Cash sale invoice hamesha fully paid hoti hai, is liye amount bhi fixed hai."
+              : " Amount change karne par invoice ka Payment Received aur Balance Due bhi update ho jayega."}
+          </div>
+        )}
+        {editing ? (
+          <div className="flex gap-2 flex-wrap">
+            <Btn onClick={submit}>Save Changes</Btn>
+            <Btn variant="ghost" onClick={cancelEdit}>Cancel</Btn>
+          </div>
+        ) : (
+          <Btn onClick={submit} disabled={proofBusy}>{proofBusy ? "Uploading..." : "Record Payment"}</Btn>
+        )}
+        {proofBusy && <div className="mt-2 text-xs font-bold text-blue-700" data-pproof="form-busy">{t("Uploading...")}</div>}
+        {proofFlash && (
+          <div className={`mt-3 text-xs font-bold border px-3 py-2 ${proofFlash.tone === "ok" ? "text-emerald-700 bg-emerald-50 border-emerald-200" : "text-red-700 bg-red-50 border-red-200"}`} data-pproof="flash" data-tone={proofFlash.tone}>
+            {t(proofFlash.text)}
+          </div>
+        )}
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Date</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Method</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Note</th><th className="px-4 py-2">{t("Payment Proof")}</th><th className="px-4 py-2 text-right">Actions</th>
+          </tr></thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={7} className="px-4 py-6 text-center text-slate-400">Koi payment record nahi.</td></tr>}
+            {sorted.map((p) => {
+              const reversed = isPaymentLinkedToCancelledInvoice(p, invoices);
+              return (
+                <tr key={p.id} className={`border-t border-slate-100 ${editing && editing.id === p.id ? "bg-blue-50" : ""}`}>
+                  <td className="px-4 py-2">{fmtDate(p.date)}</td>
+                  <td className="px-4 py-2 font-bold">{p.customerName}</td>
+                  <td className="px-4 py-2 text-slate-500">{p.method}</td>
+                  <td className={`px-4 py-2 text-right font-bold ${p.kind === "Refund" ? "text-red-600" : "text-emerald-600"}`}>{p.kind === "Refund" ? "-" : ""}{fmtMoney(p.amount)}</td>
+                  <td className="px-4 py-2 text-slate-500 text-xs">
+                    {p.note || "-"}
+                    {p.reference && <div className="text-[10px] text-slate-400" dir="ltr">Ref: {p.reference}</div>}
+                  </td>
+                  <td className="px-4 py-2" data-payment-row={p.id}>
+                    <PaymentProofCell record={proofs.recordFor(p.id)} loaded={proofs.loaded} failed={proofs.failed} canUpload={canUploadProof} onOpen={() => setProofPaymentId(p.id)} />
+                  </td>
+                  <td className="px-4 py-2 text-right whitespace-nowrap">
+                    {p.kind === "Refund" ? (
+                      <span className="text-xs font-bold text-red-600">Refund</span>
+                    ) : (
+                      <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setReceiptId(p.id)}>Receiving</button>
+                    )}
+                    <span className="text-slate-300 mx-2">|</span>
+                    {reversed || p.bookingId || p.kind === "Refund" ? (
+                      <span className="text-xs font-bold text-slate-300" title={reversed ? "Invoice cancelled — payment reversed" : "Booking advance / refund — edit it from Advance Booking"}>Edit</span>
+                    ) : (
+                      <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => startEdit(p)}>Edit</button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {receiptPayment && (
+        <PaymentReceipt
+          payment={receiptPayment} customers={customers} invoices={invoices} payments={payments}
+          returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
+          settings={settings} onClose={() => setReceiptId(null)}
+          showProof proofRecord={proofs.recordFor(receiptPayment.id)}
+          onViewProof={() => { setReceiptId(null); setProofPaymentId(receiptPayment.id); }}
+        />
+      )}
+      {proofPayment && (
+        <PaymentProofModal
+          payment={proofPayment} invoice={findInvoiceForPayment(proofPayment, invoices)}
+          record={proofs.recordFor(proofPayment.id)} currentUser={currentUser}
+          onClose={() => setProofPaymentId(null)} onAudit={logProofAudit}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Outstanding Transfer ---------------- */
+
+function OutstandingTransferPage({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, currentUser, onCreateTransfer, onReverseTransfer }) {
+  const [showForm, setShowForm] = useState(false);
+  const [fromCustomerId, setFromCustomerId] = useState("");
+  const [toCustomerId, setToCustomerId] = useState("");
+  const [fromSearch, setFromSearch] = useState("");
+  const [toSearch, setToSearch] = useState("");
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("");
+  const [reversing, setReversing] = useState(null);
+  const [reverseReason, setReverseReason] = useState("");
+
+  const fromCustomer = customers.find((c) => c.id === fromCustomerId);
+  const toCustomer = customers.find((c) => c.id === toCustomerId);
+
+  const fromOutstanding = fromCustomer
+    ? computeLedgerForCustomer(fromCustomer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding
+    : 0;
+  const toOutstanding = toCustomer
+    ? computeLedgerForCustomer(toCustomer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding
+    : 0;
+
+  const amtNum = Number(amount) || 0;
+  const fromAfter = fromOutstanding - amtNum;
+  const toAfter = toOutstanding + amtNum;
+
+  const filteredFrom = customers.filter((c) => c.name.toLowerCase().includes(fromSearch.toLowerCase()));
+  const filteredTo = customers.filter((c) => c.name.toLowerCase().includes(toSearch.toLowerCase()) && c.id !== fromCustomerId);
+
+  function resetForm() {
+    setFromCustomerId(""); setToCustomerId(""); setFromSearch(""); setToSearch(""); setAmount(""); setReason("");
+  }
+
+  function submit() {
+    if (!fromCustomerId || !toCustomerId) { alert("From aur To Customer select karein."); return; }
+    if (fromCustomerId === toCustomerId) { alert("From aur To Customer same nahi ho sakte."); return; }
+    if (!amtNum || amtNum <= 0) { alert("Transfer amount 0 se zyada hona chahiye."); return; }
+    if (amtNum > fromOutstanding) { alert("Transfer amount From Customer ke current outstanding se zyada nahi ho sakta."); return; }
+    if (!reason.trim()) { alert("Reason likhna zaroori hai."); return; }
+    if (!confirm(`Rs. ${amtNum.toLocaleString()} outstanding ${fromCustomer.name} se ${toCustomer.name} ke khate mein transfer karna hai. Continue?`)) return;
+    onCreateTransfer({
+      fromCustomerId, fromCustomerName: fromCustomer.name,
+      toCustomerId, toCustomerName: toCustomer.name,
+      amount: amtNum, reason: reason.trim(),
+    });
+    resetForm();
+    setShowForm(false);
+  }
+
+  function confirmReverse() {
+    if (!reverseReason.trim()) { alert("Reverse ki wajah likhein."); return; }
+    onReverseTransfer(reversing, reverseReason.trim());
+    setReversing(null); setReverseReason("");
+  }
+
+  const sorted = [...transfers].sort((a, b) => new Date(b.date) - new Date(a.date));
+  const canReverse = currentUser?.role === "admin";
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Outstanding Transfer</h2>
+        <Btn onClick={() => setShowForm(true)} disabled={customers.length < 2}>+ New Outstanding Transfer</Btn>
+      </div>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Ek customer ka outstanding balance doosre customer ke khate mein move karein. Ye payment receive nahi hai aur cash transaction nahi hai — sirf udhaar/outstanding balance ek account se doosre account mein move hota hai.
+      </div>
+
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Transfer #</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">From Customer</th>
+              <th className="px-4 py-2">To Customer</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2">Reason</th>
+              <th className="px-4 py-2">Created By</th><th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={9} className="px-4 py-6 text-center text-slate-400">Koi outstanding transfer nahi hua abhi tak.</td></tr>}
+            {sorted.map((t) => (
+              <tr key={t.id} className={`border-t border-slate-100 ${t.status === "Reversed" ? "opacity-50" : ""}`}>
+                <td className="px-4 py-2 font-black text-blue-700">{t.code}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(t.date)}</td>
+                <td className="px-4 py-2 font-bold">{t.fromCustomerName}</td>
+                <td className="px-4 py-2 font-bold">{t.toCustomerName}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(t.amount)}</td>
+                <td className="px-4 py-2 text-slate-500 text-xs">{t.reason}</td>
+                <td className="px-4 py-2 text-slate-500">{t.createdBy}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${TRANSFER_STATUS_TONE[t.status] || "bg-slate-100 text-slate-500"}`}>{t.status}</span>
+                  {t.status === "Reversed" && t.reverseReason && (
+                    <div className="text-[10px] text-slate-400 mt-1">Reason: {t.reverseReason}</div>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  {t.status !== "Reversed" && canReverse && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setReversing(t)}>Reverse</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {showForm && (
+        <Modal title="New Outstanding Transfer" onClose={() => { setShowForm(false); resetForm(); }}>
+          <Field label="From Customer">
+            <input className={`${inputCls} mb-1`} placeholder="Search customer..." value={fromSearch} onChange={(e) => setFromSearch(e.target.value)} />
+            <select className={inputCls} value={fromCustomerId} onChange={(e) => { setFromCustomerId(e.target.value); if (e.target.value === toCustomerId) setToCustomerId(""); }}>
+              <option value="">Select Customer</option>
+              {filteredFrom.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          {fromCustomer && (
+            <div className="text-xs text-slate-500 mb-3">
+              Current Outstanding: <span className={`font-black ${fromOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(fromOutstanding)}</span>
+            </div>
+          )}
+
+          <Field label="To Customer">
+            <input className={`${inputCls} mb-1`} placeholder="Search customer..." value={toSearch} onChange={(e) => setToSearch(e.target.value)} />
+            <select className={inputCls} value={toCustomerId} onChange={(e) => setToCustomerId(e.target.value)}>
+              <option value="">Select Customer</option>
+              {filteredTo.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          {toCustomer && (
+            <div className="text-xs text-slate-500 mb-3">
+              Current Outstanding: <span className={`font-black ${toOutstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(toOutstanding)}</span>
+            </div>
+          )}
+
+          <Field label="Transfer Amount (Rs)">
+            <input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} />
+          </Field>
+          <Field label="Reason / Note">
+            <input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Customer A ki request par amount Customer B ke khate mein transfer kiya gaya." />
+          </Field>
+
+          {fromCustomer && toCustomer && (
+            <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
+              <div className="font-black uppercase text-[11px] text-slate-500 mb-1">Balance Preview</div>
+              <div className="flex justify-between"><span>{fromCustomer.name} — Before</span><span className="font-bold">{fmtMoney(fromOutstanding)}</span></div>
+              <div className="flex justify-between"><span>{fromCustomer.name} — After</span><span className="font-black text-red-600">{fmtMoney(fromAfter)}</span></div>
+              <div className="flex justify-between border-t border-slate-300 pt-1"><span>{toCustomer.name} — Before</span><span className="font-bold">{fmtMoney(toOutstanding)}</span></div>
+              <div className="flex justify-between"><span>{toCustomer.name} — After</span><span className="font-black text-red-600">{fmtMoney(toAfter)}</span></div>
+            </div>
+          )}
+
+          <div className="flex gap-2 mt-4">
+            <Btn onClick={submit}>Transfer Outstanding</Btn>
+            <Btn variant="ghost" onClick={() => { setShowForm(false); resetForm(); }}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+
+      {reversing && (
+        <Modal title={`Reverse Transfer ${reversing.code}`} onClose={() => setReversing(null)}>
+          <div className="text-sm text-slate-600 mb-3">
+            Ye transfer reverse karne se <span className="font-bold">{reversing.fromCustomerName}</span> ka outstanding {fmtMoney(reversing.amount)} dobara increase ho jayega aur <span className="font-bold">{reversing.toCustomerName}</span> ka outstanding {fmtMoney(reversing.amount)} decrease ho jayega.
+          </div>
+          <Field label="Reverse Reason">
+            <input className={inputCls} value={reverseReason} onChange={(e) => setReverseReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmReverse}>Confirm Reverse</Btn>
+            <Btn variant="ghost" onClick={() => setReversing(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Adjustment ---------------- */
+
+// Reusable form used both from the per-customer Ledger view ("+ Adjustment"
+// button) and from the standalone Adjustments page. `initial` (when set)
+// puts the form in edit mode for an existing Active adjustment.
+function AdjustmentForm({ customers, defaultCustomerId, invoices, payments, returns, exchanges, promises, transfers, adjustments, initial, currentUser, onSave, onCancel }) {
+  const [customerId, setCustomerId] = useState(initial?.customerId || defaultCustomerId || customers[0]?.id || "");
+  const [custSearch, setCustSearch] = useState("");
+  const [type, setType] = useState(initial?.type || "Add");
+  const [amount, setAmount] = useState(initial?.amount ?? "");
+  const [category, setCategory] = useState(initial?.category || ADJUSTMENT_CATEGORIES[0]);
+  const [reason, setReason] = useState(initial?.reason || "");
+  const [note, setNote] = useState(initial?.note || "");
+  const [date, setDate] = useState(initial?.date || todayISO());
+  const [error, setError] = useState("");
+
+  const customer = customers.find((c) => c.id === customerId);
+  // Current balance BEFORE this adjustment: when editing, the active
+  // adjustment is excluded from the ledger calc so the preview reflects
+  // "balance without this adjustment", then the new amount is applied on
+  // top — this is what makes edit safely reverse-then-reapply.
+  const otherAdjustments = (adjustments || []).filter((a) => a.id !== initial?.id);
+  const currentBalance = customer
+    ? computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, otherAdjustments).outstanding
+    : 0;
+  const amtNum = Number(amount) || 0;
+  const newBalance = type === "Add" ? currentBalance + amtNum : currentBalance - amtNum;
+
+  const filteredCustomers = customers.filter((c) => c.name.toLowerCase().includes(custSearch.toLowerCase()));
+  const isEdit = !!initial;
+
+  function submit() {
+    if (!customerId) { setError("Customer select karein."); return; }
+    if (!amtNum || amtNum <= 0) { setError("Amount 0 se zyada hona chahiye."); return; }
+    if (!reason.trim()) { setError("Reason likhna zaroori hai."); return; }
+    const cust = customers.find((c) => c.id === customerId);
+    setError("");
+    onSave({
+      customerId, customerName: cust.name, type, amount: amtNum, category,
+      reason: reason.trim(), note: note.trim(), date,
+    });
+  }
+
+  return (
+    <div>
+      {!isEdit && (
+        <Field label="Customer">
+          <input className={`${inputCls} mb-1`} placeholder="Search customer..." value={custSearch} onChange={(e) => setCustSearch(e.target.value)} />
+          <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+            <option value="">Select Customer</option>
+            {filteredCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </Field>
+      )}
+      {isEdit && (
+        <div className="text-sm font-bold text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2 mb-3">{customer?.name}</div>
+      )}
+      {customer && (
+        <div className="text-xs text-slate-500 mb-3">
+          Current Balance: <span className={`font-black ${currentBalance > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(currentBalance)}</span>
+        </div>
+      )}
+
+      <Field label="Adjustment Type">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setType("Add")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${type === "Add" ? "bg-red-600 text-white border-red-600" : "bg-white text-slate-600 border-slate-300"}`}>Add Balance (+)</button>
+          <button type="button" onClick={() => setType("Reduce")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${type === "Reduce" ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300"}`}>Reduce Balance (-)</button>
+        </div>
+      </Field>
+
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Amount (Rs)">
+          <input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} />
+        </Field>
+        <Field label="Category">
+          <select className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}>
+            {ADJUSTMENT_CATEGORIES.map((c) => <option key={c}>{c}</option>)}
+          </select>
+        </Field>
+      </div>
+
+      <Field label="Reason">
+        <input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} placeholder="e.g. Customer ke liye transport service" />
+      </Field>
+      <Field label="Note (optional)">
+        <input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} placeholder="e.g. Delivery charges adjustment" />
+      </Field>
+      <Field label="Date">
+        <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
+      </Field>
+
+      {customer && (
+        <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
+          <div className="flex justify-between"><span>Current Balance</span><span className="font-bold">{fmtMoney(currentBalance)}</span></div>
+          <div className="flex justify-between"><span>Adjustment</span><span className={`font-bold ${type === "Add" ? "text-red-600" : "text-emerald-600"}`}>{type === "Add" ? "+" : "-"}{fmtMoney(amtNum)}</span></div>
+          <div className="flex justify-between border-t border-slate-300 pt-1"><span className="font-bold">New Balance</span><span className={`font-black ${newBalance > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(newBalance)}</span></div>
+        </div>
+      )}
+
+      {error && <div className="text-red-600 text-sm font-semibold mt-3">{error}</div>}
+      <div className="flex gap-2 mt-4">
+        <Btn onClick={submit}>{isEdit ? "Save Changes" : "Save Adjustment"}</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function AdjustmentsPage({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, currentUser, onCreateAdjustment, onUpdateAdjustment, onReverseAdjustment }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [reversing, setReversing] = useState(null);
+  const [reverseReason, setReverseReason] = useState("");
+  const [q, setQ] = useState("");
+
+  const canManage = currentUser?.role === "admin";
+
+  const sorted = [...adjustments]
+    .filter((a) => !q.trim() || a.customerName.toLowerCase().includes(q.toLowerCase()) || a.code.toLowerCase().includes(q.toLowerCase()) || a.category.toLowerCase().includes(q.toLowerCase()))
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  function confirmReverse() {
+    if (!reverseReason.trim()) { alert("Reverse ki wajah likhein."); return; }
+    onReverseAdjustment(reversing, reverseReason.trim());
+    setReversing(null); setReverseReason("");
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Adjustments</h2>
+        <Btn onClick={() => { setEditing(null); setShowForm(true); }} disabled={customers.length === 0}>+ Adjustment</Btn>
+      </div>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Kisi customer ke balance ko manually increase ya decrease karein — bina fake invoice ya fake payment ke. Transport, labour, repair, discount, compensation ya balance correction jaisi real business situations ke liye.
+      </div>
+
+      <input className={`${inputCls} mb-3 max-w-xs`} placeholder="Search customer / adj # / category..." value={q} onChange={(e) => setQ(e.target.value)} />
+
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Adj #</th><th className="px-4 py-2">Date</th><th className="px-4 py-2">Customer</th>
+              <th className="px-4 py-2">Type</th><th className="px-4 py-2">Category</th><th className="px-4 py-2 text-right">Amount</th>
+              <th className="px-4 py-2">Reason</th><th className="px-4 py-2">Created By</th><th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-slate-400">Koi adjustment nahi hua abhi tak.</td></tr>}
+            {sorted.map((a) => (
+              <tr key={a.id} className={`border-t border-slate-100 ${a.status === "Reversed" ? "opacity-50" : ""}`}>
+                <td className="px-4 py-2 font-black text-blue-700">{a.code}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(a.date)}</td>
+                <td className="px-4 py-2 font-bold">{a.customerName}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${a.type === "Add" ? "bg-red-100 text-red-700" : "bg-emerald-100 text-emerald-700"}`}>
+                    {a.type === "Add" ? "Add (+)" : "Reduce (-)"}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-slate-500">{a.category}</td>
+                <td className={`px-4 py-2 text-right font-bold ${a.type === "Add" ? "text-red-600" : "text-emerald-600"}`}>{a.type === "Add" ? "+" : "-"}{fmtMoney(a.amount)}</td>
+                <td className="px-4 py-2 text-slate-500 text-xs">{a.reason}{a.note ? <div className="text-slate-400">{a.note}</div> : null}</td>
+                <td className="px-4 py-2 text-slate-500">{a.createdBy}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${ADJUSTMENT_STATUS_TONE[a.status] || "bg-slate-100 text-slate-500"}`}>{a.status}</span>
+                  {a.status === "Reversed" && a.reverseReason && (
+                    <div className="text-[10px] text-slate-400 mt-1">Reason: {a.reverseReason}</div>
+                  )}
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                  {a.status !== "Reversed" && canManage && (
+                    <>
+                      <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => { setEditing(a); setShowForm(true); }}>Edit</button>
+                      <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setReversing(a)}>Reverse</button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {showForm && (
+        <Modal title={editing ? `Edit Adjustment ${editing.code}` : "New Adjustment"} onClose={() => { setShowForm(false); setEditing(null); }}>
+          <AdjustmentForm
+            customers={customers}
+            invoices={invoices}
+            payments={payments}
+            returns={returns}
+            exchanges={exchanges}
+            promises={promises}
+            transfers={transfers}
+            adjustments={adjustments}
+            initial={editing}
+            currentUser={currentUser}
+            onCancel={() => { setShowForm(false); setEditing(null); }}
+            onSave={(data) => {
+              if (editing) onUpdateAdjustment(editing, data);
+              else onCreateAdjustment(data);
+              setShowForm(false); setEditing(null);
+            }}
+          />
+        </Modal>
+      )}
+
+      {reversing && (
+        <Modal title={`Reverse Adjustment ${reversing.code}`} onClose={() => setReversing(null)}>
+          <div className="text-sm text-slate-600 mb-3">
+            Ye adjustment reverse karne se <span className="font-bold">{reversing.customerName}</span> ka balance is adjustment se pehle wali state mein wapis chala jayega. Original adjustment aur ye reversal dono history mein visible rahenge.
+          </div>
+          <Field label="Reverse Reason">
+            <input className={inputCls} value={reverseReason} onChange={(e) => setReverseReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmReverse}>Confirm Reverse</Btn>
+            <Btn variant="ghost" onClick={() => setReversing(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ==================== Commission Management System ====================
+   Integrates with the existing Invoice / Customer / Payment systems:
+   - Reads invoices (never rewrites invoice.total or invoice calculations).
+   - Reuses the existing Field/Btn/Modal/Stat/table UI patterns.
+   - Persists through the same storeGet/storeSet + Supabase/localStorage
+     layer as every other module (see commissionAgents/commissionRules/
+     commissionTransactions/commissionPayments in the App component).
+   - Uses the existing t()/tStatus() bilingual system for all labels.
+   ========================================================================= */
+
+function CommissionAgentForm({ initial, onSave, onCancel }) {
+  const [form, setForm] = useState(
+    initial || {
+      name: "", phone: "", whatsapp: "", address: "",
+      defaultCommissionType: "percentage", defaultCommissionRate: "",
+      status: "Active", notes: "",
+    }
+  );
+  const [error, setError] = useState("");
+
+  function submit() {
+    if (!form.name.trim()) { setError("Agent ka naam zaroori hai."); return; }
+    setError("");
+    onSave({ ...form, defaultCommissionRate: Number(form.defaultCommissionRate) || 0 });
+  }
+
+  return (
+    <div>
+      <Field label="Agent Name">
+        <input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} autoFocus />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Phone">
+          <input className={inputCls} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
+        </Field>
+        <Field label="WhatsApp">
+          <input className={inputCls} value={form.whatsapp} onChange={(e) => setForm({ ...form, whatsapp: e.target.value })} />
+        </Field>
+      </div>
+      <Field label="Address">
+        <input className={inputCls} value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} />
+      </Field>
+      <div className="text-[11px] text-slate-400 mb-2">Default Commission is used only when no specific Commission Rule matches an invoice for this agent (see Commission Rules for per-product overrides).</div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Commission Type">
+          <select className={inputCls} value={form.defaultCommissionType} onChange={(e) => setForm({ ...form, defaultCommissionType: e.target.value })}>
+            {COMMISSION_TYPES.map((ct) => <option key={ct} value={ct}>{t(COMMISSION_TYPE_LABELS[ct])}</option>)}
+          </select>
+        </Field>
+        <Field label="Commission Rate">
+          <input type="number" step="any" className={inputCls} value={form.defaultCommissionRate} onChange={(e) => setForm({ ...form, defaultCommissionRate: e.target.value })} />
+        </Field>
+      </div>
+      <Field label="Status">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setForm({ ...form, status: "Active" })} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${form.status === "Active" ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300"}`}>{t("Active")}</button>
+          <button type="button" onClick={() => setForm({ ...form, status: "Inactive" })} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${form.status === "Inactive" ? "bg-slate-600 text-white border-slate-600" : "bg-white text-slate-600 border-slate-300"}`}>{t("Inactive")}</button>
+        </div>
+      </Field>
+      <Field label="Notes">
+        <input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+      </Field>
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2 mt-2">
+        <Btn onClick={submit}>Save Agent</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function CommissionAgentLedgerView({ agent, transactions, payments, onClose, onPay, onApprove, canManage }) {
+  const summary = computeCommissionSummaryForAgent(agent.id, transactions, payments);
+  const myPayments = (payments || []).filter((p) => p.agentId === agent.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const rows = [...summary.transactions].sort((a, b) => new Date(a.invoiceDate) - new Date(b.invoiceDate));
+
+  return (
+    <Modal title={`Commission Ledger — ${agent.name}`} onClose={onClose} wide>
+      <div className="flex flex-wrap gap-3 mb-4">
+        <Stat label="Total Commission" value={fmtMoney(summary.totalCommission)} />
+        <Stat label="Paid Commission" value={fmtMoney(summary.totalPaid)} accent="text-emerald-600" />
+        <Stat label="Outstanding Commission" value={fmtMoney(summary.remaining)} accent="text-red-600" />
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto mb-4">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-3 py-2">Date</th><th className="px-3 py-2">Invoice Number</th><th className="px-3 py-2">Customer</th>
+              <th className="px-3 py-2 text-right">Sale Amount</th><th className="px-3 py-2">Commission Rate</th>
+              <th className="px-3 py-2 text-right">Commission Amount</th><th className="px-3 py-2 text-right">Paid Commission</th>
+              <th className="px-3 py-2 text-right">Remaining</th><th className="px-3 py-2">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={9} className="px-3 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+            {rows.map((tx) => (
+              <tr key={tx.id} className="border-t border-slate-100">
+                <td className="px-3 py-2 text-slate-500">{fmtDate(tx.invoiceDate)}</td>
+                <td className="px-3 py-2 font-bold text-blue-700">{tx.invoiceNumber}</td>
+                <td className="px-3 py-2">{tx.customerName}</td>
+                <td className="px-3 py-2 text-right">{fmtMoney(tx.saleAmount)}</td>
+                <td className="px-3 py-2 text-slate-500">{fmtCommissionRate(tx.commissionType, tx.commissionRate)}</td>
+                <td className="px-3 py-2 text-right font-bold">{fmtMoney(tx.commissionAmount)}</td>
+                <td className="px-3 py-2 text-right text-emerald-600 font-bold">{fmtMoney(tx.paidAmount)}</td>
+                <td className="px-3 py-2 text-right text-red-600 font-bold">{fmtMoney(tx.remainingAmount)}</td>
+                <td className="px-3 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${COMMISSION_STATUS_TONE[tx.status] || "bg-slate-100 text-slate-500"}`}>{tStatus(tx.status)}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto mb-4">
+        <div className="px-3 py-2 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Commission Payment History</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-3 py-2">Date</th><th className="px-3 py-2">Method</th><th className="px-3 py-2">Reference</th>
+              <th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {myPayments.length === 0 && <tr><td colSpan={5} className="px-3 py-6 text-center text-slate-400">Koi payment nahi.</td></tr>}
+            {myPayments.map((p) => (
+              <tr key={p.id} className="border-t border-slate-100">
+                <td className="px-3 py-2 text-slate-500">{fmtDate(p.date)}</td>
+                <td className="px-3 py-2">{p.method}</td>
+                <td className="px-3 py-2 text-slate-500">{p.referenceNumber || "-"}</td>
+                <td className="px-3 py-2 text-right font-bold text-emerald-600">{fmtMoney(p.amount)}</td>
+                <td className="px-3 py-2 text-slate-500 text-xs">{p.notes || "-"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {canManage && (
+        <div className="flex gap-2">
+          <Btn onClick={onPay} disabled={summary.remaining <= 0}>Pay Commission</Btn>
+          <Btn variant="ghost" onClick={onClose}>Close</Btn>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function CommissionAgentsPage({ agents, transactions, payments, currentUser, onCreateAgent, onUpdateAgent, onToggleAgentStatus, onOpenPay }) {
+  const [modal, setModal] = useState(null); // null | 'new' | agent
+  const [ledgerAgent, setLedgerAgent] = useState(null);
+  const [q, setQ] = useState("");
+  const canManage = currentUser?.role === "admin";
+
+  const rows = agents
+    .filter((a) => !q.trim() || a.name.toLowerCase().includes(q.toLowerCase()) || a.id.toLowerCase().includes(q.toLowerCase()))
+    .map((a) => ({ ...a, summary: computeCommissionSummaryForAgent(a.id, transactions, payments) }));
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-black uppercase tracking-tight">Commission Agents</h2>
+        {canManage && <Btn onClick={() => setModal("new")}>+ New Agent</Btn>}
+      </div>
+      <input className={`${inputCls} mb-3 max-w-xs`} placeholder="Search agent name / ID..." value={q} onChange={(e) => setQ(e.target.value)} />
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Agent ID</th><th className="px-4 py-2">Agent Name</th><th className="px-4 py-2">Phone</th>
+              <th className="px-4 py-2">Default Commission</th>
+              <th className="px-4 py-2 text-right">Total</th><th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Outstanding</th>
+              <th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && <tr><td colSpan={9} className="px-4 py-6 text-center text-slate-400">Koi commission agent nahi.</td></tr>}
+            {rows.map((a) => (
+              <tr key={a.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-black text-blue-700">{a.id}</td>
+                <td className="px-4 py-2 font-bold cursor-pointer hover:text-blue-700" onClick={() => setLedgerAgent(a)}>{a.name}</td>
+                <td className="px-4 py-2 text-slate-500">{a.phone || "-"}</td>
+                <td className="px-4 py-2 text-slate-500">{fmtCommissionRate(a.defaultCommissionType, a.defaultCommissionRate)}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(a.summary.totalCommission)}</td>
+                <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(a.summary.totalPaid)}</td>
+                <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(a.summary.remaining)}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${a.status === "Active" ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>{tStatus(a.status)}</span>
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setLedgerAgent(a)}>Ledger</button>
+                  {canManage && (
+                    <>
+                      <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setModal(a)}>Edit</button>
+                      <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => onToggleAgentStatus(a)}>{a.status === "Active" ? "Deactivate" : "Activate"}</button>
+                    </>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {modal && (
+        <Modal title={modal === "new" ? "New Agent" : `Edit Agent ${modal.id}`} onClose={() => setModal(null)}>
+          <CommissionAgentForm
+            initial={modal === "new" ? null : modal}
+            onCancel={() => setModal(null)}
+            onSave={(data) => { modal === "new" ? onCreateAgent(data) : onUpdateAgent(modal, data); setModal(null); }}
+          />
+        </Modal>
+      )}
+      {ledgerAgent && (
+        <CommissionAgentLedgerView
+          agent={ledgerAgent}
+          transactions={transactions}
+          payments={payments}
+          canManage={canManage}
+          onClose={() => setLedgerAgent(null)}
+          onPay={() => { onOpenPay(ledgerAgent, null); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function CommissionRuleForm({ agents, products, initial, onSave, onCancel }) {
+  const [form, setForm] = useState(
+    initial || {
+      agentId: agents[0]?.id || "", productMatch: ALL_PRODUCTS_KEY,
+      commissionType: "percentage", commissionRate: "",
+      minSaleAmount: "", maxCommission: "", startDate: "", endDate: "", status: "Active",
+    }
+  );
+  const [error, setError] = useState("");
+
+  function submit() {
+    if (!form.agentId) { setError("Agent select karein."); return; }
+    if (!Number(form.commissionRate) || Number(form.commissionRate) <= 0) { setError("Commission Rate 0 se zyada hona chahiye."); return; }
+    setError("");
+    onSave({
+      ...form,
+      commissionRate: Number(form.commissionRate) || 0,
+      minSaleAmount: Number(form.minSaleAmount) || 0,
+      maxCommission: Number(form.maxCommission) || 0,
+    });
+  }
+
+  return (
+    <div>
+      <Field label="Agent">
+        <select className={inputCls} value={form.agentId} onChange={(e) => setForm({ ...form, agentId: e.target.value })}>
+          {agents.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
+        </select>
+      </Field>
+      <Field label="Product">
+        <select className={inputCls} value={form.productMatch} onChange={(e) => setForm({ ...form, productMatch: e.target.value })}>
+          <option value={ALL_PRODUCTS_KEY}>{t(ALL_PRODUCTS_KEY)}</option>
+          {products.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
+        </select>
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Commission Type">
+          <select className={inputCls} value={form.commissionType} onChange={(e) => setForm({ ...form, commissionType: e.target.value })}>
+            {COMMISSION_TYPES.map((ct) => <option key={ct} value={ct}>{t(COMMISSION_TYPE_LABELS[ct])}</option>)}
+          </select>
+        </Field>
+        <Field label="Commission Rate">
+          <input type="number" step="any" className={inputCls} value={form.commissionRate} onChange={(e) => setForm({ ...form, commissionRate: e.target.value })} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Minimum Sale Amount">
+          <input type="number" className={inputCls} value={form.minSaleAmount} onChange={(e) => setForm({ ...form, minSaleAmount: e.target.value })} />
+        </Field>
+        <Field label="Maximum Commission">
+          <input type="number" className={inputCls} value={form.maxCommission} onChange={(e) => setForm({ ...form, maxCommission: e.target.value })} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Start Date">
+          <input type="date" className={inputCls} value={form.startDate} onChange={(e) => setForm({ ...form, startDate: e.target.value })} />
+        </Field>
+        <Field label="End Date">
+          <input type="date" className={inputCls} value={form.endDate} onChange={(e) => setForm({ ...form, endDate: e.target.value })} />
+        </Field>
+      </div>
+      <Field label="Status">
+        <div className="flex gap-2">
+          <button type="button" onClick={() => setForm({ ...form, status: "Active" })} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${form.status === "Active" ? "bg-emerald-600 text-white border-emerald-600" : "bg-white text-slate-600 border-slate-300"}`}>{t("Active")}</button>
+          <button type="button" onClick={() => setForm({ ...form, status: "Inactive" })} className={`flex-1 px-3 py-2 text-sm font-bold uppercase tracking-wide border ${form.status === "Inactive" ? "bg-slate-600 text-white border-slate-600" : "bg-white text-slate-600 border-slate-300"}`}>{t("Inactive")}</button>
+        </div>
+      </Field>
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2 mt-2">
+        <Btn onClick={submit}>Save Rule</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function CommissionRulesPage({ agents, products, rules, currentUser, onCreateRule, onUpdateRule }) {
+  const [modal, setModal] = useState(null);
+  const canManage = currentUser?.role === "admin";
+  const sorted = [...rules].sort((a, b) => (a.agentId || "").localeCompare(b.agentId || ""));
+
+  function toggleStatus(rule) {
+    onUpdateRule(rule, { ...rule, status: rule.status === "Active" ? "Inactive" : "Active" });
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Commission Rules</h2>
+        {canManage && <Btn onClick={() => setModal("new")} disabled={agents.length === 0}>+ New Rule</Btn>}
+      </div>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Har agent ke liye product-specific ya all-products commission rule banayein. Jab invoice par wo agent select hoga, sabse specific active rule (product-match) automatically use hogi, warna agent ka default commission apply hoga.
+      </div>
+      {agents.length === 0 && <div className="text-slate-400 mb-3">Pehle Commission Agents tab mein agent add karein.</div>}
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Agent</th><th className="px-4 py-2">Product</th><th className="px-4 py-2">Type</th><th className="px-4 py-2">Rate</th>
+              <th className="px-4 py-2 text-right">Min Sale</th><th className="px-4 py-2 text-right">Max Commission</th>
+              <th className="px-4 py-2">Start</th><th className="px-4 py-2">End</th><th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-slate-400">Koi commission rule nahi.</td></tr>}
+            {sorted.map((r) => {
+              const agent = agents.find((a) => a.id === r.agentId);
+              return (
+                <tr key={r.id} className="border-t border-slate-100">
+                  <td className="px-4 py-2 font-bold">{agent ? agent.name : r.agentId}</td>
+                  <td className="px-4 py-2 text-slate-500">{r.productMatch === ALL_PRODUCTS_KEY ? t(ALL_PRODUCTS_KEY) : r.productMatch}</td>
+                  <td className="px-4 py-2 text-slate-500">{t(COMMISSION_TYPE_LABELS[r.commissionType])}</td>
+                  <td className="px-4 py-2 font-bold">{fmtCommissionRate(r.commissionType, r.commissionRate)}</td>
+                  <td className="px-4 py-2 text-right text-slate-500">{r.minSaleAmount > 0 ? fmtMoney(r.minSaleAmount) : "-"}</td>
+                  <td className="px-4 py-2 text-right text-slate-500">{r.maxCommission > 0 ? fmtMoney(r.maxCommission) : "-"}</td>
+                  <td className="px-4 py-2 text-slate-500">{r.startDate ? fmtDate(r.startDate) : "-"}</td>
+                  <td className="px-4 py-2 text-slate-500">{r.endDate ? fmtDate(r.endDate) : "-"}</td>
+                  <td className="px-4 py-2">
+                    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${r.status === "Active" ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>{tStatus(r.status)}</span>
+                  </td>
+                  <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                    {canManage && (
+                      <>
+                        <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setModal(r)}>Edit</button>
+                        <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => toggleStatus(r)}>{r.status === "Active" ? "Deactivate" : "Activate"}</button>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {modal && (
+        <Modal title={modal === "new" ? "New Commission Rule" : "Edit Commission Rule"} onClose={() => setModal(null)}>
+          <CommissionRuleForm
+            agents={agents}
+            products={products}
+            initial={modal === "new" ? null : modal}
+            onCancel={() => setModal(null)}
+            onSave={(data) => { modal === "new" ? onCreateRule(data) : onUpdateRule(modal, data); setModal(null); }}
+          />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+// Pay Commission — used both from an agent's Ledger (general payment,
+// FIFO-allocated across that agent's Approved transactions with a
+// remaining balance) and from Commission History (scoped to ONE specific
+// transaction, capped at that transaction's own remaining amount).
+function CommissionPaymentForm({ agent, transaction, remainingTotal, onSave, onCancel }) {
+  const [amount, setAmount] = useState("");
+  const [date, setDate] = useState(todayISO());
+  const [method, setMethod] = useState("Cash");
+  const [referenceNumber, setReferenceNumber] = useState("");
+  const [notes, setNotes] = useState("");
+  const [error, setError] = useState("");
+
+  const cap = transaction ? transaction.remainingAmount : remainingTotal;
+  const already = transaction ? transaction.paidAmount : (remainingTotal != null ? undefined : 0);
+
+  function submit() {
+    const amt = Number(amount) || 0;
+    if (amt <= 0) { setError("Payment amount 0 se zyada hona chahiye."); return; }
+    if (amt > cap + 0.005) { setError(`Payment amount remaining commission (${fmtMoney(cap)}) se zyada nahi ho sakta.`); return; }
+    setError("");
+    onSave({ amount: amt, date, method, referenceNumber: referenceNumber.trim(), notes: notes.trim() });
+  }
+
+  return (
+    <div>
+      <div className="bg-slate-50 border border-slate-200 p-3 mb-3 text-sm space-y-1">
+        <div className="flex justify-between"><span className="text-slate-500">Agent</span><span className="font-bold">{agent.name}</span></div>
+        {transaction && (
+          <div className="flex justify-between"><span className="text-slate-500">Invoice</span><span className="font-bold">{transaction.invoiceNumber}</span></div>
+        )}
+        <div className="flex justify-between"><span className="text-slate-500">Total Commission</span><span className="font-bold">{fmtMoney(transaction ? transaction.commissionAmount : (remainingTotal + (transaction ? transaction.paidAmount : 0)))}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Already Paid</span><span className="font-bold text-emerald-600">{fmtMoney(transaction ? transaction.paidAmount : 0)}</span></div>
+        <div className="flex justify-between border-t border-slate-300 pt-1"><span className="font-bold">Remaining Commission</span><span className="font-black text-red-600">{fmtMoney(cap)}</span></div>
+      </div>
+      <Field label="Payment Amount">
+        <input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Payment Date">
+          <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
+        </Field>
+        <Field label="Payment Method">
+          <select className={inputCls} value={method} onChange={(e) => setMethod(e.target.value)}>
+            {COMMISSION_PAYMENT_METHODS.map((m) => <option key={m} value={m}>{t(m)}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="Reference Number">
+        <input className={inputCls} value={referenceNumber} onChange={(e) => setReferenceNumber(e.target.value)} />
+      </Field>
+      <Field label="Notes">
+        <input className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </Field>
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2">
+        <Btn onClick={submit}>Pay Commission</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function CommissionHistoryPage({ agents, transactions, invoices, currentUser, onView, onApprove, onOpenPay, onCancel }) {
+  const [q, setQ] = useState("");
+  const [agentFilter, setAgentFilter] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [cancelling, setCancelling] = useState(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const canManage = currentUser?.role === "admin";
+
+  const filtered = transactions.filter((tx) => {
+    const matchesQ = !q.trim() ||
+      tx.invoiceNumber.toLowerCase().includes(q.toLowerCase()) ||
+      tx.customerName.toLowerCase().includes(q.toLowerCase()) ||
+      tx.agentName.toLowerCase().includes(q.toLowerCase());
+    const matchesAgent = agentFilter === "All" || tx.agentId === agentFilter;
+    const matchesStatus = statusFilter === "All" || tx.status === statusFilter;
+    const matchesFrom = !from || tx.invoiceDate >= from;
+    const matchesTo = !to || tx.invoiceDate <= to;
+    return matchesQ && matchesAgent && matchesStatus && matchesFrom && matchesTo;
+  }).sort((a, b) => new Date(b.invoiceDate) - new Date(a.invoiceDate));
+
+  function confirmCancel() {
+    if (!cancelReason.trim()) { alert("Cancel ki wajah likhein."); return; }
+    onCancel(cancelling, cancelReason.trim());
+    setCancelling(null); setCancelReason("");
+  }
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-2">Commission History</h2>
+      <div className="flex flex-wrap gap-2 mb-3">
+        <input className={`${inputCls} max-w-xs`} placeholder="Search invoice / customer / agent..." value={q} onChange={(e) => setQ(e.target.value)} />
+        <select className={`${inputCls} max-w-[180px]`} value={agentFilter} onChange={(e) => setAgentFilter(e.target.value)}>
+          <option value="All">All Agents</option>
+          {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+        </select>
+        <select className={`${inputCls} max-w-[160px]`} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+          <option value="All">All Status</option>
+          {COMMISSION_STATUSES.map((s) => <option key={s} value={s}>{tStatus(s)}</option>)}
+        </select>
+        <input type="date" className={`${inputCls} max-w-[160px]`} value={from} onChange={(e) => setFrom(e.target.value)} />
+        <input type="date" className={`${inputCls} max-w-[160px]`} value={to} onChange={(e) => setTo(e.target.value)} />
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Date</th><th className="px-4 py-2">Invoice</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Agent</th>
+              <th className="px-4 py-2 text-right">Sale Amount</th><th className="px-4 py-2 text-right">Commission</th>
+              <th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Remaining</th>
+              <th className="px-4 py-2">Status</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 && <tr><td colSpan={10} className="px-4 py-6 text-center text-slate-400">Koi commission transaction nahi.</td></tr>}
+            {filtered.map((tx) => (
+              <tr key={tx.id} className={`border-t border-slate-100 ${tx.status === "Cancelled" ? "opacity-50" : ""}`}>
+                <td className="px-4 py-2 text-slate-500">{fmtDate(tx.invoiceDate)}</td>
+                <td className="px-4 py-2 font-bold text-blue-700 cursor-pointer hover:underline" onClick={() => onView(tx)}>{tx.invoiceNumber}</td>
+                <td className="px-4 py-2">{tx.customerName}</td>
+                <td className="px-4 py-2">{tx.agentName}</td>
+                <td className="px-4 py-2 text-right">{fmtMoney(tx.saleAmount)}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(tx.commissionAmount)}</td>
+                <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(tx.paidAmount)}</td>
+                <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(tx.remainingAmount)}</td>
+                <td className="px-4 py-2">
+                  <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${COMMISSION_STATUS_TONE[tx.status] || "bg-slate-100 text-slate-500"}`}>{tStatus(tx.status)}</span>
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => onView(tx)}>View</button>
+                  {canManage && tx.status === "Pending" && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-emerald-600" onClick={() => onApprove(tx)}>Approve</button>
+                  )}
+                  {canManage && tx.status === "Approved" && tx.remainingAmount > 0 && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-emerald-600" onClick={() => onOpenPay(null, tx)}>Pay</button>
+                  )}
+                  {canManage && (tx.status === "Pending" || tx.status === "Approved") && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setCancelling(tx)}>Cancel</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {cancelling && (
+        <Modal title={`Cancel Commission — ${cancelling.invoiceNumber}`} onClose={() => setCancelling(null)}>
+          <div className="text-sm text-slate-600 mb-3">Ye commission cancel karne se ye payable nahi rahegi. Record audit trail mein maujood rahega.</div>
+          <Field label="Cancel Reason">
+            <input className={inputCls} value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmCancel}>Confirm Cancel</Btn>
+            <Btn variant="ghost" onClick={() => setCancelling(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function CommissionTransactionDetail({ transaction, onClose }) {
+  return (
+    <Modal title={`Commission — ${transaction.invoiceNumber}`} onClose={onClose}>
+      <div id="print-commission" className="print-area text-sm space-y-1">
+        <div className="flex justify-between"><span className="text-slate-500">Agent</span><span className="font-bold">{transaction.agentName}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Invoice</span><span className="font-bold">{transaction.invoiceNumber}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Customer</span><span className="font-bold">{transaction.customerName}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Date</span><span className="font-bold">{fmtDate(transaction.invoiceDate)}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Sale Amount</span><span className="font-bold">{fmtMoney(transaction.saleAmount)}</span></div>
+        {(transaction.breakdown || []).length > 0 && (
+          <div className="border-t border-slate-200 pt-2 mt-2">
+            <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">Breakdown</div>
+            {transaction.breakdown.map((l, idx) => (
+              <div key={idx} className="flex justify-between text-xs text-slate-600">
+                <span>{l.source} ({fmtCommissionRate(l.commissionType, l.commissionRate)})</span>
+                <span className="font-bold">{fmtMoney(l.commission)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex justify-between border-t border-slate-300 pt-2 mt-2">
+          <span className="font-bold">Commission Amount</span><span className="font-black">{fmtMoney(transaction.commissionAmount)}</span>
+        </div>
+        <div className="flex justify-between"><span className="text-slate-500">Paid</span><span className="font-bold text-emerald-600">{fmtMoney(transaction.paidAmount)}</span></div>
+        <div className="flex justify-between"><span className="text-slate-500">Remaining</span><span className="font-bold text-red-600">{fmtMoney(transaction.remainingAmount)}</span></div>
+        <div className="flex justify-between items-center pt-1">
+          <span className="text-slate-500">Status</span>
+          <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${COMMISSION_STATUS_TONE[transaction.status] || "bg-slate-100 text-slate-500"}`}>{tStatus(transaction.status)}</span>
+        </div>
+        {transaction.cancelReason && (
+          <div className="text-xs text-slate-400 pt-1">Cancel Reason: {transaction.cancelReason}</div>
+        )}
+      </div>
+      <div className="flex gap-2 mt-4 print:hidden">
+        <Btn onClick={() => window.print()}>Print</Btn>
+        <Btn variant="ghost" onClick={onClose}>Close</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function CommissionDashboardCards({ transactions }) {
+  const active = transactions.filter((tx) => tx.status !== "Cancelled");
+  const totalCommission = roundMoney(active.reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const pending = roundMoney(transactions.filter((tx) => tx.status === "Pending").reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const approved = roundMoney(transactions.filter((tx) => tx.status === "Approved").reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+  const paid = roundMoney(active.reduce((s, tx) => s + Number(tx.paidAmount || 0), 0));
+  const outstanding = roundMoney(active.reduce((s, tx) => s + Number(tx.remainingAmount || 0), 0));
+  const m = todayISO().slice(0, 7);
+  const thisMonth = roundMoney(active.filter((tx) => (tx.invoiceDate || "").startsWith(m)).reduce((s, tx) => s + Number(tx.commissionAmount || 0), 0));
+
+  return (
+    <div className="flex flex-wrap gap-3 mb-6">
+      <Stat label="Total Commission" value={fmtMoney(totalCommission)} />
+      <Stat label="Pending Commission" value={fmtMoney(pending)} accent="text-blue-700" />
+      <Stat label="Approved Commission" value={fmtMoney(approved)} accent="text-amber-600" />
+      <Stat label="Paid Commission" value={fmtMoney(paid)} accent="text-emerald-600" />
+      <Stat label="Outstanding Commission" value={fmtMoney(outstanding)} accent="text-red-600" />
+      <Stat label="This Month Commission" value={fmtMoney(thisMonth)} />
+    </div>
+  );
+}
+
+function CommissionPage({
+  agents, rules, transactions, payments, products, invoices, currentUser,
+  onCreateAgent, onUpdateAgent, onToggleAgentStatus,
+  onCreateRule, onUpdateRule,
+  onApproveTransaction, onCancelTransaction,
+  onPayAgent, onPayTransaction,
+}) {
+  const [tab, setTab] = useState("dashboard");
+  const [viewingTx, setViewingTx] = useState(null);
+  const [payModal, setPayModal] = useState(null); // { agent, transaction | null }
+
+  function handleOpenPay(agent, transaction) {
+    const resolvedAgent = agent || agents.find((a) => a.id === transaction.agentId);
+    if (!resolvedAgent) return;
+    setPayModal({ agent: resolvedAgent, transaction: transaction || null });
+  }
+
+  function handlePaySubmit(data) {
+    if (payModal.transaction) {
+      onPayTransaction(payModal.transaction, data);
+    } else {
+      onPayAgent(payModal.agent, data);
+    }
+    setPayModal(null);
+  }
+
+  const canManage = currentUser?.role === "admin";
+  const tabs = [
+    ["dashboard", "Commission Dashboard"],
+    ["agents", "Commission Agents"],
+    ["rules", "Commission Rules"],
+    ["history", "Commission History"],
+  ];
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Commission</h2>
+        <div className="flex gap-2 flex-wrap">
+          {tabs.map(([id, label]) => (
+            <Btn key={id} variant={tab === id ? "primary" : "ghost"} small onClick={() => setTab(id)}>{label}</Btn>
+          ))}
+        </div>
+      </div>
+
+      {tab === "dashboard" && (
+        <div>
+          <CommissionDashboardCards transactions={transactions} />
+          <div className="bg-white border border-slate-200 overflow-x-auto">
+            <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Recent Commission Transactions</div>
+            <table className="w-full text-sm">
+              <tbody>
+                {[...transactions].sort((a, b) => new Date(b.invoiceDate) - new Date(a.invoiceDate)).slice(0, 8).map((tx) => (
+                  <tr key={tx.id} className="border-t border-slate-100">
+                    <td className="px-4 py-2 font-bold text-blue-700">{tx.invoiceNumber}</td>
+                    <td className="px-4 py-2">{tx.agentName}</td>
+                    <td className="px-4 py-2 text-slate-500">{fmtDate(tx.invoiceDate)}</td>
+                    <td className="px-4 py-2 text-right font-bold">{fmtMoney(tx.commissionAmount)}</td>
+                    <td className="px-4 py-2"><span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${COMMISSION_STATUS_TONE[tx.status] || "bg-slate-100 text-slate-500"}`}>{tStatus(tx.status)}</span></td>
+                  </tr>
+                ))}
+                {transactions.length === 0 && <tr><td className="px-4 py-6 text-center text-slate-400">Koi commission transaction nahi.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "agents" && (
+        <CommissionAgentsPage
+          agents={agents} transactions={transactions} payments={payments} currentUser={currentUser}
+          onCreateAgent={onCreateAgent} onUpdateAgent={onUpdateAgent} onToggleAgentStatus={onToggleAgentStatus}
+          onOpenPay={handleOpenPay}
+        />
+      )}
+
+      {tab === "rules" && (
+        <CommissionRulesPage agents={agents} products={products} rules={rules} currentUser={currentUser} onCreateRule={onCreateRule} onUpdateRule={onUpdateRule} />
+      )}
+
+      {tab === "history" && (
+        <CommissionHistoryPage
+          agents={agents} transactions={transactions} invoices={invoices} currentUser={currentUser}
+          onView={(tx) => setViewingTx(tx)}
+          onApprove={onApproveTransaction}
+          onOpenPay={handleOpenPay}
+          onCancel={onCancelTransaction}
+        />
+      )}
+
+      {viewingTx && <CommissionTransactionDetail transaction={viewingTx} onClose={() => setViewingTx(null)} />}
+
+      {payModal && (
+        <Modal title="Pay Commission" onClose={() => setPayModal(null)}>
+          <CommissionPaymentForm
+            agent={payModal.agent}
+            transaction={payModal.transaction}
+            remainingTotal={payModal.transaction ? null : computeCommissionSummaryForAgent(payModal.agent.id, transactions, payments).remaining}
+            onCancel={() => setPayModal(null)}
+            onSave={handlePaySubmit}
+          />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Bookings ---------------- */
+
+/* ============================================================
+   ADVANCE BOOKING UPGRADE v2
+   ------------------------------------------------------------
+   Works inside the existing architecture — no new tables, no new
+   kv keys. Everything is stored in the keys the ERP already uses:
+
+   ct-bookings  (booking record — new fields are additive)
+     v: 2                      new-style booking (older ones have no v)
+     qty, rate, unit           booked qty + CURRENT locked rate
+     originalRate              rate agreed on the booking date
+     expiryDate                booking date + 1 month (existing rule)
+     terms, notes
+     rateHistory[]             { oldRate, newRate, reason, by, at }
+     renewals[]                { from, to, reason, by, at }
+     history[]                 { action, details, by, at }
+     status                    stored ONLY as "Booked" or "Cancelled";
+                               Partially Delivered / Completed / Expired
+                               are derived from real invoices + dates.
+     legacyAdvancePosted       older bookings: advance posted to ledger
+
+   ct-payments  (same records the Payments page uses)
+     advance receipt  -> { ...payment, bookingId, bookingCode }
+                         ledger: CREDIT ("Booking Advance")
+     advance refund   -> { ...payment, kind: "Refund", bookingId }
+                         ledger: DEBIT  ("Booking Refund")
+
+   ct-invoices  (delivery = an invoice converted from the booking)
+     fromBookingId, bookingRef (already existed)
+     bookingQty                qty delivered against the booking
+     bookingRate               rate used for that delivery
+     advanceApplied            booking advance settled on this invoice
+
+   Accounting rule (no double counting): an advance is credited to the
+   customer ledger ONCE, when it is received. When it is applied to a
+   delivery invoice, the invoice still debits its full total; the
+   "advance applied" only settles that invoice's own Balance Due /
+   status. It is never posted as a second payment.
+
+   Delivered qty, unused advance and booking status are always
+   recomputed from stored invoices/payments, so cancelling or editing
+   a delivery invoice automatically restores the booking.
+   ============================================================ */
+
+const BOOKING_EXPIRY_WARN_DAYS = 7;
+const BOOKING_EPS = 0.0005;
+const BOOKING_PAYMENT_METHODS = ["Cash", "Bank Transfer", "Cheque", "Easypaisa/JazzCash"];
+const BOOKING_STATUS_LIST = ["Booked", "Partially Delivered", "Completed", "Cancelled", "Expired"];
+const BOOKING_STATUS_TONE = {
+  Booked: "bg-blue-100 text-blue-700",
+  "Partially Delivered": "bg-amber-100 text-amber-700",
+  Completed: "bg-emerald-100 text-emerald-700",
+  Cancelled: "bg-slate-200 text-slate-600",
+  Expired: "bg-red-100 text-red-700",
+};
+const DEFAULT_BOOKING_TERMS = [
+  "1. The locked rate is valid only until the expiry date shown on this receipt.",
+  "2. Quantity not collected by the expiry date is supplied at the market rate unless the booking is renewed.",
+  "3. The advance is adjusted against delivery invoices. Any unused advance can be refunded or adjusted on request.",
+  "4. Please bring this receipt (or its reference number) for every delivery.",
+].join("\n");
+
+// Urdu labels for the new booking screens. Only ADDED to the existing
+// dictionary when a key is not already there, so no existing wording changes.
+const BOOKING_URDU = {
+  "Advance Booking Dashboard": "پیشگی بکنگ ڈیش بورڈ",
+  "Booking Reports": "بکنگ رپورٹس",
+  "Active Bookings": "فعال بکنگز",
+  "Total Booked Value": "کل بکنگ مالیت",
+  "Total Advance Received": "کل موصول شدہ پیشگی",
+  "Unused Advance": "غیر استعمال شدہ پیشگی",
+  "Unused Advance Balance": "غیر استعمال شدہ پیشگی بیلنس",
+  "Outstanding Booking Value": "بقایا بکنگ مالیت",
+  "Pending Delivery Qty": "زیرِ التوا ڈیلیوری مقدار",
+  "Expiring Soon": "جلد میعاد ختم",
+  "Expired Bookings": "میعاد ختم بکنگز",
+  "Completed Bookings": "مکمل بکنگز",
+  "Cancelled Bookings": "منسوخ بکنگز",
+  "Booking Ref": "بکنگ نمبر",
+  "Booked Qty": "بک شدہ مقدار",
+  "Delivered": "ڈیلیور شدہ",
+  "Delivered Qty": "ڈیلیور شدہ مقدار",
+  "Remaining Qty": "باقی مقدار",
+  "Booking Value": "بکنگ مالیت",
+  "Advance Received": "موصول شدہ پیشگی",
+  "Advance Applied": "لاگو شدہ پیشگی",
+  "Advance Applied (Rs)": "لاگو شدہ پیشگی (روپے)",
+  "Refunded": "واپس شدہ رقم",
+  "Remaining Amount": "باقی رقم",
+  "Current Product Rate": "موجودہ ریٹ",
+  "Delivery History": "ڈیلیوری ہسٹری",
+  "Advance Payments": "پیشگی ادائیگیاں",
+  "Refund History": "ریفنڈ ہسٹری",
+  "Rate History": "ریٹ ہسٹری",
+  "Renewal History": "تجدید ہسٹری",
+  "Booking History": "بکنگ ہسٹری",
+  "Receive Advance": "پیشگی وصول کریں",
+  "Edit Advance": "پیشگی میں ترمیم",
+  "Refund Advance": "پیشگی واپس کریں",
+  "Cancel Booking": "بکنگ منسوخ کریں",
+  "Renew Booking": "بکنگ کی تجدید کریں",
+  "Change Rate": "ریٹ تبدیل کریں",
+  "Edit Notes / Terms": "نوٹس / شرائط میں ترمیم",
+  "Print Receipt": "رسید پرنٹ کریں",
+  "Print Delivery History": "ڈیلیوری ہسٹری پرنٹ کریں",
+  "Advance Booking Receipt": "پیشگی بکنگ رسید",
+  "Booking Advance Receipt": "بکنگ پیشگی رسید",
+  "Terms & Conditions": "شرائط و ضوابط",
+  "Authorized Signature": "مجاز دستخط",
+  "Customer Signature": "گاہک کے دستخط",
+  "Save Advance Booking": "پیشگی بکنگ محفوظ کریں",
+  "Delivery Against Booking": "بکنگ کے مقابل ڈیلیوری",
+  "Available To Deliver": "ڈیلیوری کے لیے دستیاب",
+  "Delivering Now": "اب ڈیلیوری",
+  "Apply Max": "زیادہ سے زیادہ لاگو کریں",
+  "Booking Advance": "بکنگ پیشگی",
+  "Booking Refund": "بکنگ ریفنڈ",
+  "Refund": "ریفنڈ",
+  "Refund Amount (Rs)": "ریفنڈ رقم (روپے)",
+  "Refund Method": "ریفنڈ کا طریقہ",
+  "Refundable Balance": "قابلِ واپسی بیلنس",
+  "Cancellation Reason": "منسوخی کی وجہ",
+  "New Rate (Rs/unit)": "نیا ریٹ (روپے/یونٹ)",
+  "New Expiry Date": "نئی میعاد کی تاریخ",
+  "Terms": "شرائط",
+  "Booking Register": "بکنگ رجسٹر",
+  "Customer-wise Bookings": "بلحاظ گاہک بکنگز",
+  "Product-wise Bookings": "بلحاظ مصنوعہ بکنگز",
+  "Advance Collection": "پیشگی وصولی",
+  "Unused Advance Report": "غیر استعمال شدہ پیشگی رپورٹ",
+  "Pending Delivery": "زیرِ التوا ڈیلیوری",
+  "Expiry Report": "میعاد رپورٹ",
+  "Cancellation & Refund": "منسوخی اور ریفنڈ",
+  "Booking Date From": "بکنگ تاریخ سے",
+  "Booking Date To": "بکنگ تاریخ تک",
+  "Expiry From": "میعاد سے",
+  "Expiry To": "میعاد تک",
+  "All Products": "تمام مصنوعات",
+  "All Branches": "تمام برانچز",
+  "Days Left": "باقی دن",
+  "Post Old Advance To Ledger": "پرانی پیشگی لیجر میں درج کریں",
+};
+Object.entries(BOOKING_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
+
+/* ---------------- Booking: pure helpers ---------------- */
+
+function bookingDaysUntil(dateStr) {
+  if (!dateStr) return null;
+  const today = parseDateValue(todayISO());
+  const target = parseDateValue(dateStr);
+  if (isNaN(target)) return null;
+  return Math.round((target - today) / 86400000);
+}
+
+function bookingLinkedInvoices(booking, invoices, excludeInvoiceId) {
+  return (invoices || []).filter((i) =>
+    i.fromBookingId === booking.id && i.bookingQty != null && !isInvoiceCancelled(i) && i.id !== excludeInvoiceId
+  );
+}
+
+function bookingAdvanceEntries(booking, payments) {
+  return (payments || []).filter((p) => p.bookingId === booking.id && p.kind !== "Refund");
+}
+
+function bookingRefundEntries(booking, payments) {
+  return (payments || []).filter((p) => p.bookingId === booking.id && p.kind === "Refund");
+}
+
+// Single source of truth for every booking number shown anywhere.
+// opts.excludeInvoiceId: leave one invoice out (used while editing it).
+function computeBookingState(booking, invoices, payments, opts = {}) {
+  const b = booking || {};
+  const isV2 = b.v === 2;
+  const bookedQty = roundQty(Number(b.qty) || 0);
+  const rate = roundMoney(Number(b.rate) || 0);
+
+  const deliveries = bookingLinkedInvoices(b, invoices, opts.excludeInvoiceId)
+    .map((i) => {
+      const qty = roundQty(Number(i.bookingQty) || 0);
+      const r = roundMoney(i.bookingRate != null ? Number(i.bookingRate) : rate);
+      return {
+        invoiceId: i.id, invoiceNumber: i.number, date: i.date, qty, rate: r,
+        amount: roundMoney(qty * r), advanceApplied: roundMoney(Number(i.advanceApplied) || 0),
+        invoiceTotal: Number(i.total) || 0, paymentReceived: Number(i.paymentReceived) || 0,
+      };
+    })
+    .sort((x, y) => parseDateValue(x.date) - parseDateValue(y.date));
+
+  // Older bookings were marked "Completed" by hand when converted (the old
+  // flow always invoiced the full quantity) — keep them closed.
+  const legacyClosed = !isV2 && b.status === "Completed";
+  let deliveredQty = roundQty(deliveries.reduce((s, d) => s + d.qty, 0));
+  if (legacyClosed) deliveredQty = Math.max(deliveredQty, bookedQty);
+  const remainingQty = roundQty(Math.max(0, bookedQty - deliveredQty));
+  const deliveredAmount = legacyClosed
+    ? roundMoney(bookedQty * rate)
+    : roundMoney(deliveries.reduce((s, d) => s + d.amount, 0));
+  const bookingValue = roundMoney(deliveredAmount + remainingQty * rate);
+
+  const advancePayments = bookingAdvanceEntries(b, payments).sort((x, y) => parseDateValue(x.date) - parseDateValue(y.date));
+  const refunds = bookingRefundEntries(b, payments).sort((x, y) => parseDateValue(x.date) - parseDateValue(y.date));
+  const advancePosted = roundMoney(advancePayments.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const refunded = roundMoney(refunds.reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  // Older bookings stored the advance as a plain number that was never
+  // posted to the ledger. It is shown, but cannot be applied/refunded
+  // until an admin posts it (see "Post Old Advance To Ledger").
+  const legacyAdvance = !isV2 && !b.legacyAdvancePosted ? roundMoney(Number(b.advanceAmount) || 0) : 0;
+  const advanceApplied = roundMoney(deliveries.reduce((s, d) => s + d.advanceApplied, 0));
+  const unusedAdvance = roundMoney(advancePosted - advanceApplied - refunded);
+  const netAdvance = roundMoney(advancePosted - refunded);
+  const advanceReceived = roundMoney(advancePosted + legacyAdvance);
+
+  const isCancelled = b.status === "Cancelled";
+  const daysToExpiry = bookingDaysUntil(b.expiryDate);
+  const expired = daysToExpiry != null && daysToExpiry < 0;
+  let status;
+  if (isCancelled) status = "Cancelled";
+  else if (bookedQty > 0 && remainingQty <= BOOKING_EPS) status = "Completed";
+  else if (expired) status = "Expired";
+  else if (deliveredQty > 0) status = "Partially Delivered";
+  else status = "Booked";
+  const isOpen = status === "Booked" || status === "Partially Delivered";
+  const expiringSoon = isOpen && daysToExpiry != null && daysToExpiry <= BOOKING_EXPIRY_WARN_DAYS;
+  const pendingQty = isCancelled ? 0 : remainingQty;
+  const remainingAmount = isCancelled ? 0 : roundMoney(Math.max(0, bookingValue - netAdvance - legacyAdvance));
+  const outstandingValue = isCancelled ? 0 : roundMoney(Math.max(0, pendingQty * rate - Math.max(0, unusedAdvance) - legacyAdvance));
+
+  return {
+    isV2, bookedQty, rate, deliveries, deliveredQty, remainingQty, pendingQty, deliveredAmount, bookingValue,
+    advancePayments, refunds, advancePosted, refunded, legacyAdvance, advanceApplied, unusedAdvance, netAdvance,
+    advanceReceived, remainingAmount, outstandingValue, status, isOpen, isCancelled, expired, expiringSoon,
+    daysToExpiry, legacyClosed,
+  };
+}
+
+// Re-checked by the App right before an invoice linked to a booking is saved,
+// against the latest stored data. Returns "" when valid, else a message.
+function validateBookingInvoice(inv, original, bookings, invoices, payments) {
+  if (!inv || !inv.fromBookingId || inv.bookingQty == null) return "";
+  const booking = (bookings || []).find((b) => b.id === inv.fromBookingId);
+  if (!booking) return "Linked booking was not found. Please refresh and try again.";
+  if (inv.customerId !== booking.customerId) return `This delivery must be invoiced to the booking's customer (${booking.customerName}).`;
+  const st = computeBookingState(booking, invoices, payments, { excludeInvoiceId: inv.id });
+  if (!original) {
+    if (st.status === "Cancelled") return `Booking ${booking.code} is cancelled.`;
+    if (st.status === "Completed") return `Booking ${booking.code} is already fully delivered.`;
+    if (st.status === "Expired") return `Booking ${booking.code} has expired. An admin must renew it before delivery at the locked rate.`;
+  }
+  const qty = roundQty(Number(inv.bookingQty) || 0);
+  if (qty <= 0) return "Delivery quantity against the booking must be more than 0.";
+  if (qty > st.remainingQty + BOOKING_EPS) return `Only ${fmtQty(st.remainingQty)} ${booking.unit || ""} remain undelivered on booking ${booking.code}.`;
+  const applied = roundMoney(Number(inv.advanceApplied) || 0);
+  if (applied < 0) return "Advance applied cannot be negative.";
+  if (applied > Math.max(0, st.unusedAdvance) + 0.005) return `Only ${fmtMoney(Math.max(0, st.unusedAdvance))} unused advance is available on booking ${booking.code}.`;
+  const payable = roundMoney((Number(inv.total) || 0) - (Number(inv.paymentReceived) || 0));
+  if (applied > payable + 0.005) return "Advance applied cannot be more than the invoice amount still payable.";
+  return "";
+}
+
+// "70 Bag · 5 Ton" — quantities are never added across different units.
+function bookingQtyByUnit(list) {
+  const map = {};
+  list.forEach(({ qty, unit }) => {
+    if (!(qty > BOOKING_EPS)) return;
+    const key = unit || "-";
+    map[key] = roundQty((map[key] || 0) + qty);
+  });
+  const parts = Object.entries(map).map(([u, q]) => `${fmtQty(q)} ${u === "-" ? "" : u}`.trim());
+  return parts.length ? parts.join(" · ") : "0";
+}
+
+function bookingCsvDownload(filename, headers, rows) {
+  const all = [headers, ...rows];
+  const csv = all.map((r) => r.map((v) => `"${String(v ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+  const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function bookingFormatCell(type, v) {
+  if (type === "money") return fmtMoney(v);
+  if (type === "qty") return fmtQty(v);
+  if (type === "date") return v ? fmtDate(v) : "-";
+  return v == null || v === "" ? "-" : String(v);
+}
+
+/* ---------------- Booking: small UI pieces ---------------- */
+
+function BookingStatusBadge({ status }) {
+  return (
+    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 whitespace-nowrap ${BOOKING_STATUS_TONE[status] || "bg-slate-100 text-slate-500"}`}>{tStatus(status)}</span>
+  );
+}
+
+function BookingPrintHeader({ settings, title }) {
+  return (
+    <div>
+      <div className="flex justify-between items-start pb-3 border-b-4 border-slate-900 mb-3">
+        <div className="flex items-center gap-3">
+          {settings?.logoUrl ? (
+            <img src={settings.logoUrl} alt="Logo" className="w-14 h-14 object-contain" />
+          ) : (
+            <div className="w-14 h-14 bg-slate-900 flex items-center justify-center font-black text-xl text-white">CT</div>
+          )}
+          <div>
+            <div className="text-xl font-black uppercase tracking-tight text-slate-900">{settings?.companyName}</div>
+            <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">Construction Materials Supplier</div>
+          </div>
+        </div>
+        <div className="text-right text-xs text-slate-500">
+          <div>{settings?.companyAddress}</div>
+          {settings?.companyPhone && <div>Ph: {settings.companyPhone}</div>}
+        </div>
+      </div>
+      {title && <div className="bg-slate-900 text-white text-center text-sm font-black uppercase tracking-wide py-1 mb-3">{t(title)}</div>}
+    </div>
+  );
+}
+
+function BookingKV({ label, value, strong, tone }) {
+  return (
+    <div className="flex justify-between gap-3">
+      <span className="text-slate-500">{t(label)}</span>
+      <span className={`${strong ? "font-black" : "font-bold"} text-right ${tone || ""}`}>{value}</span>
+    </div>
+  );
+}
+
+function BookingReceiptBody({ booking, state, settings, customer }) {
+  const terms = (booking.terms || DEFAULT_BOOKING_TERMS).split("\n").filter((l) => l.trim());
+  const balanceLabel = state.remainingAmount > 0.005 ? "Balance Due" : "Fully Paid in Advance";
+  return (
+    <div className="bg-white text-slate-900 text-sm" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <BookingPrintHeader settings={settings} title="Advance Booking Receipt" />
+      <div className="flex justify-between items-start gap-4 mb-3">
+        <div>
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400">Customer</div>
+          <div className="font-bold">{booking.customerName}</div>
+          {(customer?.phone || booking.customerPhone) && <div className="text-slate-500">{customer?.phone || booking.customerPhone}</div>}
+          {customer?.address && <div className="text-slate-500">{customer.address}</div>}
+        </div>
+        <div className="text-right text-xs">
+          <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{booking.code}</div>
+          <div className="mt-1 text-slate-500">Booking Date: <span className="font-bold text-slate-700">{fmtDate(booking.date)}</span></div>
+          <div className="text-slate-500">Valid Till: <span className="font-bold text-slate-700">{fmtDate(booking.expiryDate)}</span></div>
+          <div className="mt-1"><BookingStatusBadge status={state.status} /></div>
+        </div>
+      </div>
+      <table className="w-full text-sm mb-3">
+        <thead>
+          <tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
+            <th className="py-2 px-2 text-left">Product</th>
+            <th className="py-2 px-2 text-right">Booked Qty</th>
+            <th className="py-2 px-2 text-right">Unit</th>
+            <th className="py-2 px-2 text-right">Locked Rate</th>
+            <th className="py-2 px-2 text-right">Booking Value</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr className="border-b border-slate-200">
+            <td className="py-2 px-2 font-bold">{booking.productName}</td>
+            <td className="py-2 px-2 text-right">{fmtQty(state.bookedQty)}</td>
+            <td className="py-2 px-2 text-right">{booking.unit || "-"}</td>
+            <td className="py-2 px-2 text-right">{fmtMoney(state.rate)}</td>
+            <td className="py-2 px-2 text-right font-bold">{fmtMoney(state.bookingValue)}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div className="flex justify-end mb-3">
+        <div className="w-80 space-y-1">
+          <BookingKV label="Booking Value" value={fmtMoney(state.bookingValue)} />
+          <BookingKV label="Advance Received" value={fmtMoney(state.advanceReceived)} tone="text-emerald-700" />
+          {state.refunded > 0 && <BookingKV label="Refunded" value={`-${fmtMoney(state.refunded)}`} />}
+          {state.deliveredQty > 0 && <BookingKV label="Delivered Qty" value={`${fmtQty(state.deliveredQty)} ${booking.unit || ""}`} />}
+          <BookingKV label="Remaining Qty" value={`${fmtQty(state.remainingQty)} ${booking.unit || ""}`} />
+          <div className="flex justify-between border-t-2 border-slate-900 pt-1.5 mt-1">
+            <span className="font-black uppercase text-blue-700">{t(balanceLabel)}</span>
+            <span className="font-black text-lg text-blue-700">{fmtMoney(state.remainingAmount)}</span>
+          </div>
+        </div>
+      </div>
+      {booking.notes && <div className="text-xs text-slate-600 mb-2"><span className="font-bold">Notes:</span> {booking.notes}</div>}
+      <div className="border border-slate-300 p-2 text-[11px] text-slate-600 mb-8">
+        <div className="font-black uppercase text-slate-700 mb-1">{t("Terms & Conditions")}</div>
+        {terms.map((line, idx) => <div key={idx}>{line}</div>)}
+      </div>
+      <div className="flex justify-between gap-8 text-xs pt-6">
+        <div className="flex-1 border-t border-slate-900 pt-1 text-center">{t("Customer Signature")}</div>
+        <div className="flex-1 border-t border-slate-900 pt-1 text-center">{t("Authorized Signature")}</div>
+      </div>
+    </div>
+  );
+}
+
+function BookingAdvanceReceiptBody({ booking, state, payment, settings, customer }) {
+  const isRefund = payment.kind === "Refund";
+  return (
+    <div className="bg-white text-slate-900 text-sm max-w-md mx-auto" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <BookingPrintHeader settings={settings} title={isRefund ? "Booking Refund" : "Booking Advance Receipt"} />
+      <div className="space-y-1">
+        <BookingKV label="Receipt No." value={paymentReceiptNo(payment)} />
+        <BookingKV label="Booking Ref" value={booking.code} />
+        <BookingKV label="Date" value={fmtDate(payment.date)} />
+        <BookingKV label="Customer" value={booking.customerName} />
+        {(customer?.phone || booking.customerPhone) && <BookingKV label="Phone" value={customer?.phone || booking.customerPhone} />}
+        <BookingKV label="Payment Method" value={payment.method || "Cash"} />
+        <div className="border-t-2 border-slate-900 pt-1.5 mt-1">
+          <BookingKV label={isRefund ? "Refund" : "Amount"} value={fmtMoney(payment.amount)} strong tone="text-blue-700" />
+        </div>
+        <div className="border-t border-slate-200 pt-1.5 mt-1 text-xs space-y-1">
+          <BookingKV label="Booking Value" value={fmtMoney(state.bookingValue)} />
+          <BookingKV label="Advance Received" value={fmtMoney(state.advanceReceived)} />
+          <BookingKV label="Unused Advance" value={fmtMoney(Math.max(0, state.unusedAdvance))} />
+          <BookingKV label={state.remainingAmount > 0.005 ? "Balance Due" : "Fully Paid in Advance"} value={fmtMoney(state.remainingAmount)} />
+        </div>
+        {payment.note && <div className="text-xs text-slate-500 pt-1">{payment.note}</div>}
+      </div>
+      <div className="flex justify-between gap-8 text-xs pt-12">
+        <div className="flex-1 border-t border-slate-900 pt-1 text-center">{t("Customer Signature")}</div>
+        <div className="flex-1 border-t border-slate-900 pt-1 text-center">{t("Authorized Signature")}</div>
+      </div>
+    </div>
+  );
+}
+
+function BookingDeliveriesPrintBody({ booking, state, settings }) {
+  return (
+    <div className="bg-white text-slate-900 text-sm">
+      <BookingPrintHeader settings={settings} title="Delivery History" />
+      <div className="flex justify-between text-xs mb-3">
+        <div><span className="font-black">{booking.code}</span> · {booking.customerName} · {booking.productName}</div>
+        <div>Booked {fmtQty(state.bookedQty)} · Delivered {fmtQty(state.deliveredQty)} · Remaining {fmtQty(state.remainingQty)} {booking.unit}</div>
+      </div>
+      <BookingDeliveriesTable deliveries={state.deliveries} unit={booking.unit} />
+    </div>
+  );
+}
+
+function BookingDeliveriesTable({ deliveries, unit, onOpenInvoice }) {
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+          <th className="px-3 py-2">Date</th><th className="px-3 py-2">Invoice #</th>
+          <th className="px-3 py-2 text-right">Qty</th><th className="px-3 py-2 text-right">Rate</th>
+          <th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2 text-right">Advance Applied</th>
+          <th className="px-3 py-2 text-right">Invoice Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {deliveries.length === 0 && <tr><td colSpan={7} className="px-3 py-4 text-center text-slate-400">No deliveries yet.</td></tr>}
+        {deliveries.map((d) => (
+          <tr key={d.invoiceId} className="border-t border-slate-100">
+            <td className="px-3 py-2 text-slate-500">{fmtDate(d.date)}</td>
+            <td className="px-3 py-2 font-bold text-blue-700">
+              {onOpenInvoice ? <button type="button" className="hover:underline" onClick={() => onOpenInvoice(d.invoiceId)}>{d.invoiceNumber}</button> : d.invoiceNumber}
+            </td>
+            <td className="px-3 py-2 text-right">{fmtQty(d.qty)} {unit}</td>
+            <td className="px-3 py-2 text-right">{fmtMoney(d.rate)}</td>
+            <td className="px-3 py-2 text-right font-bold">{fmtMoney(d.amount)}</td>
+            <td className="px-3 py-2 text-right text-emerald-600">{d.advanceApplied ? fmtMoney(d.advanceApplied) : "-"}</td>
+            <td className="px-3 py-2 text-right">{fmtMoney(d.invoiceTotal)}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+function BookingReportPrintBody({ settings, title, period, columns, rows, totals }) {
+  return (
+    <div className="bg-white text-slate-900 text-xs">
+      <BookingPrintHeader settings={settings} title={title} />
+      {period && <div className="mb-2 text-slate-500">{period}</div>}
+      <BookingReportTable columns={columns} rows={rows} totals={totals} />
+    </div>
+  );
+}
+
+function BookingReportTable({ columns, rows, totals }) {
+  return (
+    <table className="w-full text-sm">
+      <thead>
+        <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+          {columns.map((c) => (
+            <th key={c.label} className={`px-3 py-2 ${c.type === "money" || c.type === "qty" || c.type === "num" ? "text-right" : ""}`}>{t(c.label)}</th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {rows.length === 0 && <tr><td colSpan={columns.length} className="px-3 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+        {rows.map((r, idx) => (
+          <tr key={idx} className="border-t border-slate-100">
+            {columns.map((c, ci) => (
+              <td key={ci} className={`px-3 py-2 ${c.type === "money" || c.type === "qty" || c.type === "num" ? "text-right" : ""} ${ci === 0 ? "font-bold" : ""}`}>
+                {c.type === "status" ? <BookingStatusBadge status={r[ci]} /> : bookingFormatCell(c.type, r[ci])}
+              </td>
+            ))}
+          </tr>
+        ))}
+        {rows.length > 0 && totals && (
+          <tr className="border-t-2 border-slate-900 font-black">
+            {columns.map((c, ci) => (
+              <td key={ci} className={`px-3 py-2 ${c.type === "money" ? "text-right" : ""}`}>
+                {ci === 0 ? t("Total") : c.type === "money" ? fmtMoney(totals[ci] || 0) : ""}
+              </td>
+            ))}
+          </tr>
+        )}
+      </tbody>
+    </table>
+  );
+}
+
+/* ---------------- Booking panel inside the existing Invoice form ---------------- */
+
+function InvoiceBookingPanel({ booking, state, products, advanceApplied, setAdvanceApplied, maxAdvance, bookingLineQty }) {
+  const product = (products || []).find((p) => p.id === booking.productId);
+  const over = bookingLineQty > state.remainingQty + BOOKING_EPS;
+  const applied = roundMoney(Number(advanceApplied) || 0);
+  const cell = (label, value, tone) => (
+    <div><span className="text-slate-500">{t(label)}:</span> <span className={`font-bold ${tone || ""}`}>{value}</span></div>
+  );
+  return (
+    <div className="bg-amber-50 border border-amber-200 p-3 mb-3 text-sm" data-booking="invoice-panel">
+      <div className="text-[11px] uppercase tracking-wide font-black text-amber-700 mb-2">{t("Delivery Against Booking")} · {booking.code}</div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1 text-xs">
+        {cell("Booked Qty", `${fmtQty(state.bookedQty)} ${booking.unit || ""}`)}
+        {cell("Delivered", `${fmtQty(state.deliveredQty)} ${booking.unit || ""}`)}
+        {cell("Available To Deliver", `${fmtQty(state.remainingQty)} ${booking.unit || ""}`)}
+        {cell("Delivering Now", `${fmtQty(bookingLineQty)} ${booking.unit || ""}`, over ? "text-red-600" : "")}
+        {cell("Locked Rate", fmtMoney(state.rate))}
+        {cell("Current Product Rate", product ? fmtMoney(product.price) : "-")}
+        {cell("Unused Advance", fmtMoney(Math.max(0, state.unusedAdvance)), "text-emerald-700")}
+        {cell("Valid Till", fmtDate(booking.expiryDate), state.expired ? "text-red-600" : "")}
+      </div>
+      {over && (
+        <div className="text-xs font-bold text-red-600 mt-2">
+          Only {fmtQty(state.remainingQty)} {booking.unit} remain on this booking. Reduce the booking line quantity (or add the extra as a separate item at the current rate).
+        </div>
+      )}
+      {state.legacyAdvance > 0 && (
+        <div className="text-xs font-bold text-amber-700 mt-2">
+          This older booking has {fmtMoney(state.legacyAdvance)} advance that was never posted to the ledger. An admin can post it from the booking screen; until then it cannot be applied here.
+        </div>
+      )}
+      <div className="flex items-end gap-2 mt-3 flex-wrap">
+        <label className="block">
+          <span className="block text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Advance Applied (Rs)")}</span>
+          <input type="number" step="any" min="0" max={maxAdvance} className={`${inputCls} w-40`} value={advanceApplied} onChange={(e) => setAdvanceApplied(e.target.value)} />
+        </label>
+        <Btn small variant="ghost" onClick={() => setAdvanceApplied(maxAdvance)}>Apply Max</Btn>
+        <div className="text-xs text-slate-500">Max: <span className="font-bold">{fmtMoney(maxAdvance)}</span></div>
+      </div>
+      {applied > maxAdvance + 0.005 && <div className="text-xs font-bold text-red-600 mt-1">Advance applied is more than the allowed maximum ({fmtMoney(maxAdvance)}).</div>}
+      <div className="text-[11px] text-slate-500 mt-2">
+        The advance was already credited to the customer's ledger when it was received. Applying it here only settles this invoice — it is not counted a second time.
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Booking: create form ---------------- */
+
+function BookingCreateForm({ customers, products, onSave, onCancel }) {
+  const firstProduct = products[0];
+  const [paymentId] = useState(() => uid("pay"));
+  const [custSearch, setCustSearch] = useState("");
+  const [form, setForm] = useState({
+    customerId: customers[0]?.id || "",
+    productId: firstProduct?.id || "",
+    customName: "",
+    unit: firstProduct?.unit || "Bag",
+    qty: "",
+    rate: firstProduct ? String(firstProduct.price ?? "") : "",
+    date: todayISO(),
+    advanceAmount: "",
+    advanceMethod: "Cash",
+    notes: "",
+    terms: DEFAULT_BOOKING_TERMS,
+  });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const product = products.find((p) => p.id === form.productId);
+  const selectedCustomer = customers.find((c) => c.id === form.customerId);
+  const qs = custSearch.trim().toLowerCase();
+  const filteredCustomers = customers.filter((c) => !qs || c.name.toLowerCase().includes(qs) || (c.phone || "").includes(qs) || c.id === form.customerId);
+  const qty = roundQty(Number(form.qty) || 0);
+  const rate = roundMoney(Number(form.rate) || 0);
+  const advance = roundMoney(Number(form.advanceAmount) || 0);
+  const value = roundMoney(qty * rate);
+  const remaining = roundMoney(value - advance);
+
+  function pickProduct(productId) {
+    const p = products.find((x) => x.id === productId);
+    setForm((f) => ({ ...f, productId, unit: p ? p.unit : f.unit, rate: p ? String(p.price ?? "") : f.rate }));
+  }
+
+  function submit() {
+    if (busy) return;
+    if (!selectedCustomer) { setError("Customer select karein."); return; }
+    const productName = product ? product.name : form.customName.trim();
+    if (!productName) { setError("Select a product or enter the custom item name."); return; }
+    if (!(qty > 0)) { setError("Booked quantity must be more than 0."); return; }
+    if (!(rate > 0)) { setError("Locked rate must be more than 0."); return; }
+    if (advance < 0) { setError("Advance cannot be negative."); return; }
+    if (advance > value + 0.005) { setError("Advance cannot be more than the booking value."); return; }
+    if (!form.date) { setError("Booking date is required."); return; }
+    setError("");
+    setBusy(true);
+    const ok = onSave({
+      customerId: selectedCustomer.id, productId: product ? product.id : "", productName,
+      unit: String(form.unit || "").trim(), qty, rate, date: form.date,
+      advanceAmount: advance, advanceMethod: form.advanceMethod, advancePaymentId: paymentId,
+      notes: form.notes.trim(), terms: form.terms.trim(),
+    });
+    if (!ok) setBusy(false);
+  }
+
+  return (
+    <div>
+      <Field label="Customer">
+        <input className={`${inputCls} mb-1`} placeholder="Search customer..." value={custSearch} onChange={(e) => setCustSearch(e.target.value)} />
+        <select className={inputCls} value={form.customerId} onChange={(e) => setForm({ ...form, customerId: e.target.value })}>
+          <option value="">Select Customer</option>
+          {filteredCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}{c.phone ? ` — ${c.phone}` : ""}</option>)}
+        </select>
+      </Field>
+      {selectedCustomer && (
+        <div className="text-xs text-slate-500 mb-3">
+          {selectedCustomer.phone ? `Mobile: ${selectedCustomer.phone}` : "No phone saved"}{selectedCustomer.address ? ` · ${selectedCustomer.address}` : ""}
+        </div>
+      )}
+      <Field label="Product">
+        <select className={inputCls} value={form.productId} onChange={(e) => pickProduct(e.target.value)}>
+          <option value="">Custom Item</option>
+          {products.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.unit}) — {fmtMoney(p.price)}</option>)}
+        </select>
+      </Field>
+      {!product && (
+        <Field label="Item name">
+          <input className={inputCls} value={form.customName} onChange={(e) => setForm({ ...form, customName: e.target.value })} />
+        </Field>
+      )}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="Unit">
+          <input list="unit-suggestions" className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
+        </Field>
+        <Field label="Booked Qty">
+          <input type="number" step="any" min="0" className={inputCls} value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} />
+        </Field>
+        <Field label="Locked Rate (Rs/unit)">
+          <input type="number" step="any" min="0" className={inputCls} value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} />
+        </Field>
+      </div>
+      {product && Number(form.rate) !== Number(product.price) && (
+        <div className="text-xs text-amber-700 font-bold -mt-2 mb-3">Current product rate is {fmtMoney(product.price)}; this booking will lock {fmtMoney(rate)}.</div>
+      )}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="Booking Date">
+          <input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+        </Field>
+        <Field label="Advance Received Now (Rs)">
+          <input type="number" step="any" min="0" className={inputCls} value={form.advanceAmount} onChange={(e) => setForm({ ...form, advanceAmount: e.target.value })} />
+        </Field>
+        <Field label="Payment Method">
+          <select className={inputCls} value={form.advanceMethod} onChange={(e) => setForm({ ...form, advanceMethod: e.target.value })}>
+            {BOOKING_PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="Notes">
+        <input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
+      </Field>
+      <Field label="Terms">
+        <textarea className={`${inputCls} h-24`} value={form.terms} onChange={(e) => setForm({ ...form, terms: e.target.value })} />
+      </Field>
+
+      <div className="bg-slate-50 border border-slate-200 p-3 text-sm space-y-1 mb-3">
+        <div className="flex justify-between"><span>Total Value (Qty × Rate)</span><span className="font-bold">{fmtMoney(value)}</span></div>
+        <div className="flex justify-between"><span>Advance Received</span><span className="font-bold text-emerald-600">{fmtMoney(advance)}</span></div>
+        <div className="flex justify-between border-t border-slate-300 pt-1"><span className="font-bold">{t("Remaining Amount")}</span><span className="font-black text-red-600">{fmtMoney(remaining)}</span></div>
+        <div className="text-[11px] text-slate-400 pt-1">Valid till: {fmtDate(addOneMonth(form.date || todayISO()))} — the locked rate applies until this date.</div>
+        {advance > 0 && <div className="text-[11px] text-slate-400">The advance is posted to the customer ledger as a credit and a receipt is created.</div>}
+      </div>
+
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2">
+        <Btn onClick={submit} disabled={busy}>{busy ? "Saving..." : "Save Advance Booking"}</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Booking: action dialogs ---------------- */
+
+// type: receive | editAdvance | refund | cancel | renew | rate | details
+function BookingActionForm({ type, booking, state, payment, onSubmit, onCancel }) {
+  const [opId] = useState(() => uid("pay"));
+  const [amount, setAmount] = useState(type === "editAdvance" ? String(payment?.amount ?? "") : "");
+  const [date, setDate] = useState(type === "editAdvance" ? (payment?.date || todayISO()) : todayISO());
+  const [method, setMethod] = useState(type === "editAdvance" ? (payment?.method || "Cash") : "Cash");
+  const [text, setText] = useState("");
+  const [rate, setRate] = useState(String(booking.rate ?? ""));
+  const [notes, setNotes] = useState(booking.notes || "");
+  const [terms, setTerms] = useState(booking.terms || DEFAULT_BOOKING_TERMS);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const unused = Math.max(0, state.unusedAdvance);
+  const oldAmount = Number(payment?.amount) || 0;
+  const limits = {
+    receive: { min: 0, max: state.remainingAmount },
+    editAdvance: { min: roundMoney(Math.max(0, oldAmount - unused)), max: roundMoney(oldAmount + state.remainingAmount) },
+    refund: { min: 0, max: unused },
+    cancel: { min: 0, max: unused },
+  }[type];
+  const amt = roundMoney(Number(amount) || 0);
+  const newRate = roundMoney(Number(rate) || 0);
+  const newExpiry = addOneMonth(todayISO() > (booking.expiryDate || "") ? todayISO() : booking.expiryDate);
+  const newValue = roundMoney(state.deliveredAmount + state.remainingQty * newRate);
+
+  function submit() {
+    if (busy) return;
+    let payload;
+    if (type === "receive" || type === "editAdvance" || type === "refund") {
+      if (!(amt > 0)) { setError("Amount 0 se zyada hona chahiye."); return; }
+      if (amt < limits.min - 0.005 || amt > limits.max + 0.005) { setError(`Amount must be between ${fmtMoney(limits.min)} and ${fmtMoney(limits.max)}.`); return; }
+      if (!date) { setError("Date is required."); return; }
+      if ((type === "refund" || type === "editAdvance") && !text.trim()) { setError("Reason likhna zaroori hai."); return; }
+      payload = { id: opId, amount: amt, date, method, note: text.trim(), reason: text.trim() };
+    } else if (type === "cancel") {
+      if (!text.trim()) { setError("Reason likhna zaroori hai."); return; }
+      if (amt < 0 || amt > limits.max + 0.005) { setError(`Refund cannot be more than ${fmtMoney(limits.max)}.`); return; }
+      payload = { reason: text.trim(), refundAmount: amt, refundMethod: method, refundDate: date || todayISO(), refundId: opId };
+    } else if (type === "renew") {
+      if (!text.trim()) { setError("Reason likhna zaroori hai."); return; }
+      payload = { reason: text.trim() };
+    } else if (type === "rate") {
+      if (!(newRate > 0)) { setError("Rate must be more than 0."); return; }
+      if (newRate === roundMoney(booking.rate)) { setError("New rate is the same as the current locked rate."); return; }
+      if (!text.trim()) { setError("Reason likhna zaroori hai."); return; }
+      payload = { newRate, reason: text.trim() };
+    } else if (type === "details") {
+      payload = { notes: notes.trim(), terms: terms.trim() };
+    }
+    setError("");
+    setBusy(true);
+    const ok = onSubmit(payload);
+    if (ok) onCancel(); else setBusy(false);
+  }
+
+  const showMoney = type === "receive" || type === "editAdvance" || type === "refund" || type === "cancel";
+  return (
+    <div>
+      <div className="bg-slate-50 border border-slate-200 p-3 mb-3 text-sm space-y-1">
+        <BookingKV label="Booking Ref" value={booking.code} />
+        <BookingKV label="Customer" value={booking.customerName} />
+        <BookingKV label="Booking Value" value={fmtMoney(state.bookingValue)} />
+        <BookingKV label="Advance Received" value={fmtMoney(state.advanceReceived)} />
+        <BookingKV label="Advance Applied" value={fmtMoney(state.advanceApplied)} />
+        {state.refunded > 0 && <BookingKV label="Refunded" value={fmtMoney(state.refunded)} />}
+        <BookingKV label={type === "refund" || type === "cancel" ? "Refundable Balance" : "Unused Advance"} value={fmtMoney(unused)} tone="text-emerald-700" />
+        {(type === "receive" || type === "editAdvance") && <BookingKV label="Remaining Amount" value={fmtMoney(state.remainingAmount)} tone="text-red-600" />}
+      </div>
+
+      {type === "cancel" && (
+        <div className="text-xs text-slate-600 mb-3">
+          Delivered quantity ({fmtQty(state.deliveredQty)} {booking.unit}) and its invoices stay exactly as they are. Only the undelivered {fmtQty(state.remainingQty)} {booking.unit} is cancelled.
+          {unused > 0 && " Any unused advance not refunded now stays as a credit in the customer's ledger and can be refunded later."}
+        </div>
+      )}
+      {type === "renew" && (
+        <div className="text-xs text-slate-600 mb-3">
+          Current expiry: <span className="font-bold">{fmtDate(booking.expiryDate)}</span> → {t("New Expiry Date")}: <span className="font-bold text-emerald-700">{fmtDate(newExpiry)}</span>. The locked rate ({fmtMoney(booking.rate)}) stays the same.
+        </div>
+      )}
+      {type === "rate" && (
+        <>
+          <Field label="New Rate (Rs/unit)">
+            <input type="number" step="any" min="0" className={inputCls} value={rate} onChange={(e) => setRate(e.target.value)} autoFocus />
+          </Field>
+          <div className="text-xs text-slate-600 mb-3">
+            Applies only to the undelivered {fmtQty(state.remainingQty)} {booking.unit}. Delivered invoices keep their own rate. Booking value: {fmtMoney(state.bookingValue)} → <span className="font-bold">{fmtMoney(newValue)}</span>. The original rate stays in the rate history.
+          </div>
+        </>
+      )}
+      {type === "details" && (
+        <>
+          <Field label="Notes"><input className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} /></Field>
+          <Field label="Terms"><textarea className={`${inputCls} h-28`} value={terms} onChange={(e) => setTerms(e.target.value)} /></Field>
+        </>
+      )}
+
+      {showMoney && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <Field label={type === "cancel" ? "Refund Amount (Rs)" : "Amount (Rs)"}>
+            <input type="number" step="any" min="0" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus={type !== "cancel"} placeholder={type === "cancel" ? "0" : ""} />
+          </Field>
+          <Field label="Date">
+            <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
+          </Field>
+          <Field label={type === "refund" || type === "cancel" ? "Refund Method" : "Payment Method"}>
+            <select className={inputCls} value={method} onChange={(e) => setMethod(e.target.value)}>
+              {BOOKING_PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
+              {!BOOKING_PAYMENT_METHODS.includes(method) && <option>{method}</option>}
+            </select>
+          </Field>
+        </div>
+      )}
+      {limits && type !== "cancel" && (
+        <div className="text-[11px] text-slate-400 -mt-2 mb-3">Allowed: {fmtMoney(limits.min)} – {fmtMoney(limits.max)}</div>
+      )}
+
+      {type !== "details" && (
+        <Field label={type === "receive" ? "Note (optional)" : type === "cancel" ? "Cancellation Reason" : "Reason"}>
+          <input className={inputCls} value={text} onChange={(e) => setText(e.target.value)} autoFocus={type === "cancel" || type === "renew"} />
+        </Field>
+      )}
+
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2">
+        <Btn variant={type === "cancel" || type === "refund" ? "danger" : "primary"} onClick={submit} disabled={busy}>
+          {busy ? "Saving..." : { receive: "Receive Advance", editAdvance: "Save Changes", refund: "Refund Advance", cancel: "Cancel Booking", renew: "Renew Booking", rate: "Change Rate", details: "Save" }[type]}
+        </Btn>
+        <Btn variant="ghost" onClick={onCancel}>Close</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Booking: detail view ---------------- */
+
+function BookingDetail({ booking, state, customer, settings, products, currentUser, onClose, onConvertToInvoice, onOpenInvoice, onPrint, handlers }) {
+  const [action, setAction] = useState(null); // { type, payment? }
+  const isAdmin = currentUser?.role === "admin";
+  const product = (products || []).find((p) => p.id === booking.productId);
+  const notClosed = state.status !== "Cancelled" && state.status !== "Completed";
+  const history = [...(booking.history || [])].reverse();
+
+  function printReceipt() {
+    onPrint({ title: `Booking-Receipt-${booking.code}`, node: <BookingReceiptBody booking={booking} state={state} settings={settings} customer={customer} /> });
+  }
+  function printPaymentReceipt(p) {
+    onPrint({ title: `Booking-${p.kind === "Refund" ? "Refund" : "Advance"}-${paymentReceiptNo(p)}`, node: <BookingAdvanceReceiptBody booking={booking} state={state} payment={p} settings={settings} customer={customer} /> });
+  }
+  function printDeliveries() {
+    onPrint({ title: `Booking-Deliveries-${booking.code}`, node: <BookingDeliveriesPrintBody booking={booking} state={state} settings={settings} /> });
+  }
+
+  function runAction(payload) {
+    const a = action;
+    if (!a) return false;
+    if (a.type === "receive") return handlers.onReceiveAdvance(booking.id, payload);
+    if (a.type === "editAdvance") return handlers.onEditAdvance(booking.id, a.payment.id, payload);
+    if (a.type === "refund") return handlers.onRefundAdvance(booking.id, payload);
+    if (a.type === "cancel") return handlers.onCancelBooking(booking.id, payload);
+    if (a.type === "renew") return handlers.onRenewBooking(booking.id, payload);
+    if (a.type === "rate") return handlers.onChangeBookingRate(booking.id, payload);
+    if (a.type === "details") return handlers.onUpdateBookingDetails(booking.id, payload);
+    return false;
+  }
+
+  const actionTitles = {
+    receive: "Receive Advance", editAdvance: "Edit Advance", refund: "Refund Advance", cancel: "Cancel Booking",
+    renew: "Renew Booking", rate: "Change Rate", details: "Edit Notes / Terms",
+  };
+
+  return (
+    <Modal title={`Advance Booking ${booking.code}`} onClose={onClose} wide>
+      <div className="flex justify-between items-start gap-3 flex-wrap mb-3">
+        <div>
+          <div className="font-black text-lg text-slate-900">{booking.customerName}</div>
+          <div className="text-xs text-slate-500">{booking.productName}{booking.unit ? ` (${booking.unit})` : ""} · Booked {fmtDate(booking.date)}{booking.createdBy ? ` · by ${booking.createdBy}` : ""}</div>
+        </div>
+        <BookingStatusBadge status={state.status} />
+      </div>
+
+      {state.expired && notClosed && (
+        <div className="bg-red-50 border border-red-200 text-red-700 text-xs font-bold px-3 py-2 mb-3">
+          This booking expired on {fmtDate(booking.expiryDate)}. The locked rate can no longer be used for delivery until an admin renews it. For a market-rate sale, make a normal invoice.
+        </div>
+      )}
+      {state.expiringSoon && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs font-bold px-3 py-2 mb-3">
+          Expires {state.daysToExpiry === 0 ? "today" : `in ${state.daysToExpiry} day(s)`} ({fmtDate(booking.expiryDate)}) — {fmtQty(state.remainingQty)} {booking.unit} still undelivered.
+        </div>
+      )}
+      {state.legacyAdvance > 0 && (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-xs px-3 py-2 mb-3">
+          <span className="font-bold">Older booking:</span> its advance of {fmtMoney(state.legacyAdvance)} was saved before advances were linked to the ledger, so it is not in the customer's balance yet.
+          Post it only if it was NOT already recorded on the Payments page.
+          {isAdmin && (
+            <button type="button" className="ml-2 font-bold underline" onClick={() => { if (confirm(`Post ${fmtMoney(state.legacyAdvance)} to ${booking.customerName}'s ledger as a booking advance dated ${fmtDate(booking.date)}?`)) handlers.onPostLegacyAdvance(booking.id); }}>{t("Post Old Advance To Ledger")}</button>
+          )}
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-4">
+        <Stat label="Booked Qty" value={`${fmtQty(state.bookedQty)} ${booking.unit || ""}`} />
+        <Stat label="Delivered" value={`${fmtQty(state.deliveredQty)} ${booking.unit || ""}`} accent="text-emerald-600" />
+        <Stat label="Remaining Qty" value={`${fmtQty(state.remainingQty)} ${booking.unit || ""}`} accent="text-red-600" />
+        <Stat label="Locked Rate" value={fmtMoney(state.rate)} />
+        <Stat label="Booking Value" value={fmtMoney(state.bookingValue)} />
+        <Stat label="Advance Received" value={fmtMoney(state.advanceReceived)} accent="text-emerald-600" />
+        <Stat label="Unused Advance" value={fmtMoney(Math.max(0, state.unusedAdvance))} accent="text-blue-700" />
+        <Stat label="Remaining Amount" value={fmtMoney(state.remainingAmount)} accent="text-red-600" />
+      </div>
+      <div className="text-xs text-slate-500 mb-4 flex flex-wrap gap-x-4 gap-y-1">
+        <span>Valid Till: <span className={`font-bold ${state.expired ? "text-red-600" : "text-slate-700"}`}>{fmtDate(booking.expiryDate)}</span></span>
+        <span>Current Product Rate: <span className="font-bold text-slate-700">{product ? fmtMoney(product.price) : "-"}</span></span>
+        {booking.originalRate != null && Number(booking.originalRate) !== Number(booking.rate) && <span>Original Rate: <span className="font-bold text-slate-700">{fmtMoney(booking.originalRate)}</span></span>}
+        <span>Advance Applied: <span className="font-bold text-slate-700">{fmtMoney(state.advanceApplied)}</span></span>
+        {state.refunded > 0 && <span>Refunded: <span className="font-bold text-slate-700">{fmtMoney(state.refunded)}</span></span>}
+        {booking.cancelReason && <span>Cancelled: <span className="font-bold text-slate-700">{booking.cancelReason}</span>{booking.cancelledBy ? ` (${booking.cancelledBy}, ${fmtDateTime(booking.cancelledAt)})` : ""}</span>}
+      </div>
+
+      <div className="flex gap-2 flex-wrap mb-2">
+        <Btn small onClick={printReceipt}>Print Receipt</Btn>
+        {state.isOpen && <Btn small variant="dark" onClick={() => onConvertToInvoice(booking)}>Convert to Invoice</Btn>}
+        {notClosed && <Btn small variant="ghost" onClick={() => setAction({ type: "receive" })}>Receive Advance</Btn>}
+        <Btn small variant="ghost" onClick={() => setAction({ type: "details" })}>Edit Notes / Terms</Btn>
+        {isAdmin && notClosed && <Btn small variant="ghost" onClick={() => setAction({ type: "renew" })}>Renew Booking</Btn>}
+        {isAdmin && notClosed && state.remainingQty > 0 && <Btn small variant="ghost" onClick={() => setAction({ type: "rate" })}>Change Rate</Btn>}
+        {isAdmin && state.unusedAdvance > 0.005 && <Btn small variant="ghost" onClick={() => setAction({ type: "refund" })}>Refund Advance</Btn>}
+        {isAdmin && notClosed && <Btn small variant="danger" onClick={() => setAction({ type: "cancel" })}>Cancel Booking</Btn>}
+      </div>
+      {!isAdmin && <div className="text-[11px] text-slate-400 mb-4">Renewal, rate change, refund, cancellation and advance edits need an Admin login.</div>}
+
+      <div className="mt-4 border border-slate-200 overflow-x-auto">
+        <div className="px-3 py-2 border-b border-slate-200 flex items-center justify-between">
+          <span className="font-black uppercase text-xs tracking-wide text-slate-500">{t("Delivery History")}</span>
+          {state.deliveries.length > 0 && <button type="button" className="text-xs font-bold text-blue-700 hover:underline" onClick={printDeliveries}>{t("Print Delivery History")}</button>}
+        </div>
+        <BookingDeliveriesTable deliveries={state.deliveries} unit={booking.unit} onOpenInvoice={onOpenInvoice} />
+        {state.legacyClosed && <div className="px-3 py-2 text-[11px] text-slate-400">Older booking — it was marked Completed before delivery tracking existed.</div>}
+      </div>
+
+      <div className="mt-4 border border-slate-200 overflow-x-auto">
+        <div className="px-3 py-2 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">{t("Advance Payments")}</div>
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-3 py-2">Date</th><th className="px-3 py-2">Receipt No.</th><th className="px-3 py-2">Method</th>
+              <th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2">Note</th><th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {state.advancePayments.length === 0 && (
+              <tr><td colSpan={6} className="px-3 py-4 text-center text-slate-400">{state.legacyAdvance > 0 ? `Older advance ${fmtMoney(state.legacyAdvance)} — not posted to ledger.` : "Koi payment record nahi."}</td></tr>
+            )}
+            {state.advancePayments.map((p) => (
+              <tr key={p.id} className="border-t border-slate-100">
+                <td className="px-3 py-2 text-slate-500">{fmtDate(p.date)}</td>
+                <td className="px-3 py-2 font-bold">{paymentReceiptNo(p)}</td>
+                <td className="px-3 py-2 text-slate-500">{p.method}</td>
+                <td className="px-3 py-2 text-right font-bold text-emerald-600">{fmtMoney(p.amount)}</td>
+                <td className="px-3 py-2 text-xs text-slate-500">{p.note || "-"}</td>
+                <td className="px-3 py-2 text-right whitespace-nowrap space-x-2">
+                  <button type="button" className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => printPaymentReceipt(p)}>Receiving</button>
+                  {isAdmin && <button type="button" className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setAction({ type: "editAdvance", payment: p })}>Edit</button>}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {state.refunds.length > 0 && (
+        <div className="mt-4 border border-slate-200 overflow-x-auto">
+          <div className="px-3 py-2 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">{t("Refund History")}</div>
+          <table className="w-full text-sm">
+            <tbody>
+              {state.refunds.map((p) => (
+                <tr key={p.id} className="border-t border-slate-100">
+                  <td className="px-3 py-2 text-slate-500">{fmtDate(p.date)}</td>
+                  <td className="px-3 py-2 font-bold">{paymentReceiptNo(p)}</td>
+                  <td className="px-3 py-2 text-slate-500">{p.method}</td>
+                  <td className="px-3 py-2 text-right font-bold text-red-600">-{fmtMoney(p.amount)}</td>
+                  <td className="px-3 py-2 text-xs text-slate-500">{p.note}</td>
+                  <td className="px-3 py-2 text-right"><button type="button" className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => printPaymentReceipt(p)}>Print</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {((booking.rateHistory || []).length > 0 || (booking.renewals || []).length > 0) && (
+        <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          {(booking.rateHistory || []).length > 0 && (
+            <div className="border border-slate-200">
+              <div className="px-3 py-2 border-b border-slate-200 font-black uppercase tracking-wide text-slate-500">{t("Rate History")}</div>
+              {booking.rateHistory.map((r, idx) => (
+                <div key={idx} className="px-3 py-1.5 border-t border-slate-100">
+                  <span className="font-bold">{fmtMoney(r.oldRate)} → {fmtMoney(r.newRate)}</span> · {r.reason}
+                  <div className="text-slate-400">{r.by} · {fmtDateTime(r.at)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+          {(booking.renewals || []).length > 0 && (
+            <div className="border border-slate-200">
+              <div className="px-3 py-2 border-b border-slate-200 font-black uppercase tracking-wide text-slate-500">{t("Renewal History")}</div>
+              {booking.renewals.map((r, idx) => (
+                <div key={idx} className="px-3 py-1.5 border-t border-slate-100">
+                  <span className="font-bold">{fmtDate(r.from)} → {fmtDate(r.to)}</span> · {r.reason}
+                  <div className="text-slate-400">{r.by} · {fmtDateTime(r.at)}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {(booking.notes || booking.terms) && (
+        <div className="mt-4 text-xs text-slate-600 border border-slate-200 p-3 space-y-1">
+          {booking.notes && <div><span className="font-bold">Notes:</span> {booking.notes}</div>}
+          {booking.terms && <div className="whitespace-pre-line"><span className="font-bold">{t("Terms")}:</span>{"\n"}{booking.terms}</div>}
+        </div>
+      )}
+
+      {history.length > 0 && (
+        <div className="mt-4">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Booking History")}</div>
+          <div className="border border-slate-200 divide-y divide-slate-100 max-h-48 overflow-y-auto">
+            {history.map((h, idx) => (
+              <div key={idx} className="px-3 py-2 text-xs">
+                <div className="font-bold text-slate-700">{h.action}{h.details ? ` — ${h.details}` : ""}</div>
+                <div className="text-slate-400">{h.by} · {fmtDateTime(h.at)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mt-4 flex justify-end">
+        <Btn variant="ghost" onClick={onClose}>Close</Btn>
+      </div>
+
+      {action && (
+        <Modal title={actionTitles[action.type]} onClose={() => setAction(null)}>
+          <BookingActionForm type={action.type} booking={booking} state={state} payment={action.payment} onSubmit={runAction} onCancel={() => setAction(null)} />
+        </Modal>
+      )}
+    </Modal>
+  );
+}
+
+/* ---------------- Booking: reports ---------------- */
+
+const BOOKING_REPORTS = [
+  ["register", "Booking Register"],
+  ["customer", "Customer-wise Bookings"],
+  ["product", "Product-wise Bookings"],
+  ["advance", "Advance Collection"],
+  ["unused", "Unused Advance Report"],
+  ["pending", "Pending Delivery"],
+  ["expiry", "Expiry Report"],
+  ["cancel", "Cancellation & Refund"],
+];
+
+function buildBookingReport(key, rows, payments, from, to) {
+  const inRange = (d) => (!from || d >= from) && (!to || d <= to);
+  const bookingIds = new Set(rows.map((r) => r.booking.id));
+  const byId = Object.fromEntries(rows.map((r) => [r.booking.id, r]));
+  const ranged = rows.filter((r) => inRange(r.booking.date || ""));
+  const asOf = `As of ${fmtDate(todayISO())}`;
+  const period = `${from ? fmtDate(from) : "Start"} – ${to ? fmtDate(to) : "Today"}`;
+
+  if (key === "register") {
+    return {
+      period: `Booking date: ${period}`,
+      columns: [
+        { label: "Booking Ref" }, { label: "Date", type: "date" }, { label: "Customer" }, { label: "Product" }, { label: "Unit" },
+        { label: "Booked Qty", type: "qty" }, { label: "Delivered", type: "qty" }, { label: "Remaining Qty", type: "qty" },
+        { label: "Locked Rate", type: "money" }, { label: "Booking Value", type: "money" }, { label: "Advance Received", type: "money" },
+        { label: "Unused Advance", type: "money" }, { label: "Valid Till", type: "date" }, { label: "Status", type: "status" },
+      ],
+      rows: ranged.map(({ booking: b, state: s }) => [b.code, b.date, b.customerName, b.productName, b.unit, s.bookedQty, s.deliveredQty, s.remainingQty, s.rate, s.status === "Cancelled" ? 0 : s.bookingValue, s.advanceReceived, Math.max(0, s.unusedAdvance), b.expiryDate, s.status]),
+    };
+  }
+  if (key === "customer") {
+    const map = {};
+    ranged.forEach(({ booking: b, state: s }) => {
+      const m = map[b.customerId] || (map[b.customerId] = { name: b.customerName, count: 0, value: 0, adv: 0, applied: 0, unused: 0, outstanding: 0 });
+      m.count += 1;
+      m.value += s.status === "Cancelled" ? 0 : s.bookingValue;
+      m.adv += s.advanceReceived; m.applied += s.advanceApplied; m.unused += Math.max(0, s.unusedAdvance); m.outstanding += s.outstandingValue;
+    });
+    return {
+      period: `Booking date: ${period}`,
+      columns: [{ label: "Customer" }, { label: "Bookings", type: "num" }, { label: "Booking Value", type: "money" }, { label: "Advance Received", type: "money" }, { label: "Advance Applied", type: "money" }, { label: "Unused Advance", type: "money" }, { label: "Outstanding Booking Value", type: "money" }],
+      rows: Object.values(map).sort((a, b) => b.value - a.value).map((m) => [m.name, m.count, roundMoney(m.value), roundMoney(m.adv), roundMoney(m.applied), roundMoney(m.unused), roundMoney(m.outstanding)]),
+    };
+  }
+  if (key === "product") {
+    const map = {};
+    ranged.forEach(({ booking: b, state: s }) => {
+      const k = `${b.productName}|${b.unit}`;
+      const m = map[k] || (map[k] = { name: b.productName, unit: b.unit, count: 0, qty: 0, delivered: 0, pending: 0, value: 0 });
+      m.count += 1; m.qty += s.bookedQty; m.delivered += s.deliveredQty; m.pending += s.pendingQty;
+      m.value += s.status === "Cancelled" ? 0 : s.bookingValue;
+    });
+    return {
+      period: `Booking date: ${period}`,
+      columns: [{ label: "Product" }, { label: "Unit" }, { label: "Bookings", type: "num" }, { label: "Booked Qty", type: "qty" }, { label: "Delivered", type: "qty" }, { label: "Pending Delivery Qty", type: "qty" }, { label: "Booking Value", type: "money" }],
+      rows: Object.values(map).sort((a, b) => b.value - a.value).map((m) => [m.name, m.unit, m.count, roundQty(m.qty), roundQty(m.delivered), roundQty(m.pending), roundMoney(m.value)]),
+    };
+  }
+  if (key === "advance") {
+    const list = (payments || []).filter((p) => p.bookingId && p.kind !== "Refund" && bookingIds.has(p.bookingId) && inRange(p.date)).sort((a, b) => parseDateValue(a.date) - parseDateValue(b.date));
+    return {
+      period: `Receipt date: ${period}`,
+      columns: [{ label: "Date", type: "date" }, { label: "Receipt No." }, { label: "Booking Ref" }, { label: "Customer" }, { label: "Method" }, { label: "Amount", type: "money" }],
+      rows: list.map((p) => [p.date, paymentReceiptNo(p), p.bookingCode || byId[p.bookingId]?.booking.code, p.customerName, p.method, p.amount]),
+    };
+  }
+  if (key === "unused") {
+    return {
+      period: asOf,
+      columns: [{ label: "Booking Ref" }, { label: "Customer" }, { label: "Advance Received", type: "money" }, { label: "Advance Applied", type: "money" }, { label: "Refunded", type: "money" }, { label: "Unused Advance", type: "money" }, { label: "Status", type: "status" }],
+      rows: rows.filter((r) => r.state.unusedAdvance > 0.005).map(({ booking: b, state: s }) => [b.code, b.customerName, s.advancePosted, s.advanceApplied, s.refunded, s.unusedAdvance, s.status]),
+    };
+  }
+  if (key === "pending") {
+    return {
+      period: asOf,
+      columns: [{ label: "Booking Ref" }, { label: "Customer" }, { label: "Product" }, { label: "Unit" }, { label: "Remaining Qty", type: "qty" }, { label: "Locked Rate", type: "money" }, { label: "Booking Value", type: "money" }, { label: "Unused Advance", type: "money" }, { label: "Valid Till", type: "date" }, { label: "Status", type: "status" }],
+      rows: rows.filter((r) => r.state.pendingQty > BOOKING_EPS).map(({ booking: b, state: s }) => [b.code, b.customerName, b.productName, b.unit, s.pendingQty, s.rate, roundMoney(s.pendingQty * s.rate), Math.max(0, s.unusedAdvance), b.expiryDate, s.status]),
+    };
+  }
+  if (key === "expiry") {
+    return {
+      period: asOf,
+      columns: [{ label: "Booking Ref" }, { label: "Customer" }, { label: "Product" }, { label: "Remaining Qty", type: "qty" }, { label: "Unit" }, { label: "Valid Till", type: "date" }, { label: "Days Left", type: "num" }, { label: "Status", type: "status" }],
+      rows: rows
+        .filter((r) => r.state.pendingQty > BOOKING_EPS && (r.state.isOpen || r.state.status === "Expired"))
+        .sort((a, b) => (a.booking.expiryDate || "").localeCompare(b.booking.expiryDate || ""))
+        .map(({ booking: b, state: s }) => [b.code, b.customerName, b.productName, s.pendingQty, b.unit, b.expiryDate, s.daysToExpiry, s.status]),
+    };
+  }
+  // cancellation & refund events
+  const events = [];
+  rows.forEach(({ booking: b, state: s }) => {
+    if (b.status === "Cancelled") {
+      const d = (b.cancelledAt || "").slice(0, 10) || b.date;
+      if (inRange(d)) events.push([d, "Cancelled", b.code, b.customerName, 0, b.cancelReason || "", b.cancelledBy || ""]);
+    }
+    s.refunds.forEach((p) => {
+      if (inRange(p.date)) events.push([p.date, "Refund", b.code, b.customerName, p.amount, p.note || "", p.createdBy || ""]);
+    });
+  });
+  events.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+  return {
+    period,
+    columns: [{ label: "Date", type: "date" }, { label: "Type" }, { label: "Booking Ref" }, { label: "Customer" }, { label: "Amount", type: "money" }, { label: "Reason" }, { label: "By" }],
+    rows: events,
+  };
+}
+
+function BookingReports({ rows, payments, settings, onPrint }) {
+  const [key, setKey] = useState("register");
+  const [from, setFrom] = useState(todayISO().slice(0, 8) + "01");
+  const [to, setTo] = useState(todayISO());
+  const report = buildBookingReport(key, rows, payments, from, to);
+  const title = BOOKING_REPORTS.find(([k]) => k === key)[1];
+  const totals = {};
+  report.columns.forEach((c, ci) => {
+    if (c.type === "money") totals[ci] = roundMoney(report.rows.reduce((s, r) => s + (Number(r[ci]) || 0), 0));
+  });
+  const usesRange = ["register", "customer", "product", "advance", "cancel"].includes(key);
+
+  function exportCsv() {
+    bookingCsvDownload(
+      `${title.replace(/[^A-Za-z0-9]+/g, "_").toLowerCase()}_${todayISO()}.csv`,
+      report.columns.map((c) => c.label),
+      report.rows.map((r) => r.map((v, i) => (report.columns[i].type === "date" ? (v || "") : v)))
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex gap-2 flex-wrap mb-3">
+        {BOOKING_REPORTS.map(([k, label]) => (
+          <Btn key={k} small variant={key === k ? "primary" : "ghost"} onClick={() => setKey(k)}>{label}</Btn>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-end gap-3 mb-3">
+        {usesRange && (
+          <>
+            <Field label="From"><input type="date" className={inputCls} value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
+            <Field label="To"><input type="date" className={inputCls} value={to} onChange={(e) => setTo(e.target.value)} /></Field>
+          </>
+        )}
+        <div className="mb-3 flex gap-2">
+          <Btn variant="dark" onClick={exportCsv}>Export Excel (CSV)</Btn>
+          <Btn variant="ghost" onClick={() => onPrint({ title: title.replace(/\s+/g, "-"), node: <BookingReportPrintBody settings={settings} title={title} period={report.period} columns={report.columns} rows={report.rows} totals={totals} /> })}>Export PDF</Btn>
+        </div>
+      </div>
+      <div className="text-xs text-slate-500 mb-2">{report.period}</div>
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <BookingReportTable columns={report.columns} rows={report.rows} totals={totals} />
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Booking: main page ---------------- */
+
+function Bookings({
+  customers, products, bookings, invoices, payments, settings, currentUser, branches,
+  onCreateAdvanceBooking, onConvertToInvoice, onOpenInvoice,
+  onReceiveAdvance, onEditAdvance, onRefundAdvance, onCancelBooking, onRenewBooking,
+  onChangeBookingRate, onUpdateBookingDetails, onPostLegacyAdvance,
+}) {
+  const [tab, setTab] = useState("bookings");
+  const [showForm, setShowForm] = useState(false);
+  const [detailId, setDetailId] = useState(null);
+  const [printDoc, setPrintDoc] = useState(null);
+  const [q, setQ] = useState("");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [productFilter, setProductFilter] = useState("All");
+  const [branchFilter, setBranchFilter] = useState("All");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+  const [expFrom, setExpFrom] = useState("");
+  const [expTo, setExpTo] = useState("");
+
+  const rows = useMemo(
+    () => (bookings || []).map((b) => ({ booking: b, state: computeBookingState(b, invoices, payments) })),
+    [bookings, invoices, payments]
+  );
+
+  // Print one document at a time through the app's existing print-area rule.
+  useEffect(() => {
+    if (!printDoc) return undefined;
+    const prevTitle = document.title;
+    const done = () => { window.removeEventListener("afterprint", done); setPrintDoc(null); };
+    const raf = requestAnimationFrame(() => {
+      if (printDoc.title) document.title = printDoc.title;
+      window.addEventListener("afterprint", done);
+      window.print();
+    });
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("afterprint", done);
+      document.title = prevTitle;
+    };
+  }, [printDoc]);
+
+  const cards = useMemo(() => {
+    const c = { active: 0, value: 0, advance: 0, unused: 0, outstanding: 0, pending: [], soon: 0, expired: 0, completed: 0, cancelled: 0 };
+    rows.forEach(({ booking: b, state: s }) => {
+      if (s.isOpen) c.active += 1;
+      if (s.status !== "Cancelled") c.value += s.bookingValue;
+      c.advance += s.advanceReceived;
+      c.unused += Math.max(0, s.unusedAdvance);
+      c.outstanding += s.outstandingValue;
+      c.pending.push({ qty: s.pendingQty, unit: b.unit });
+      if (s.expiringSoon) c.soon += 1;
+      if (s.status === "Expired") c.expired += 1;
+      if (s.status === "Completed") c.completed += 1;
+      if (s.status === "Cancelled") c.cancelled += 1;
+    });
+    return c;
+  }, [rows]);
+
+  const productNames = Array.from(new Set(rows.map((r) => r.booking.productName).filter(Boolean))).sort();
+  const showBranchFilter = currentUser?.role === "admin" && (branches || []).length > 1;
+  const qs = q.trim().toLowerCase();
+  const filtered = rows
+    .filter(({ booking: b, state: s }) => {
+      if (qs && !(`${b.code} ${b.customerName} ${b.productName} ${b.customerPhone || ""}`.toLowerCase().includes(qs))) return false;
+      if (statusFilter === "Expiring Soon" ? !s.expiringSoon : statusFilter !== "All" && s.status !== statusFilter) return false;
+      if (productFilter !== "All" && b.productName !== productFilter) return false;
+      if (showBranchFilter && branchFilter !== "All" && (b.branchId || "") !== branchFilter) return false;
+      if (dateFrom && b.date < dateFrom) return false;
+      if (dateTo && b.date > dateTo) return false;
+      if (expFrom && (b.expiryDate || "") < expFrom) return false;
+      if (expTo && (b.expiryDate || "") > expTo) return false;
+      return true;
+    })
+    .sort((a, b) => parseDateValue(b.booking.date) - parseDateValue(a.booking.date) || String(b.booking.code).localeCompare(String(a.booking.code)));
+
+  const detailRow = detailId ? rows.find((r) => r.booking.id === detailId) : null;
+  const detailCustomer = detailRow ? customers.find((c) => c.id === detailRow.booking.customerId) : null;
+  const productRate = (b) => (products || []).find((p) => p.id === b.productId)?.price;
+  const soonRows = rows.filter((r) => r.state.expiringSoon);
+
+  function handleCreate(data) {
+    const created = onCreateAdvanceBooking(data);
+    if (!created) return false;
+    setShowForm(false);
+    setDetailId(created.id);
+    return true;
+  }
+
+  const handlers = { onReceiveAdvance, onEditAdvance, onRefundAdvance, onCancelBooking, onRenewBooking, onChangeBookingRate, onUpdateBookingDetails, onPostLegacyAdvance };
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Advance Booking</h2>
+        <div className="flex gap-2 flex-wrap">
+          <Btn small variant={tab === "bookings" ? "primary" : "ghost"} onClick={() => setTab("bookings")}>Advance Booking Dashboard</Btn>
+          <Btn small variant={tab === "reports" ? "primary" : "ghost"} onClick={() => setTab("reports")}>Booking Reports</Btn>
+          <Btn onClick={() => setShowForm(true)} disabled={customers.length === 0}>+ New Advance Booking</Btn>
+        </div>
+      </div>
+      <div className="text-xs text-slate-400 mb-4 max-w-3xl">
+        Customer advance de kar rate lock kara sakta hai — booking ke 1 mahine ke andar wahi rate milega. Advance customer ledger mein credit hota hai, har delivery ki alag invoice banti hai, aur remaining qty / unused advance apne aap update hote hain.
+      </div>
+
+      {tab === "reports" ? (
+        <BookingReports rows={rows} payments={payments} settings={settings} onPrint={setPrintDoc} />
+      ) : (
+        <>
+          {soonRows.length > 0 && (
+            <div className="bg-amber-50 border border-amber-300 p-3 mb-4 text-sm cursor-pointer hover:bg-amber-100" onClick={() => setStatusFilter("Expiring Soon")}>
+              <div className="text-[11px] uppercase tracking-wide font-black text-amber-700 mb-1">{t("Expiring Soon")} ({BOOKING_EXPIRY_WARN_DAYS} days)</div>
+              <div className="flex flex-wrap gap-x-6 gap-y-1">
+                {soonRows.map(({ booking: b, state: s }) => (
+                  <div key={b.id}><span className="font-bold">{b.code}</span> {b.customerName} — {fmtQty(s.remainingQty)} {b.unit} · {fmtDate(b.expiryDate)}</div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-3 mb-4">
+            <Stat label="Active Bookings" value={cards.active} />
+            <Stat label="Total Booked Value" value={fmtMoney(cards.value)} />
+            <Stat label="Total Advance Received" value={fmtMoney(cards.advance)} accent="text-emerald-600" />
+            <Stat label="Unused Advance Balance" value={fmtMoney(cards.unused)} accent="text-blue-700" />
+            <Stat label="Outstanding Booking Value" value={fmtMoney(cards.outstanding)} accent="text-red-600" />
+          </div>
+          <div className="flex flex-wrap gap-3 mb-6">
+            <Stat label="Pending Delivery Qty" value={bookingQtyByUnit(cards.pending)} />
+            <Stat label="Expiring Soon" value={cards.soon} accent="text-amber-600" />
+            <Stat label="Expired Bookings" value={cards.expired} accent="text-red-600" />
+            <Stat label="Completed Bookings" value={cards.completed} accent="text-emerald-600" />
+            <Stat label="Cancelled Bookings" value={cards.cancelled} accent="text-slate-500" />
+          </div>
+
+          <div className="flex flex-wrap gap-2 mb-3 items-end">
+            <input className={`${inputCls} max-w-xs`} placeholder="Search booking # / customer / product..." value={q} onChange={(e) => setQ(e.target.value)} />
+            <select className={`${inputCls} max-w-[180px]`} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="All">All Status</option>
+              {BOOKING_STATUS_LIST.map((s) => <option key={s} value={s}>{s}</option>)}
+              <option value="Expiring Soon">Expiring Soon</option>
+            </select>
+            <select className={`${inputCls} max-w-[180px]`} value={productFilter} onChange={(e) => setProductFilter(e.target.value)}>
+              <option value="All">All Products</option>
+              {productNames.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+            {showBranchFilter && (
+              <select className={`${inputCls} max-w-[180px]`} value={branchFilter} onChange={(e) => setBranchFilter(e.target.value)}>
+                <option value="All">All Branches</option>
+                {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+              </select>
+            )}
+            <label className="text-[10px] uppercase font-bold text-slate-500">{t("Booking Date From")}<input type="date" className={`${inputCls} block`} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} /></label>
+            <label className="text-[10px] uppercase font-bold text-slate-500">{t("Booking Date To")}<input type="date" className={`${inputCls} block`} value={dateTo} onChange={(e) => setDateTo(e.target.value)} /></label>
+            <label className="text-[10px] uppercase font-bold text-slate-500">{t("Expiry From")}<input type="date" className={`${inputCls} block`} value={expFrom} onChange={(e) => setExpFrom(e.target.value)} /></label>
+            <label className="text-[10px] uppercase font-bold text-slate-500">{t("Expiry To")}<input type="date" className={`${inputCls} block`} value={expTo} onChange={(e) => setExpTo(e.target.value)} /></label>
+          </div>
+
+          <div className="bg-white border border-slate-200 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+                <th className="px-3 py-2">Ref</th><th className="px-3 py-2">Customer</th><th className="px-3 py-2">Item</th>
+                <th className="px-3 py-2 text-right">Booked</th><th className="px-3 py-2 text-right">Delivered</th><th className="px-3 py-2 text-right">Remaining</th>
+                <th className="px-3 py-2 text-right">Locked Rate</th><th className="px-3 py-2 text-right">Booking Value</th>
+                <th className="px-3 py-2 text-right">Advance</th><th className="px-3 py-2 text-right">Unused Advance</th>
+                <th className="px-3 py-2">Valid Till</th><th className="px-3 py-2">Status</th><th></th>
+              </tr></thead>
+              <tbody>
+                {filtered.length === 0 && <tr><td colSpan={13} className="px-4 py-6 text-center text-slate-400">Koi advance booking nahi.</td></tr>}
+                {filtered.map(({ booking: b, state: s }) => {
+                  const current = productRate(b);
+                  return (
+                    <tr key={b.id} className={`border-t border-slate-100 hover:bg-slate-50 ${s.status === "Cancelled" ? "opacity-60" : ""}`}>
+                      <td className="px-3 py-2 font-black text-blue-700 cursor-pointer hover:underline" onClick={() => setDetailId(b.id)}>{b.code || "-"}<div className="text-[10px] font-normal text-slate-400">{fmtDate(b.date)}</div></td>
+                      <td className="px-3 py-2 font-bold">{b.customerName}</td>
+                      <td className="px-3 py-2">{b.productName || "-"} {b.unit ? <span className="text-slate-400">({b.unit})</span> : ""}</td>
+                      <td className="px-3 py-2 text-right">{fmtQty(s.bookedQty)}</td>
+                      <td className="px-3 py-2 text-right text-emerald-600">{fmtQty(s.deliveredQty)}</td>
+                      <td className="px-3 py-2 text-right font-bold text-red-600">{fmtQty(s.remainingQty)}</td>
+                      <td className="px-3 py-2 text-right font-bold">
+                        {fmtMoney(s.rate)}
+                        {current != null && Number(current) !== Number(s.rate) && <div className="text-[10px] font-normal text-slate-400">Now {fmtMoney(current)}</div>}
+                      </td>
+                      <td className="px-3 py-2 text-right">{fmtMoney(s.bookingValue)}</td>
+                      <td className="px-3 py-2 text-right text-emerald-600 font-bold">{fmtMoney(s.advanceReceived)}</td>
+                      <td className="px-3 py-2 text-right text-blue-700 font-bold">{fmtMoney(Math.max(0, s.unusedAdvance))}</td>
+                      <td className="px-3 py-2 whitespace-nowrap">
+                        {fmtDate(b.expiryDate)}
+                        {s.expiringSoon && <div className="text-[10px] font-bold text-amber-600 uppercase">{s.daysToExpiry === 0 ? "Today" : `${s.daysToExpiry} days left`}</div>}
+                      </td>
+                      <td className="px-3 py-2"><BookingStatusBadge status={s.status} /></td>
+                      <td className="px-3 py-2 text-right whitespace-nowrap space-x-2">
+                        <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setDetailId(b.id)}>View</button>
+                        {s.isOpen && <button className="text-xs font-bold text-blue-700 hover:underline" onClick={() => onConvertToInvoice(b)}>Convert to Invoice</button>}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {showForm && (
+        <Modal title="New Advance Booking" onClose={() => setShowForm(false)} wide>
+          <BookingCreateForm customers={customers} products={products} onSave={handleCreate} onCancel={() => setShowForm(false)} />
+        </Modal>
+      )}
+
+      {detailRow && (
+        <BookingDetail
+          booking={detailRow.booking} state={detailRow.state} customer={detailCustomer}
+          settings={settings} products={products} currentUser={currentUser}
+          onClose={() => setDetailId(null)}
+          onConvertToInvoice={(b) => { setDetailId(null); onConvertToInvoice(b); }}
+          onOpenInvoice={onOpenInvoice ? (id) => { setDetailId(null); onOpenInvoice(id); } : null}
+          onPrint={setPrintDoc}
+          handlers={handlers}
+        />
+      )}
+
+      {printDoc && (
+        <div id="print-booking" className="print-area" style={{ display: "none" }}>
+          {printDoc.node}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   DAILY ORDER TARGETS v1  (inside the existing Daily Orders page)
+   ------------------------------------------------------------
+   Storage: new kv key "ct-ordertargets" (same kv_store / localStorage
+   layer as every other module). One target per product per date:
+     { id, date, productId, productName, unit, targetQty, targetOrders,
+       notes, createdBy, createdAt, updatedBy, updatedAt, history[] }
+   Progress is NEVER stored — it is recomputed from saved Daily Orders:
+     eligible order = same date (order date) + same product + status != Cancelled
+   Each order is counted once (by id). Bookings / invoices / payments are
+   never counted — only records in "ct-orders".
+   ============================================================ */
+
+const TARGET_APPROACH_PCT = 80;
+const TARGET_STATUS_TONE = {
+  "Not Started": "bg-slate-200 text-slate-600",
+  "In Progress": "bg-blue-100 text-blue-700",
+  "Target Achieved": "bg-emerald-100 text-emerald-700",
+  "Above Target": "bg-purple-100 text-purple-700",
+  "No Target": "bg-slate-100 text-slate-400",
+};
+const TARGET_BAR_TONE = {
+  "Not Started": "bg-slate-300", "In Progress": "bg-blue-600", "Target Achieved": "bg-emerald-600", "Above Target": "bg-purple-600", "No Target": "bg-slate-200",
+};
+const TARGET_URDU = {
+  "Daily Targets": "روزانہ اہداف",
+  "Orders": "آرڈرز",
+  "New Target": "+ نیا ہدف",
+  "Edit Target": "ہدف میں ترمیم",
+  "Save Target": "ہدف محفوظ کریں",
+  "Target Date": "ہدف کی تاریخ",
+  "Target Quantity": "ہدف مقدار",
+  "Target Orders (optional)": "ہدف آرڈرز کی تعداد (اختیاری)",
+  "Target": "ہدف",
+  "Actual": "اصل",
+  "Achievement %": "کامیابی %",
+  "Order Count": "آرڈرز کی تعداد",
+  "Extra": "اضافی",
+  "Products with Targets": "ہدف والی مصنوعات",
+  "Total Target Quantity": "کل ہدف مقدار",
+  "Total Actual Ordered": "کل اصل آرڈر",
+  "Total Remaining Target": "کل باقی ہدف",
+  "Targets Achieved": "حاصل شدہ اہداف",
+  "Targets in Progress": "جاری اہداف",
+  "Targets Not Started": "غیر شروع شدہ اہداف",
+  "Products Exceeding Targets": "ہدف سے زیادہ مصنوعات",
+  "Not Started": "شروع نہیں ہوا",
+  "In Progress": "جاری",
+  "Target Achieved": "ہدف حاصل",
+  "Above Target": "ہدف سے زیادہ",
+  "No Target": "کوئی ہدف نہیں",
+  "Yesterday": "گزشتہ کل",
+  "Custom Range": "حسبِ ضرورت مدت",
+  "Product-wise Report": "بلحاظ مصنوعہ رپورٹ",
+  "Date-wise Report": "بلحاظ تاریخ رپورٹ",
+  "Target Alerts": "ہدف الرٹس",
+  "Dismiss": "ہٹائیں",
+};
+Object.entries(TARGET_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
+
+function targetMatchesOrder(target, order) {
+  if (!order || order.status === "Cancelled" || order.date !== target.date) return false;
+  if (target.productId) return order.productId === target.productId;
+  return !order.productId && String(order.productName || "").trim().toLowerCase() === String(target.productName || "").trim().toLowerCase();
+}
+
+function computeTargetProgress(target, orders) {
+  const seen = new Set();
+  const eligible = (orders || []).filter((o) => {
+    if (!targetMatchesOrder(target, o) || seen.has(o.id)) return false;
+    seen.add(o.id);
+    return true;
+  });
+  const targetQty = roundQty(Number(target.targetQty) || 0);
+  const actual = roundQty(eligible.reduce((s, o) => s + (Number(o.qty) || 0), 0));
+  const remaining = roundQty(Math.max(0, targetQty - actual));
+  const extra = roundQty(Math.max(0, actual - targetQty));
+  const pct = targetQty > 0 ? Math.round((actual / targetQty) * 1000) / 10 : null;
+  const orderCount = eligible.length;
+  const targetOrders = Number(target.targetOrders) || 0;
+  const remainingOrders = targetOrders > 0 ? Math.max(0, targetOrders - orderCount) : null;
+  let status;
+  if (!(targetQty > 0)) status = "No Target";
+  else if (actual <= 0) status = "Not Started";
+  else if (actual > targetQty) status = "Above Target";
+  else if (actual >= targetQty) status = "Target Achieved";
+  else status = "In Progress";
+  return { target, targetQty, actual, remaining, extra, pct, orderCount, targetOrders, remainingOrders, status, orders: eligible };
+}
+
+function targetRangeFor(preset, from, to) {
+  const today = todayISO();
+  const d = parseDateValue(today);
+  if (preset === "Today") return [today, today];
+  if (preset === "Yesterday") { d.setDate(d.getDate() - 1); const y = dateToLocalISO(d); return [y, y]; }
+  if (preset === "This Week") { d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return [dateToLocalISO(d), today]; }
+  if (preset === "This Month") return [today.slice(0, 8) + "01", today];
+  return [from || today, to || today];
+}
+
+function TargetStatusBadge({ status }) {
+  return <span className={`text-[10px] font-bold uppercase px-2 py-0.5 whitespace-nowrap ${TARGET_STATUS_TONE[status] || ""}`}>{tStatus(status)}</span>;
+}
+
+function TargetProgressBar({ pct, status }) {
+  const w = pct == null ? 0 : Math.min(100, pct);
+  return (
+    <div className="w-28 h-2 bg-slate-100 border border-slate-200" title={pct == null ? "-" : `${pct}%`}>
+      <div className={`h-full ${TARGET_BAR_TONE[status] || "bg-slate-300"}`} style={{ width: `${w}%` }} />
+    </div>
+  );
+}
+
+function OrderTargetForm({ products, targets, initial, onSave, onCancel }) {
+  const [form, setForm] = useState(() => initial
+    ? { date: initial.date, productId: initial.productId, unit: initial.unit, targetQty: String(initial.targetQty ?? ""), targetOrders: initial.targetOrders ? String(initial.targetOrders) : "", notes: initial.notes || "" }
+    : { date: todayISO(), productId: products[0]?.id || "", unit: products[0]?.unit || "", targetQty: "", targetOrders: "", notes: "" });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const product = products.find((p) => p.id === form.productId);
+  const isEdit = !!initial;
+  const duplicate = !isEdit && targets.some((tg) => tg.date === form.date && tg.productId === form.productId);
+
+  function submit() {
+    if (busy) return;
+    const qty = roundQty(Number(form.targetQty) || 0);
+    const ord = Number(form.targetOrders) || 0;
+    if (!form.date) { setError("Target date is required."); return; }
+    if (!product && !isEdit) { setError("Product select karein."); return; }
+    if (!(qty > 0)) { setError("Target quantity must be more than 0."); return; }
+    if (ord < 0 || !Number.isInteger(ord)) { setError("Target orders must be a whole number (or empty)."); return; }
+    if (duplicate) { setError("This product already has a target for this date — edit that one instead."); return; }
+    setError(""); setBusy(true);
+    const ok = onSave({
+      date: form.date, productId: isEdit ? initial.productId : product.id, productName: isEdit ? initial.productName : product.name,
+      unit: String(form.unit || (product ? product.unit : "")).trim(), targetQty: qty, targetOrders: ord, notes: form.notes.trim(),
+    });
+    if (!ok) setBusy(false);
+  }
+
+  return (
+    <div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <Field label="Target Date">
+          <input type="date" className={inputCls} value={form.date} disabled={isEdit} onChange={(e) => setForm({ ...form, date: e.target.value })} />
+        </Field>
+        <Field label="Product">
+          {isEdit ? (
+            <div className="text-sm font-bold bg-slate-50 border border-slate-200 px-3 py-2">{initial.productName}</div>
+          ) : (
+            <select className={inputCls} value={form.productId} onChange={(e) => { const p = products.find((x) => x.id === e.target.value); setForm({ ...form, productId: e.target.value, unit: p ? p.unit : form.unit }); }}>
+              {products.length === 0 && <option value="">Pehle Products tab mein product add karein</option>}
+              {products.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.unit})</option>)}
+            </select>
+          )}
+        </Field>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="Unit"><input list="unit-suggestions" className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} /></Field>
+        <Field label="Target Quantity"><input type="number" step="any" min="0" className={inputCls} value={form.targetQty} onChange={(e) => setForm({ ...form, targetQty: e.target.value })} autoFocus /></Field>
+        <Field label="Target Orders (optional)"><input type="number" step="1" min="0" className={inputCls} value={form.targetOrders} onChange={(e) => setForm({ ...form, targetOrders: e.target.value })} /></Field>
+      </div>
+      <Field label="Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
+      {isEdit && <div className="text-[11px] text-slate-400 mb-3">Date and product stay fixed — editing only changes this day's target; other days are not affected.</div>}
+      {duplicate && <div className="text-xs font-bold text-amber-700 mb-3">A target for this product already exists on {fmtDate(form.date)}.</div>}
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2">
+        <Btn onClick={submit} disabled={busy}>{busy ? "Saving..." : "Save Target"}</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+const TARGET_SEEN_KEY = "ct-target-alerts-seen";
+function loadSeenTargetAlerts() {
+  try { return new Set(JSON.parse(window.localStorage.getItem(TARGET_SEEN_KEY) || "[]")); } catch { return new Set(); }
+}
+
+function DailyTargetsPanel({ products, orders, targets, currentUser, onSaveTarget, onDeleteTarget }) {
+  const [preset, setPreset] = useState("Today");
+  const [from, setFrom] = useState(todayISO());
+  const [to, setTo] = useState(todayISO());
+  const [q, setQ] = useState("");
+  const [modal, setModal] = useState(null); // "new" | target
+  const [view, setView] = useState("progress"); // progress | product | date
+  const [seen, setSeen] = useState(loadSeenTargetAlerts);
+  const isAdmin = currentUser?.role === "admin";
+  const [rangeFrom, rangeTo] = targetRangeFor(preset, from, to);
+
+  const rows = useMemo(() => (targets || [])
+    .filter((tg) => tg.date >= rangeFrom && tg.date <= rangeTo)
+    .filter((tg) => !q.trim() || String(tg.productName).toLowerCase().includes(q.trim().toLowerCase()))
+    .map((tg) => computeTargetProgress(tg, orders))
+    .sort((a, b) => b.target.date.localeCompare(a.target.date) || a.target.productName.localeCompare(b.target.productName)),
+  [targets, orders, rangeFrom, rangeTo, q]);
+
+  const cards = {
+    products: new Set(rows.map((r) => r.target.productId || r.target.productName)).size,
+    target: bookingQtyByUnit(rows.map((r) => ({ qty: r.targetQty, unit: r.target.unit }))),
+    actual: bookingQtyByUnit(rows.map((r) => ({ qty: r.actual, unit: r.target.unit }))),
+    remaining: bookingQtyByUnit(rows.map((r) => ({ qty: r.remaining, unit: r.target.unit }))),
+    achieved: rows.filter((r) => r.status === "Target Achieved" || r.status === "Above Target").length,
+    progress: rows.filter((r) => r.status === "In Progress").length,
+    notStarted: rows.filter((r) => r.status === "Not Started").length,
+    above: rows.filter((r) => r.status === "Above Target").length,
+  };
+
+  // Alerts for today's and yesterday's targets. One alert per target per
+  // event (key = targetId:event), dismissed alerts are remembered.
+  const alerts = useMemo(() => {
+    const today = todayISO();
+    const list = [];
+    (targets || []).forEach((tg) => {
+      if (tg.date > today) return;
+      const p = computeTargetProgress(tg, orders);
+      const daysOld = bookingDaysUntil(tg.date);
+      if (tg.date === today) {
+        if (p.status === "Above Target") list.push({ key: `${tg.id}:above`, tone: "purple", text: `${tg.productName}: target exceeded — ${fmtQty(p.actual)} / ${fmtQty(p.targetQty)} ${tg.unit} (+${fmtQty(p.extra)})` });
+        else if (p.status === "Target Achieved") list.push({ key: `${tg.id}:achieved`, tone: "emerald", text: `${tg.productName}: target achieved — ${fmtQty(p.actual)} ${tg.unit}` });
+        else if (p.pct != null && p.pct >= TARGET_APPROACH_PCT) list.push({ key: `${tg.id}:near`, tone: "blue", text: `${tg.productName}: ${p.pct}% done — ${fmtQty(p.remaining)} ${tg.unit} left` });
+      } else if (daysOld === -1 && p.remaining > 0) {
+        list.push({ key: `${tg.id}:missed`, tone: "red", text: `${tg.productName} (${fmtDate(tg.date)}): day ended ${fmtQty(p.remaining)} ${tg.unit} short of target (${p.pct ?? 0}%)` });
+      }
+    });
+    return list.filter((a) => !seen.has(a.key));
+  }, [targets, orders, seen]);
+
+  function dismiss(key) {
+    const next = new Set(seen); next.add(key);
+    setSeen(next);
+    try { window.localStorage.setItem(TARGET_SEEN_KEY, JSON.stringify([...next].slice(-500))); } catch {}
+  }
+
+  const productReport = useMemo(() => {
+    const map = {};
+    rows.forEach((r) => {
+      const k = `${r.target.productName}|${r.target.unit}`;
+      const m = map[k] || (map[k] = { product: r.target.productName, unit: r.target.unit, days: 0, target: 0, actual: 0, orders: 0, achievedDays: 0 });
+      m.days += 1; m.target += r.targetQty; m.actual += r.actual; m.orders += r.orderCount;
+      if (r.status === "Target Achieved" || r.status === "Above Target") m.achievedDays += 1;
+    });
+    return Object.values(map).map((m) => ({ ...m, target: roundQty(m.target), actual: roundQty(m.actual), pct: m.target > 0 ? Math.round((m.actual / m.target) * 1000) / 10 : null }));
+  }, [rows]);
+
+  function exportCsv() {
+    if (view === "product") {
+      bookingCsvDownload(`target_product_${rangeFrom}_${rangeTo}.csv`, ["Product", "Unit", "Target Days", "Target", "Actual", "Achievement %", "Orders", "Days Achieved"],
+        productReport.map((m) => [m.product, m.unit, m.days, m.target, m.actual, m.pct ?? "", m.orders, m.achievedDays]));
+    } else {
+      bookingCsvDownload(`target_daily_${rangeFrom}_${rangeTo}.csv`, ["Date", "Product", "Unit", "Target", "Actual", "Remaining", "Extra", "Achievement %", "Orders", "Target Orders", "Status"],
+        rows.map((r) => [r.target.date, r.target.productName, r.target.unit, r.targetQty, r.actual, r.remaining, r.extra, r.pct ?? "", r.orderCount, r.targetOrders || "", r.status]));
+    }
+  }
+
+  const toneCls = { purple: "bg-purple-50 border-purple-200 text-purple-800", emerald: "bg-emerald-50 border-emerald-200 text-emerald-800", blue: "bg-blue-50 border-blue-200 text-blue-800", red: "bg-red-50 border-red-200 text-red-800" };
+
+  return (
+    <div data-targets="panel">
+      {alerts.length > 0 && (
+        <div className="mb-4 space-y-1" data-targets="alerts">
+          <div className="text-[11px] uppercase tracking-wide font-black text-slate-500">{t("Target Alerts")}</div>
+          {alerts.map((a) => (
+            <div key={a.key} className={`border px-3 py-2 text-sm font-bold flex justify-between items-center gap-3 ${toneCls[a.tone]}`}>
+              <span>{a.text}</span>
+              <button type="button" className="text-xs underline shrink-0" onClick={() => dismiss(a.key)}>{t("Dismiss")}</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 items-end mb-3">
+        {["Today", "Yesterday", "This Week", "This Month", "Custom Range"].map((p) => (
+          <Btn key={p} small variant={preset === p ? "primary" : "ghost"} onClick={() => setPreset(p)}>{p}</Btn>
+        ))}
+        {preset === "Custom Range" && (
+          <>
+            <input type="date" className={`${inputCls} max-w-[160px]`} value={from} onChange={(e) => setFrom(e.target.value)} />
+            <input type="date" className={`${inputCls} max-w-[160px]`} value={to} onChange={(e) => setTo(e.target.value)} />
+          </>
+        )}
+        <div className="flex-1" />
+        <Btn onClick={() => setModal("new")} disabled={products.length === 0}>New Target</Btn>
+      </div>
+      <div className="text-xs text-slate-500 mb-3">{fmtDate(rangeFrom)}{rangeFrom !== rangeTo ? ` – ${fmtDate(rangeTo)}` : ""} · Actual = saved Daily Orders (order date) for that product, excluding Cancelled.</div>
+
+      <div className="flex flex-wrap gap-3 mb-3">
+        <Stat label="Products with Targets" value={cards.products} />
+        <Stat label="Total Target Quantity" value={cards.target} />
+        <Stat label="Total Actual Ordered" value={cards.actual} accent="text-blue-700" />
+        <Stat label="Total Remaining Target" value={cards.remaining} accent="text-red-600" />
+      </div>
+      <div className="flex flex-wrap gap-3 mb-5">
+        <Stat label="Targets Achieved" value={cards.achieved} accent="text-emerald-600" />
+        <Stat label="Targets in Progress" value={cards.progress} accent="text-blue-700" />
+        <Stat label="Targets Not Started" value={cards.notStarted} accent="text-slate-500" />
+        <Stat label="Products Exceeding Targets" value={cards.above} accent="text-purple-700" />
+      </div>
+
+      <div className="flex flex-wrap gap-2 mb-3 items-center">
+        <input className={`${inputCls} max-w-xs`} placeholder="Search product..." value={q} onChange={(e) => setQ(e.target.value)} />
+        <Btn small variant={view === "progress" ? "primary" : "ghost"} onClick={() => setView("progress")}>Daily Targets</Btn>
+        <Btn small variant={view === "product" ? "primary" : "ghost"} onClick={() => setView("product")}>Product-wise Report</Btn>
+        <Btn small variant={view === "date" ? "primary" : "ghost"} onClick={() => setView("date")}>Date-wise Report</Btn>
+        <Btn small variant="dark" onClick={exportCsv}>Export Excel (CSV)</Btn>
+      </div>
+
+      {view === "product" ? (
+        <div className="bg-white border border-slate-200 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-3 py-2">Product</th><th className="px-3 py-2">Unit</th><th className="px-3 py-2 text-right">Days</th>
+              <th className="px-3 py-2 text-right">Target</th><th className="px-3 py-2 text-right">Actual</th><th className="px-3 py-2 text-right">Achievement %</th>
+              <th className="px-3 py-2 text-right">Order Count</th><th className="px-3 py-2 text-right">Targets Achieved</th>
+            </tr></thead>
+            <tbody>
+              {productReport.length === 0 && <tr><td colSpan={8} className="px-3 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+              {productReport.map((m) => (
+                <tr key={m.product + m.unit} className="border-t border-slate-100">
+                  <td className="px-3 py-2 font-bold">{m.product}</td><td className="px-3 py-2">{m.unit}</td><td className="px-3 py-2 text-right">{m.days}</td>
+                  <td className="px-3 py-2 text-right">{fmtQty(m.target)}</td><td className="px-3 py-2 text-right font-bold">{fmtQty(m.actual)}</td>
+                  <td className="px-3 py-2 text-right">{m.pct == null ? "-" : `${m.pct}%`}</td><td className="px-3 py-2 text-right">{m.orders}</td><td className="px-3 py-2 text-right">{m.achievedDays}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <div className="bg-white border border-slate-200 overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              {(view === "date" || rangeFrom !== rangeTo) && <th className="px-3 py-2">Date</th>}
+              <th className="px-3 py-2">Product</th><th className="px-3 py-2">Unit</th>
+              <th className="px-3 py-2 text-right">Target</th><th className="px-3 py-2 text-right">Actual</th><th className="px-3 py-2 text-right">Remaining</th>
+              <th className="px-3 py-2">Achievement %</th><th className="px-3 py-2 text-right">Order Count</th>
+              <th className="px-3 py-2">Status</th><th className="px-3 py-2">Actions</th>
+            </tr></thead>
+            <tbody>
+              {rows.length === 0 && <tr><td colSpan={10} className="px-3 py-6 text-center text-slate-400">Is mudda mein koi target nahi. "New Target" se add karein.</td></tr>}
+              {rows.map((r) => (
+                <tr key={r.target.id} className="border-t border-slate-100" data-target-row={r.target.productName}>
+                  {(view === "date" || rangeFrom !== rangeTo) && <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{fmtDate(r.target.date)}</td>}
+                  <td className="px-3 py-2 font-bold">{r.target.productName}{r.target.notes ? <div className="text-[10px] font-normal text-slate-400">{r.target.notes}</div> : null}</td>
+                  <td className="px-3 py-2 text-slate-500">{r.target.unit}</td>
+                  <td className="px-3 py-2 text-right">{fmtQty(r.targetQty)}</td>
+                  <td className="px-3 py-2 text-right font-bold">{fmtQty(r.actual)}</td>
+                  <td className="px-3 py-2 text-right text-red-600 font-bold">
+                    {fmtQty(r.remaining)}
+                    {r.extra > 0 && <div className="text-[10px] text-purple-700">+{fmtQty(r.extra)} {t("Extra")}</div>}
+                  </td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-2"><TargetProgressBar pct={r.pct} status={r.status} /><span className="text-xs font-bold">{r.pct == null ? "-" : `${r.pct}%`}</span></div>
+                  </td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">
+                    {r.orderCount}
+                    {r.targetOrders > 0 && <div className="text-[10px] text-slate-500">of {r.targetOrders} orders · {r.remainingOrders} left</div>}
+                  </td>
+                  <td className="px-3 py-2"><TargetStatusBadge status={r.status} /></td>
+                  <td className="px-3 py-2 whitespace-nowrap space-x-2">
+                    <button type="button" className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setModal(r.target)}>Edit</button>
+                    {isAdmin && <button type="button" className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete target for ${r.target.productName} on ${fmtDate(r.target.date)}? Orders are not affected.`)) onDeleteTarget(r.target.id); }}>Delete</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {modal && (
+        <Modal title={modal === "new" ? "New Target" : "Edit Target"} onClose={() => setModal(null)}>
+          <OrderTargetForm
+            products={products} targets={targets || []} initial={modal === "new" ? null : modal}
+            onCancel={() => setModal(null)}
+            onSave={(data) => { const ok = onSaveTarget(modal === "new" ? null : modal, data); if (ok) setModal(null); return ok; }}
+          />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+
+/* ---------------- Orders (Daily Call Orders) ---------------- */
+
+function Orders({ customers, products, orders, onCreateOrder, saveOrder, onConvertToInvoice, orderTargets, currentUser, onSaveTarget, onDeleteTarget, onUpdateOrder }) {
+  const [showForm, setShowForm] = useState(false);
+  const [tab, setTab] = useState("orders"); // orders | targets
+  const [editingOrder, setEditingOrder] = useState(null);
+  const [savingOrder, setSavingOrder] = useState(false);
+  const [form, setForm] = useState({
+    customerId: customers[0]?.id || "",
+    productId: products[0]?.id || "",
+    qty: 1,
+    requestedFor: "Kal Subah",
+    date: todayISO(),
+    notes: "",
+  });
+
+  const selectedCustomer = customers.find((c) => c.id === form.customerId);
+
+  function openEditOrder(o) {
+    setEditingOrder(o);
+    setForm({ customerId: o.customerId, productId: o.productId || "", qty: o.qty, requestedFor: o.requestedFor || "", date: o.date, notes: o.notes || "" });
+    setShowForm(true);
+  }
+  function closeOrderForm() {
+    setShowForm(false); setEditingOrder(null); setSavingOrder(false);
+    setForm({ customerId: customers[0]?.id || "", productId: products[0]?.id || "", qty: 1, requestedFor: "Kal Subah", date: todayISO(), notes: "" });
+  }
+
+  function submit() {
+    if (savingOrder) return; // double-click guard (an order must never be counted twice)
+    const customer = customers.find((c) => c.id === form.customerId);
+    if (!customer) { alert("Customer select karein."); return; }
+    if (!(Number(form.qty) > 0)) { alert("Qty zaroori hai."); return; }
+    if (!form.date) { alert("Order date zaroori hai."); return; }
+    const product = products.find((p) => p.id === form.productId);
+    if (editingOrder) {
+      setSavingOrder(true);
+      onUpdateOrder(editingOrder, {
+        customerId: form.customerId, customerName: customer.name, customerPhone: customer.phone || "",
+        productId: form.productId, productName: product ? product.name : (editingOrder.productId === form.productId ? editingOrder.productName : "Custom Item"),
+        unit: product ? product.unit : (editingOrder.productId === form.productId ? editingOrder.unit : ""),
+        qty: Number(form.qty), requestedFor: form.requestedFor, date: form.date, notes: form.notes,
+      });
+      closeOrderForm();
+      return;
+    }
+    setSavingOrder(true);
+    onCreateOrder({
+      customerId: form.customerId,
+      customerName: customer.name,
+      customerPhone: customer.phone || "",
+      productId: form.productId,
+      productName: product ? product.name : "Custom Item",
+      unit: product ? product.unit : "",
+      qty: Number(form.qty),
+      requestedFor: form.requestedFor,
+      date: form.date,
+      notes: form.notes,
+    });
+    closeOrderForm();
+  }
+
+  function updateStatus(id, status) {
+    const o = orders.find((o) => o.id === id);
+    saveOrder({ ...o, status });
+  }
+
+  const total = orders.length;
+  const pending = orders.filter((o) => o.status === "Pending").length;
+  const processing = orders.filter((o) => o.status === "Processing").length;
+  const completed = orders.filter((o) => o.status === "Completed").length;
+
+  const sorted = [...orders].sort((a, b) => new Date(b.date) - new Date(a.date));
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Daily Orders</h2>
+        <div className="flex gap-2 flex-wrap">
+          <Btn small variant={tab === "orders" ? "primary" : "ghost"} onClick={() => setTab("orders")}>Orders</Btn>
+          <Btn small variant={tab === "targets" ? "primary" : "ghost"} onClick={() => setTab("targets")}>Daily Targets</Btn>
+          {tab === "orders" && <Btn onClick={() => setShowForm(true)} disabled={customers.length === 0}>+ New Order</Btn>}
+        </div>
+      </div>
+      {tab === "targets" ? (
+        <DailyTargetsPanel products={products} orders={orders} targets={orderTargets} currentUser={currentUser} onSaveTarget={onSaveTarget} onDeleteTarget={onDeleteTarget} />
+      ) : (<>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Jab customer call kar ke order de ("mujhe subah cement chahiye"), yahan note kar lein — baad mein isi order se seedha invoice ban jayegi.
+      </div>
+
+      <div className="flex flex-wrap gap-3 mb-6">
+        <Stat label="Total Orders" value={total} />
+        <Stat label="Pending" value={pending} accent="text-red-600" />
+        <Stat label="Processing" value={processing} accent="text-blue-700" />
+        <Stat label="Completed" value={completed} accent="text-emerald-600" />
+      </div>
+
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Ref</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2">Phone</th>
+            <th className="px-4 py-2">Item</th><th className="px-4 py-2 text-right">Qty</th>
+            <th className="px-4 py-2">Requested For</th><th className="px-4 py-2">Status</th><th></th>
+          </tr></thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi order nahi.</td></tr>}
+            {sorted.map((o) => (
+              <tr key={o.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-black text-blue-700">{o.code}</td>
+                <td className="px-4 py-2 font-bold">{o.customerName}</td>
+                <td className="px-4 py-2 text-slate-500">{o.customerPhone || "-"}</td>
+                <td className="px-4 py-2">{o.productName || "-"} {o.unit ? `(${o.unit})` : ""}</td>
+                <td className="px-4 py-2 text-right">{o.qty}</td>
+                <td className="px-4 py-2 text-slate-500">{o.requestedFor || "-"}</td>
+                <td className="px-4 py-2">
+                  <select className="text-xs border border-slate-300 px-1.5 py-1" value={o.status} onChange={(e) => updateStatus(o.id, e.target.value)}>
+                    {ORDER_STATUSES.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  {(o.status === "Pending" || o.status === "Processing") && (
+                    <button className="text-xs font-bold text-blue-700 hover:underline" onClick={() => onConvertToInvoice(o)}>Convert to Invoice</button>
+                  )}
+                  {o.status !== "Completed" && o.status !== "Cancelled" && (
+                    <button className="text-xs font-bold text-slate-500 hover:text-blue-700 ml-3" onClick={() => openEditOrder(o)}>Edit</button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      </>)}
+
+      {showForm && (
+        <Modal title={editingOrder ? `Edit Order ${editingOrder.code}` : "New Order"} onClose={closeOrderForm}>
+          <Field label="Customer">
+            <select className={inputCls} value={form.customerId} onChange={(e) => setForm({ ...form, customerId: e.target.value })}>
+              {customers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </Field>
+          {selectedCustomer?.phone && <div className="text-xs text-slate-500 mb-3">Phone: {selectedCustomer.phone}</div>}
+          <Field label="Product">
+            <select className={inputCls} value={form.productId} onChange={(e) => setForm({ ...form, productId: e.target.value })}>
+              <option value="">Custom Item</option>
+              {products.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Qty"><input type="number" className={inputCls} value={form.qty} onChange={(e) => setForm({ ...form, qty: e.target.value })} /></Field>
+            <Field label="Requested For">
+              <input className={inputCls} placeholder="e.g. Kal Subah, Aaj Shaam" value={form.requestedFor} onChange={(e) => setForm({ ...form, requestedFor: e.target.value })} />
+            </Field>
+          </div>
+          <Field label="Order Date (call received)"><input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
+          <Field label="Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
+          <div className="flex gap-2"><Btn onClick={submit} disabled={savingOrder}>Save Order</Btn><Btn variant="ghost" onClick={closeOrderForm}>Cancel</Btn></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Promise To Pay (Phase 3) ---------------- */
+
+function PromiseForm({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, initial, onSave, onCancel }) {
+  const [customerId, setCustomerId] = useState(initial?.customerId || customers[0]?.id || "");
+  const [custSearch, setCustSearch] = useState("");
+  const [amount, setAmount] = useState(initial?.amount ?? "");
+  const [promiseDate, setPromiseDate] = useState(initial?.promiseDate || todayISO());
+  const [expectedDate, setExpectedDate] = useState(initial?.expectedDate || todayISO());
+  const [notes, setNotes] = useState(initial?.notes || "");
+  const [error, setError] = useState("");
+
+  const customer = customers.find((c) => c.id === customerId);
+  const outstanding = customer ? computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments).outstanding : 0;
+  const filteredCustomers = customers.filter((c) => c.name.toLowerCase().includes(custSearch.toLowerCase()));
+  const isEdit = !!initial;
+
+  function submit() {
+    if (!customerId) { setError("Customer select karein."); return; }
+    if (!Number(amount) || Number(amount) <= 0) { setError("Promise amount zaroori hai."); return; }
+    if (!expectedDate) { setError("Expected Payment Date zaroori hai."); return; }
+    setError("");
+    const cust = customers.find((c) => c.id === customerId);
+    onSave({ customerId, customerName: cust.name, amount: Number(amount), promiseDate, expectedDate, notes: notes.trim() });
+  }
+
+  return (
+    <div>
+      {!isEdit ? (
+        <Field label="Customer">
+          <input className={`${inputCls} mb-1`} placeholder="Search customer..." value={custSearch} onChange={(e) => setCustSearch(e.target.value)} />
+          <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+            {filteredCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </Field>
+      ) : (
+        <div className="text-sm font-bold text-slate-700 bg-slate-50 border border-slate-200 px-3 py-2 mb-3">{customer?.name}</div>
+      )}
+      {customer && (
+        <div className="text-xs text-slate-500 mb-3">
+          Current Outstanding: <span className={`font-black ${outstanding > 0 ? "text-red-600" : "text-emerald-600"}`}>{fmtMoney(outstanding)}</span>
+        </div>
+      )}
+      <Field label="Promise Amount (Rs)">
+        <input type="number" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} />
+      </Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Promise Date">
+          <input type="date" className={inputCls} value={promiseDate} onChange={(e) => setPromiseDate(e.target.value)} />
+        </Field>
+        <Field label="Expected Payment Date">
+          <input type="date" className={inputCls} value={expectedDate} onChange={(e) => setExpectedDate(e.target.value)} />
+        </Field>
+      </div>
+      <Field label="Notes (optional)">
+        <input className={inputCls} value={notes} onChange={(e) => setNotes(e.target.value)} />
+      </Field>
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2 mt-2">
+        <Btn onClick={submit}>{isEdit ? "Save Changes" : "Save Promise"}</Btn>
+        <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
+      </div>
+    </div>
+  );
+}
+
+function PromiseCalendar({ promises }) {
+  const active = promises.filter((p) => p.status !== "Deleted").map(promiseWithComputed);
+  const byDate = {};
+  active.forEach((p) => {
+    if (p.status === "Completed" || p.status === "Cancelled") return;
+    if (!byDate[p.expectedDate]) byDate[p.expectedDate] = [];
+    byDate[p.expectedDate].push(p);
+  });
+  const dates = Object.keys(byDate).sort();
+
+  return (
+    <div className="bg-white border border-slate-200 overflow-x-auto">
+      <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Calendar — Upcoming Promised Payments</div>
+      {dates.length === 0 ? (
+        <div className="px-4 py-6 text-center text-slate-400">Koi promise nahi mila.</div>
+      ) : (
+        <div className="divide-y divide-slate-100">
+          {dates.map((d) => (
+            <div key={d} className="px-4 py-2.5">
+              <div className="text-xs font-black uppercase text-slate-500 mb-1">
+                {fmtDate(d)} {d === todayISO() ? <span className="text-blue-700">(Today)</span> : ""}
+              </div>
+              <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+                {byDate[d].map((p) => (
+                  <div key={p.id}>
+                    <span className="font-bold">{p.customerName}</span> — <span className="font-black text-blue-700">{fmtMoney(p.remainingAmount)}</span>{" "}
+                    <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 ${PROMISE_STATUS_TONE[p.status]}`}>{p.status}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PromiseToPayPage({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, currentUser, onCreatePromise, onUpdatePromise, onCancelPromise, focusPromiseId, setFocusPromiseId }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [cancelling, setCancelling] = useState(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const [q, setQ] = useState("");
+  const [statusFilter, setStatusFilter] = useState("All");
+  const [view, setView] = useState("list"); // list | calendar
+
+  const canCancel = currentUser?.role === "admin";
+
+  const active = promises.filter((p) => p.status !== "Deleted").map(promiseWithComputed);
+  const filtered = active
+    .filter((p) => statusFilter === "All" || p.status === statusFilter)
+    .filter((p) => !q.trim() || p.customerName.toLowerCase().includes(q.toLowerCase()) || p.code.toLowerCase().includes(q.toLowerCase()) || String(p.amount).includes(q))
+    .sort((a, b) => new Date(a.expectedDate) - new Date(b.expectedDate));
+
+  useEffect(() => {
+    if (focusPromiseId) {
+      const p = promises.find((p) => p.id === focusPromiseId);
+      if (p) { setQ(p.code); }
+      setFocusPromiseId(null);
+    }
+  }, [focusPromiseId]);
+
+  function confirmCancel() {
+    if (currentUser?.role !== "admin") { alert("Sirf Admin promise cancel kar sakta hai."); return; }
+    if (!cancelReason.trim()) { alert("Reason likhna zaroori hai."); return; }
+    onCancelPromise(cancelling, cancelReason.trim());
+    setCancelling(null); setCancelReason("");
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Promise To Pay</h2>
+        <div className="flex gap-2">
+          <Btn variant={view === "list" ? "primary" : "ghost"} small onClick={() => setView("list")}>List</Btn>
+          <Btn variant={view === "calendar" ? "primary" : "ghost"} small onClick={() => setView("calendar")}>Calendar</Btn>
+          <Btn onClick={() => { setEditing(null); setShowForm(true); }} disabled={customers.length === 0}>+ New Promise</Btn>
+        </div>
+      </div>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Jab customer kahe "main is tareekh tak itna pay kar dunga", yahan record karein — status apne aap update hota rahega aur overdue promises "Broken Promise" ban jayenge.
+      </div>
+
+      {view === "calendar" ? (
+        <PromiseCalendar promises={promises} />
+      ) : (
+        <>
+          <div className="flex flex-wrap gap-2 mb-3">
+            <input className={`${inputCls} max-w-xs`} placeholder="Search customer / promise # / amount / status..." value={q} onChange={(e) => setQ(e.target.value)} />
+            <select className={`${inputCls} max-w-[180px]`} value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)}>
+              <option value="All">All Status</option>
+              {PROMISE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="bg-white border border-slate-200 overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+                <th className="px-4 py-2">Promise #</th><th className="px-4 py-2">Customer</th><th className="px-4 py-2 text-right">Amount</th>
+                <th className="px-4 py-2">Promise Date</th><th className="px-4 py-2">Expected Date</th><th className="px-4 py-2 text-right">Paid</th>
+                <th className="px-4 py-2 text-right">Remaining</th><th className="px-4 py-2">Status</th><th></th>
+              </tr></thead>
+              <tbody>
+                {filtered.length === 0 && <tr><td colSpan={9} className="px-4 py-6 text-center text-slate-400">Koi promise nahi mila.</td></tr>}
+                {filtered.map((p) => (
+                  <tr key={p.id} className="border-t border-slate-100">
+                    <td className="px-4 py-2 font-black text-blue-700">{p.code}</td>
+                    <td className="px-4 py-2 font-bold">{p.customerName}</td>
+                    <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.amount)}</td>
+                    <td className="px-4 py-2 text-slate-500">{fmtDate(p.promiseDate)}</td>
+                    <td className="px-4 py-2 text-slate-500">{fmtDate(p.expectedDate)}</td>
+                    <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(p.paidAmount)}</td>
+                    <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(p.remainingAmount)}</td>
+                    <td className="px-4 py-2"><span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${PROMISE_STATUS_TONE[p.status]}`}>{p.status}</span></td>
+                    <td className="px-4 py-2 text-right whitespace-nowrap space-x-2">
+                      {p.status !== "Completed" && p.status !== "Cancelled" && (
+                        <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => { setEditing(p); setShowForm(true); }}>Edit</button>
+                      )}
+                      {canCancel && p.status !== "Cancelled" && p.status !== "Completed" && (
+                        <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => setCancelling(p)}>Cancel</button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      {showForm && (
+        <Modal title={editing ? `Edit Promise ${editing.code}` : "New Promise"} onClose={() => { setShowForm(false); setEditing(null); }}>
+          <PromiseForm
+            customers={customers} invoices={invoices} payments={payments} returns={returns} exchanges={exchanges}
+            promises={promises} transfers={transfers} adjustments={adjustments} initial={editing}
+            onCancel={() => { setShowForm(false); setEditing(null); }}
+            onSave={(data) => { editing ? onUpdatePromise(editing, data) : onCreatePromise(data); setShowForm(false); setEditing(null); }}
+          />
+        </Modal>
+      )}
+
+      {cancelling && (
+        <Modal title={`Cancel Promise ${cancelling.code}`} onClose={() => setCancelling(null)}>
+          <div className="text-sm text-slate-600 mb-3">Ye promise cancel karne se history mein "Cancelled" reh jayega — ledger se hatega nahi.</div>
+          <Field label="Reason">
+            <input className={inputCls} value={cancelReason} onChange={(e) => setCancelReason(e.target.value)} autoFocus />
+          </Field>
+          <div className="flex gap-2">
+            <Btn variant="danger" onClick={confirmCancel}>Confirm Cancel</Btn>
+            <Btn variant="ghost" onClick={() => setCancelling(null)}>Cancel</Btn>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Leads ---------------- */
+
+function Leads({ leads, saveLead, deleteLead }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({ name: "", phone: "", source: "", audienceType: "Builder", status: "New", followUpDate: "", notes: "" });
+
+  function openNew() { setEditing(null); setForm({ name: "", phone: "", source: "", audienceType: "Builder", status: "New", followUpDate: "", notes: "" }); setShowForm(true); }
+  function openEdit(l) { setEditing(l); setForm(l); setShowForm(true); }
+
+  function submit() {
+    if (!form.name.trim()) { alert("Lead ka naam zaroori hai."); return; }
+    if (editing) saveLead({ ...editing, ...form });
+    else saveLead({ id: uid("lead"), code: "LEA-" + Math.floor(1000 + Math.random() * 9000), ...form, createdAt: todayISO() });
+    setShowForm(false);
+  }
+
+  function updateStatus(l, status) { saveLead({ ...l, status }); }
+
+  const sorted = [...leads].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-black uppercase tracking-tight">Leads</h2>
+        <Btn onClick={openNew}>+ New Lead</Btn>
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Ref</th><th className="px-4 py-2">Name</th><th className="px-4 py-2">Phone</th>
+            <th className="px-4 py-2">Source</th><th className="px-4 py-2">Audience</th><th className="px-4 py-2">Follow-up</th>
+            <th className="px-4 py-2">Status</th><th></th>
+          </tr></thead>
+          <tbody>
+            {sorted.length === 0 && <tr><td colSpan={8} className="px-4 py-6 text-center text-slate-400">Koi lead nahi.</td></tr>}
+            {sorted.map((l) => (
+              <tr key={l.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-black text-blue-700">{l.code}</td>
+                <td className="px-4 py-2 font-bold cursor-pointer hover:text-blue-700" onClick={() => openEdit(l)}>{l.name}</td>
+                <td className="px-4 py-2 text-slate-500">{l.phone || "-"}</td>
+                <td className="px-4 py-2 text-slate-500">{l.source || "-"}</td>
+                <td className="px-4 py-2 text-slate-500">{l.audienceType}</td>
+                <td className="px-4 py-2 text-slate-500">{l.followUpDate ? fmtDate(l.followUpDate) : "-"}</td>
+                <td className="px-4 py-2">
+                  <select className="text-xs border border-slate-300 px-1.5 py-1" value={l.status} onChange={(e) => updateStatus(l, e.target.value)}>
+                    {LEAD_STATUSES.map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => openEdit(l)}>Edit</button>
+                  <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete lead ${l.name}?`)) deleteLead(l.id); }}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {showForm && (
+        <Modal title={editing ? "Edit Lead" : "New Lead"} onClose={() => setShowForm(false)}>
+          <Field label="Name"><input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+          <Field label="Phone"><input className={inputCls} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
+          <Field label="Source"><input className={inputCls} placeholder="e.g. Referral, Site visit" value={form.source} onChange={(e) => setForm({ ...form, source: e.target.value })} /></Field>
+          <Field label="Audience Type">
+            <select className={inputCls} value={form.audienceType} onChange={(e) => setForm({ ...form, audienceType: e.target.value })}>
+              {AUDIENCE_TYPES.map((a) => <option key={a}>{a}</option>)}
+            </select>
+          </Field>
+          <Field label="Follow-up Date"><input type="date" className={inputCls} value={form.followUpDate} onChange={(e) => setForm({ ...form, followUpDate: e.target.value })} /></Field>
+          <Field label="Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
+          <div className="flex gap-2"><Btn onClick={submit}>Save Lead</Btn><Btn variant="ghost" onClick={() => setShowForm(false)}>Cancel</Btn></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Products ---------------- */
+
+function Products({ products, saveProduct, deleteProduct }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+  const [form, setForm] = useState({ name: "", unit: "Bag", price: 0 });
+
+  function openNew() { setEditing(null); setForm({ name: "", unit: "Bag", price: 0 }); setShowForm(true); }
+  function openEdit(p) { setEditing(p); setForm(p); setShowForm(true); }
+
+  function submit() {
+    if (!form.name.trim()) { alert("Product ka naam zaroori hai."); return; }
+    if (editing) saveProduct({ ...editing, ...form, price: Number(form.price) });
+    else saveProduct({ id: uid("prod"), ...form, price: Number(form.price) });
+    setShowForm(false);
+  }
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-black uppercase tracking-tight">Products</h2>
+        <Btn onClick={openNew}>+ New Purchase</Btn>
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Product Name</th><th className="px-4 py-2">Unit</th><th className="px-4 py-2 text-right">Rate</th><th></th>
+          </tr></thead>
+          <tbody>
+            {products.length === 0 && <tr><td colSpan={4} className="px-4 py-6 text-center text-slate-400">Koi product nahi.</td></tr>}
+            {products.map((p) => (
+              <tr key={p.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-bold">{p.name}</td>
+                <td className="px-4 py-2 text-slate-500">{p.unit}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.price)}</td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => openEdit(p)}>Edit</button>
+                  <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete ${p.name}?`)) deleteProduct(p.id); }}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {showForm && (
+        <Modal title={editing ? "Edit Product" : "New Product"} onClose={() => setShowForm(false)}>
+          <Field label="Product Name"><input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+          <Field label="Unit">
+            <input list="unit-suggestions" className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
+          </Field>
+          <Field label="Rate / Unit"><input type="number" className={inputCls} value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></Field>
+          <div className="flex gap-2"><Btn onClick={submit}>Save Product</Btn><Btn variant="ghost" onClick={() => setShowForm(false)}>Cancel</Btn></div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Offers ---------------- */
+
+function OfferForm({ initial, onSave, onCancel }) {
+  const [form, setForm] = useState(initial || { text: "", active: true, bannerUrl: "" });
+  async function handleBanner(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { alert("Sirf image file (PNG/JPG) upload karein."); return; }
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 800);
+      setForm({ ...form, bannerUrl: dataUrl });
+    } catch { alert("Banner upload nahi ho saka, dobara try karein."); }
+  }
+  function submit() {
+    if (!form.text.trim()) { alert("Offer ka text zaroori hai."); return; }
+    onSave(form);
+  }
+  return (
+    <div>
+      <Field label="Offer Text (scrolling ticker mein dikhega)">
+        <input className={inputCls} value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} placeholder="e.g. Is hafte cement par Rs 50/bag discount!" />
+      </Field>
+      <Field label="Banner Image (optional)">
+        {form.bannerUrl ? (
+          <div className="flex items-center gap-2">
+            <img src={form.bannerUrl} alt="Banner" className="h-16 object-contain border border-slate-200" />
+            <button type="button" className="text-xs font-bold text-red-600" onClick={() => setForm({ ...form, bannerUrl: "" })}>Remove</button>
+          </div>
+        ) : (
+          <input type="file" accept="image/*" onChange={handleBanner} className="text-xs" />
+        )}
+      </Field>
+      <Field label="Active (customer portal mein dikhaya jaye)">
+        <input type="checkbox" checked={form.active} onChange={(e) => setForm({ ...form, active: e.target.checked })} />
+      </Field>
+      <div className="flex gap-2 mt-2"><Btn onClick={submit}>Save Offer</Btn><Btn variant="ghost" onClick={onCancel}>Cancel</Btn></div>
+    </div>
+  );
+}
+
+function Offers({ offers, saveOffer, deleteOffer }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-black uppercase tracking-tight">Offers</h2>
+        <Btn onClick={() => { setEditing(null); setShowForm(true); }}>+ New Offer</Btn>
+      </div>
+      <div className="bg-white border border-slate-200 divide-y divide-slate-100">
+        {offers.length === 0 && <div className="px-4 py-6 text-center text-slate-400">Koi offer nahi bana.</div>}
+        {offers.map((o) => (
+          <div key={o.id} className="px-4 py-3 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              {o.bannerUrl && <img src={o.bannerUrl} alt="" className="h-10 w-16 object-cover border border-slate-200" />}
+              <div>
+                <div className="font-bold text-sm">{o.text}</div>
+                <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${o.active ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-600"}`}>{o.active ? "Active" : "Inactive"}</span>
+              </div>
+            </div>
+            <div className="whitespace-nowrap">
+              <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => { setEditing(o); setShowForm(true); }}>Edit</button>
+              <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm("Delete this offer?")) deleteOffer(o.id); }}>Delete</button>
+            </div>
+          </div>
+        ))}
+      </div>
+      {showForm && (
+        <Modal title={editing ? "Edit Offer" : "New Offer"} onClose={() => setShowForm(false)}>
+          <OfferForm initial={editing} onCancel={() => setShowForm(false)} onSave={(data) => { editing ? saveOffer({ ...editing, ...data }) : saveOffer({ id: uid("off"), ...data }); setShowForm(false); }} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Drivers ---------------- */
+
+function DriverForm({ initial, onSave, onCancel, nextCode }) {
+  const [form, setForm] = useState(initial || { name: "", phone: "", vehicleType: "Rickshaw", vehicleNumber: "" });
+  function submit() {
+    if (!form.name.trim()) { alert("Driver ka naam zaroori hai."); return; }
+    onSave(form);
+  }
+  return (
+    <div>
+      {!initial && <div className="text-xs text-slate-500 mb-3">ID: <span className="font-bold">{nextCode}</span></div>}
+      <Field label="Driver Name"><input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></Field>
+      <Field label="Phone"><input className={inputCls} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
+      <Field label="Vehicle Type">
+        <select className={inputCls} value={form.vehicleType} onChange={(e) => setForm({ ...form, vehicleType: e.target.value })}>
+          {VEHICLE_TYPES.map((v) => <option key={v}>{v}</option>)}
+        </select>
+      </Field>
+      <Field label="Vehicle Number"><input className={inputCls} value={form.vehicleNumber} onChange={(e) => setForm({ ...form, vehicleNumber: e.target.value })} /></Field>
+      <div className="flex gap-2 mt-2"><Btn onClick={submit}>Save Driver</Btn><Btn variant="ghost" onClick={onCancel}>Cancel</Btn></div>
+    </div>
+  );
+}
+
+function Drivers({ drivers, saveDriver, deleteDriver, nextCode }) {
+  const [showForm, setShowForm] = useState(false);
+  const [editing, setEditing] = useState(null);
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-black uppercase tracking-tight">Drivers</h2>
+        <Btn onClick={() => { setEditing(null); setShowForm(true); }}>+ New Driver</Btn>
+      </div>
+      <div className="bg-white border border-slate-200 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Driver ID</th><th className="px-4 py-2">Name</th><th className="px-4 py-2">Phone</th>
+            <th className="px-4 py-2">Vehicle</th><th className="px-4 py-2">Number</th><th></th>
+          </tr></thead>
+          <tbody>
+            {drivers.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-slate-400">Koi driver add nahi hua.</td></tr>}
+            {drivers.map((d) => (
+              <tr key={d.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-black text-blue-700">{d.code}</td>
+                <td className="px-4 py-2 font-bold">{d.name}</td>
+                <td className="px-4 py-2 text-slate-500">{d.phone || "-"}</td>
+                <td className="px-4 py-2 text-slate-500">{d.vehicleType}</td>
+                <td className="px-4 py-2 text-slate-500">{d.vehicleNumber || "-"}</td>
+                <td className="px-4 py-2 text-right whitespace-nowrap">
+                  <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => { setEditing(d); setShowForm(true); }}>Edit</button>
+                  <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete ${d.name}?`)) deleteDriver(d.id); }}>Delete</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {showForm && (
+        <Modal title={editing ? `Edit Driver ${editing.code}` : "New Driver"} onClose={() => setShowForm(false)}>
+          <DriverForm initial={editing} nextCode={nextCode} onCancel={() => setShowForm(false)} onSave={(data) => { editing ? saveDriver({ ...editing, ...data }) : saveDriver({ id: uid("drv"), code: nextCode, ...data }); setShowForm(false); }} />
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Reports ---------------- */
+
+function Reports({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, orders, commissionAgents, commissionRules, commissionTransactions, products }) {
+  const [from, setFrom] = useState(todayISO().slice(0, 8) + "01");
+  const [to, setTo] = useState(todayISO());
+  const [commissionView, setCommissionView] = useState("agent"); // agent | date | product | customer
+  const [commissionRangePreset, setCommissionRangePreset] = useState("This Month");
+  const [commissionFrom, setCommissionFrom] = useState(todayISO().slice(0, 8) + "01");
+  const [commissionTo, setCommissionTo] = useState(todayISO());
+
+  const inRange = (d) => d >= from && d <= to;
+
+  const salesInRange = invoices.filter((i) => inRange(i.date) && i.docStatus !== "Cancelled").reduce((s, i) => s + i.total, 0);
+  const collectedInRange = payments.filter((p) => inRange(p.date)).reduce((s, p) => s + (p.kind === "Refund" ? -p.amount : p.amount), 0);
+  const totalInvoices = invoices.filter((i) => inRange(i.date)).length;
+  const totalOrders = orders.filter((o) => inRange(o.date)).length;
+  const totalReturnAmount = returns.filter((r) => inRange(r.date) && r.status !== "Deleted").reduce((s, r) => s + r.amount, 0);
+
+  const outstandingCustomers = useMemo(() => {
+    const byId = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+    return customers
+      .map((c) => ({ ...c, outstanding: byId[c.id] }))
+      .filter((c) => c.outstanding > 0)
+      .sort((a, b) => b.outstanding - a.outstanding);
+  }, [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments]);
+
+  function exportCSV() {
+    const rows = [["Customer", "Outstanding"], ...outstandingCustomers.map((c) => [c.name, c.outstanding])];
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `outstanding_${from}_to_${to}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  // Commission Reports date range presets.
+  useEffect(() => {
+    const t = todayISO();
+    if (commissionRangePreset === "Today") { setCommissionFrom(t); setCommissionTo(t); }
+    else if (commissionRangePreset === "This Week") {
+      const d = new Date(); const day = d.getDay(); const monday = new Date(d); monday.setDate(d.getDate() - ((day + 6) % 7));
+      setCommissionFrom(dateToLocalISO(monday)); setCommissionTo(t);
+    } else if (commissionRangePreset === "This Month") {
+      setCommissionFrom(t.slice(0, 8) + "01"); setCommissionTo(t);
+    }
+    // "Custom Range" leaves commissionFrom/commissionTo as manually set.
+  }, [commissionRangePreset]);
+
+  const commissionInRange = (commissionTransactions || []).filter((tx) => tx.status !== "Cancelled" && tx.invoiceDate >= commissionFrom && tx.invoiceDate <= commissionTo);
+
+  const agentWise = useMemo(() => {
+    const map = {};
+    commissionInRange.forEach((tx) => {
+      if (!map[tx.agentId]) map[tx.agentId] = { agentName: tx.agentName, count: 0, commission: 0, paid: 0, remaining: 0 };
+      map[tx.agentId].count += 1;
+      map[tx.agentId].commission += Number(tx.commissionAmount) || 0;
+      map[tx.agentId].paid += Number(tx.paidAmount) || 0;
+      map[tx.agentId].remaining += Number(tx.remainingAmount) || 0;
+    });
+    return Object.entries(map).map(([agentId, v]) => ({ agentId, ...v })).sort((a, b) => b.commission - a.commission);
+  }, [commissionInRange]);
+
+  const dateWise = useMemo(() => {
+    const map = {};
+    commissionInRange.forEach((tx) => {
+      if (!map[tx.invoiceDate]) map[tx.invoiceDate] = { count: 0, commission: 0 };
+      map[tx.invoiceDate].count += 1;
+      map[tx.invoiceDate].commission += Number(tx.commissionAmount) || 0;
+    });
+    return Object.entries(map).map(([date, v]) => ({ date, ...v })).sort((a, b) => new Date(b.date) - new Date(a.date));
+  }, [commissionInRange]);
+
+  const productWise = useMemo(() => {
+    const map = {};
+    commissionInRange.forEach((tx) => {
+      (tx.breakdown || []).forEach((l) => {
+        const key = l.source || "Other";
+        if (!map[key]) map[key] = { source: key, commission: 0 };
+        map[key].commission += Number(l.commission) || 0;
+      });
+    });
+    return Object.values(map).sort((a, b) => b.commission - a.commission);
+  }, [commissionInRange]);
+
+  const customerWise = useMemo(() => {
+    const map = {};
+    commissionInRange.forEach((tx) => {
+      if (!map[tx.customerId]) map[tx.customerId] = { customerName: tx.customerName, count: 0, commission: 0 };
+      map[tx.customerId].count += 1;
+      map[tx.customerId].commission += Number(tx.commissionAmount) || 0;
+    });
+    return Object.entries(map).map(([customerId, v]) => ({ customerId, ...v })).sort((a, b) => b.commission - a.commission);
+  }, [commissionInRange]);
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-4">Reports</h2>
+
+      <div className="flex flex-wrap items-end gap-3 mb-4">
+        <Field label="From"><input type="date" className={inputCls} value={from} onChange={(e) => setFrom(e.target.value)} /></Field>
+        <Field label="To"><input type="date" className={inputCls} value={to} onChange={(e) => setTo(e.target.value)} /></Field>
+        <Btn variant="dark" onClick={exportCSV}>Export Excel (CSV)</Btn>
+        <Btn variant="ghost" onClick={() => window.print()}>Export PDF</Btn>
+      </div>
+
+      <div className="flex flex-wrap gap-3 mb-6">
+        <Stat label="Sales in Range" value={fmtMoney(salesInRange)} />
+        <Stat label="Collected in Range" value={fmtMoney(collectedInRange)} accent="text-emerald-600" />
+        <Stat label="Total Invoices" value={totalInvoices} />
+        <Stat label="Total Orders" value={totalOrders} />
+        <Stat label="Total Return Amount" value={fmtMoney(totalReturnAmount)} accent="text-red-600" />
+      </div>
+
+      <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
+        <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">Customers with Outstanding Balance</div>
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Customer</th><th className="px-4 py-2 text-right">Outstanding</th>
+          </tr></thead>
+          <tbody>
+            {outstandingCustomers.length === 0 && <tr><td colSpan={2} className="px-4 py-6 text-center text-slate-400">Koi outstanding nahi.</td></tr>}
+            {outstandingCustomers.map((c) => (
+              <tr key={c.id} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-bold">{c.name}</td>
+                <td className="px-4 py-2 text-right font-black text-red-600">{fmtMoney(c.outstanding)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Commission Reports */}
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h3 className="text-lg font-black uppercase tracking-tight">Commission Reports</h3>
+        <div className="flex gap-2 flex-wrap items-end">
+          {["Today", "This Week", "This Month", "Custom Range"].map((preset) => (
+            <Btn key={preset} variant={commissionRangePreset === preset ? "primary" : "ghost"} small onClick={() => setCommissionRangePreset(preset)}>{preset}</Btn>
+          ))}
+          {commissionRangePreset === "Custom Range" && (
+            <>
+              <input type="date" className={`${inputCls} max-w-[150px]`} value={commissionFrom} onChange={(e) => setCommissionFrom(e.target.value)} />
+              <input type="date" className={`${inputCls} max-w-[150px]`} value={commissionTo} onChange={(e) => setCommissionTo(e.target.value)} />
+            </>
+          )}
+        </div>
+      </div>
+      <div className="flex gap-2 mb-3">
+        {[["agent", "Agent-wise"], ["date", "Date-wise"], ["product", "Product-wise"], ["customer", "Customer-wise"]].map(([id, label]) => (
+          <Btn key={id} variant={commissionView === id ? "primary" : "ghost"} small onClick={() => setCommissionView(id)}>{label}</Btn>
+        ))}
+      </div>
+
+      {commissionView === "agent" && (
+        <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Agent</th><th className="px-4 py-2 text-right">Transactions</th>
+              <th className="px-4 py-2 text-right">Commission</th><th className="px-4 py-2 text-right">Paid</th><th className="px-4 py-2 text-right">Remaining</th>
+            </tr></thead>
+            <tbody>
+              {agentWise.length === 0 && <tr><td colSpan={5} className="px-4 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+              {agentWise.map((a) => (
+                <tr key={a.agentId} className="border-t border-slate-100">
+                  <td className="px-4 py-2 font-bold">{a.agentName}</td>
+                  <td className="px-4 py-2 text-right">{a.count}</td>
+                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(a.commission)}</td>
+                  <td className="px-4 py-2 text-right text-emerald-600 font-bold">{fmtMoney(a.paid)}</td>
+                  <td className="px-4 py-2 text-right text-red-600 font-bold">{fmtMoney(a.remaining)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {commissionView === "date" && (
+        <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Date</th><th className="px-4 py-2 text-right">Transactions</th><th className="px-4 py-2 text-right">Commission</th>
+            </tr></thead>
+            <tbody>
+              {dateWise.length === 0 && <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+              {dateWise.map((d) => (
+                <tr key={d.date} className="border-t border-slate-100">
+                  <td className="px-4 py-2 font-bold">{fmtDate(d.date)}</td>
+                  <td className="px-4 py-2 text-right">{d.count}</td>
+                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(d.commission)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {commissionView === "product" && (
+        <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Product / Rule Source</th><th className="px-4 py-2 text-right">Commission</th>
+            </tr></thead>
+            <tbody>
+              {productWise.length === 0 && <tr><td colSpan={2} className="px-4 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+              {productWise.map((p) => (
+                <tr key={p.source} className="border-t border-slate-100">
+                  <td className="px-4 py-2 font-bold">{p.source}</td>
+                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(p.commission)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {commissionView === "customer" && (
+        <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
+          <table className="w-full text-sm">
+            <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="px-4 py-2">Customer</th><th className="px-4 py-2 text-right">Transactions</th><th className="px-4 py-2 text-right">Commission</th>
+            </tr></thead>
+            <tbody>
+              {customerWise.length === 0 && <tr><td colSpan={3} className="px-4 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+              {customerWise.map((c) => (
+                <tr key={c.customerId} className="border-t border-slate-100">
+                  <td className="px-4 py-2 font-bold">{c.customerName}</td>
+                  <td className="px-4 py-2 text-right">{c.count}</td>
+                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(c.commission)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Sales Assistant ---------------- */
+
+function SalesAssistant({ customers }) {
+  const [customerId, setCustomerId] = useState(customers[0]?.id || "");
+  const [language, setLanguage] = useState("en");
+  const customer = customers.find((c) => c.id === customerId);
+  const [copied, setCopied] = useState(false);
+
+  const message = customer
+    ? (MESSAGE_TEMPLATES[language][customer.audienceType] || MESSAGE_TEMPLATES[language].Builder)(customer.name, 0)
+    : "";
+
+  function copyText() {
+    navigator.clipboard.writeText(message);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  }
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-4">Sales Assistant</h2>
+      <div className="text-xs text-slate-400 mb-4 max-w-2xl">
+        Customer ke audience type ke hisaab se ek ready WhatsApp message generate karein — Builder, Contractor, Developer, ya Housing Society.
+      </div>
+      <div className="bg-white border border-slate-200 p-4 max-w-xl">
+        <Field label="Customer">
+          <select className={inputCls} value={customerId} onChange={(e) => setCustomerId(e.target.value)}>
+            {customers.map((c) => <option key={c.id} value={c.id}>{c.name} ({c.audienceType})</option>)}
+          </select>
+        </Field>
+        <Field label="Language">
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setLanguage("en")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase border ${language === "en" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>English</button>
+            <button type="button" onClick={() => setLanguage("ur")} className={`flex-1 px-3 py-2 text-sm font-bold uppercase border ${language === "ur" ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-300"}`}>Roman Urdu</button>
+          </div>
+        </Field>
+        <Field label="Generated Message">
+          <textarea readOnly className={`${inputCls} h-40`} value={message} />
+        </Field>
+        <div className="flex gap-2">
+          <Btn onClick={copyText}>{copied ? "Copied!" : "Copy Text"}</Btn>
+          {customer?.phone && (
+            <a href={waLink(customer.phone, message)} target="_blank" rel="noreferrer"><Btn variant="dark">Send on WhatsApp</Btn></a>
+          )}
+        </div>
+        {customer && !customer.phone && (
+          <div className="text-xs text-red-600 mt-2">Is customer ka phone number nahi hai — WhatsApp link kaam nahi karega jab tak add na karein.</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Cement Estimator ---------------- */
+
+function CementEstimator({ settings }) {
+  const [width, setWidth] = useState(20);
+  const [length, setLength] = useState(40);
+  const [floors, setFloors] = useState(1);
+  const [rate, setRate] = useState(1500);
+
+  const coveredArea = width * length * floors;
+  // Rough rule-of-thumb estimator: ~0.4 bags of cement per sq.ft of covered area.
+  const bagsNeeded = Math.ceil(coveredArea * 0.4);
+  const estimatedCost = bagsNeeded * rate;
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-4">Cement Estimator</h2>
+      <div className="bg-white border border-slate-200 p-4 max-w-md">
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Width (ft)"><input type="number" className={inputCls} value={width} onChange={(e) => setWidth(Number(e.target.value))} /></Field>
+          <Field label="Length (ft)"><input type="number" className={inputCls} value={length} onChange={(e) => setLength(Number(e.target.value))} /></Field>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Floors"><input type="number" className={inputCls} value={floors} onChange={(e) => setFloors(Number(e.target.value))} /></Field>
+          <Field label="Cement Rate (Rs/bag)"><input type="number" className={inputCls} value={rate} onChange={(e) => setRate(Number(e.target.value))} /></Field>
+        </div>
+        <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
+          <div className="flex justify-between"><span>Covered Area</span><span className="font-bold">{coveredArea.toLocaleString()} Sq.Ft</span></div>
+          <div className="flex justify-between"><span>Estimated Bags Needed</span><span className="font-bold">{bagsNeeded.toLocaleString()} Bags</span></div>
+          <div className="flex justify-between border-t border-slate-300 pt-1"><span className="font-bold">Estimated Cost</span><span className="font-black text-blue-700">{fmtMoney(estimatedCost)}</span></div>
+        </div>
+        <div className="text-[10px] text-slate-400 mt-2">Ye sirf ek rough estimate hai — actual requirement structure design par depend karti hai.</div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Customer Portal ---------------- */
+
+function CustomerPortal({ currentUser, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, offers, settings }) {
+  const customer = customers.find((c) => c.id === currentUser.id);
+  const [viewingInvoice, setViewingInvoice] = useState(null);
+  if (!customer) return <div className="p-6 text-slate-400">Account nahi mila, admin se rabta karein.</div>;
+
+  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  const myInvoices = invoices.filter((i) => i.customerId === customer.id).sort((a, b) => new Date(b.date) - new Date(a.date));
+  const activeOffers = offers.filter((o) => o.active);
+
+  return (
+    <div className="min-h-screen bg-slate-100">
+      {activeOffers.length > 0 && (
+        <div className="bg-blue-700 text-white text-sm font-bold overflow-hidden whitespace-nowrap">
+          <div className="inline-block py-2 px-4 animate-pulse">{activeOffers.map((o) => o.text).join("   ·   ")}</div>
+        </div>
+      )}
+      <div className="max-w-3xl mx-auto p-4">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-slate-500 font-bold">Portal</div>
+            <div className="text-xl font-black uppercase tracking-tight text-slate-900">Welcome, {customer.name}</div>
+          </div>
+          {settings.logoUrl && <img src={settings.logoUrl} alt="Logo" className="w-10 h-10 object-contain" />}
+        </div>
+
+        <div className="flex flex-wrap gap-3 mb-6">
+          <Stat label="Outstanding Balance" value={fmtMoney(outstanding)} accent={outstanding > 0 ? "text-red-600" : "text-emerald-600"} />
+          <Stat label="Total Invoices" value={myInvoices.length} />
+        </div>
+
+        <div className="bg-white border border-slate-200 overflow-x-auto mb-6">
+          <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">My Invoices</div>
+          <table className="w-full text-sm">
+            <tbody>
+              {myInvoices.length === 0 && <tr><td className="px-4 py-6 text-center text-slate-400">Koi invoice nahi.</td></tr>}
+              {myInvoices.map((inv) => (
+                <tr key={inv.id} className="border-t border-slate-100 cursor-pointer hover:bg-slate-50" onClick={() => setViewingInvoice(inv)}>
+                  <td className="px-4 py-2 font-bold text-blue-700">{inv.number}</td>
+                  <td className="px-4 py-2 text-slate-500">{fmtDate(inv.date)}</td>
+                  <td className="px-4 py-2 text-right font-bold">{fmtMoney(inv.total)}</td>
+                  <td className="px-4 py-2 text-right">
+                    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 ${inv.status === "Paid" ? "bg-emerald-100 text-emerald-700" : inv.status === "Partial" ? "bg-blue-100 text-blue-700" : "bg-red-100 text-red-700"}`}>{inv.status}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="bg-white border border-slate-200 overflow-x-auto">
+          <div className="px-4 py-2.5 border-b border-slate-200 font-black uppercase text-xs tracking-wide text-slate-500">My Ledger</div>
+          <table className="w-full text-sm">
+            <tbody>
+              <tr className="border-t border-slate-100 bg-slate-50">
+                <td className="px-4 py-2 text-slate-500" colSpan={2}>Opening Balance</td>
+                <td className="px-4 py-2 text-right font-bold" colSpan={2}>{fmtMoney(customer.openingBalance || 0)}</td>
+              </tr>
+              {entries.map((e) => (
+                <tr key={e.id} className="border-t border-slate-100">
+                  <td className="px-4 py-2">{fmtDate(e.date)}</td>
+                  <td className="px-4 py-2 text-slate-500">{e.type}</td>
+                  <td className="px-4 py-2 text-right text-red-600">{e.debit ? fmtMoney(e.debit) : ""}</td>
+                  <td className="px-4 py-2 text-right text-emerald-600">{e.credit ? fmtMoney(e.credit) : ""}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {viewingInvoice && (
+        <InvoiceDetail invoice={viewingInvoice} settings={settings} returns={returns} exchanges={exchanges} onClose={() => setViewingInvoice(null)} />
+      )}
+    </div>
+  );
+}
+
+/* ---------------- Settings ---------------- */
+
+function Settings({ settings, saveSettings, users, saveUser, deleteUser, branches, saveBranch, deleteBranch, onRestoreBackup, exportBackup }) {
+  const [form, setForm] = useState(settings);
+  const [showUserForm, setShowUserForm] = useState(false);
+  const [editingUser, setEditingUser] = useState(null);
+  const [userForm, setUserForm] = useState({ username: "", password: "", role: "staff", name: "", branchId: "" });
+  const [showBranchForm, setShowBranchForm] = useState(false);
+  const [branchName, setBranchName] = useState("");
+  const fileInputRef = React.useRef(null);
+  const restoreInputRef = React.useRef(null);
+
+  function saveCompanyInfo() {
+    saveSettings(form);
+    alert("Settings saved.");
+  }
+
+  async function handleLogoUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { alert("Sirf image file (PNG/JPG) upload karein."); return; }
+    try {
+      const dataUrl = await resizeImageToDataUrl(file, 300);
+      const next = { ...form, logoUrl: dataUrl };
+      setForm(next);
+      saveSettings(next);
+    } catch { alert("Logo upload nahi ho saka, dobara try karein."); }
+  }
+
+  function openNewUser() { setEditingUser(null); setUserForm({ username: "", password: "", role: "staff", name: "", branchId: "" }); setShowUserForm(true); }
+  function openEditUser(u) { setEditingUser(u); setUserForm(u); setShowUserForm(true); }
+  function submitUser() {
+    if (!userForm.username.trim() || !userForm.password.trim()) { alert("Username aur password zaroori hai."); return; }
+    if (editingUser) saveUser({ ...editingUser, ...userForm });
+    else saveUser({ id: uid("u"), ...userForm });
+    setShowUserForm(false);
+  }
+
+  function submitBranch() {
+    if (!branchName.trim()) return;
+    saveBranch({ id: uid("branch"), name: branchName.trim() });
+    setBranchName(""); setShowBranchForm(false);
+  }
+
+  function handleRestoreFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (!data || typeof data !== "object") throw new Error("invalid");
+        onRestoreBackup(data);
+        alert("Backup restore ho gaya.");
+      } catch {
+        alert("Ye file valid backup nahi hai.");
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  return (
+    <div>
+      <h2 className="text-xl font-black uppercase tracking-tight mb-4">Settings</h2>
+
+      <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-3">Company Info</div>
+        <Field label="Company Logo">
+          <div className="flex items-center gap-3">
+            {form.logoUrl && <img src={form.logoUrl} alt="Logo" className="w-14 h-14 object-contain border border-slate-200" />}
+            <input ref={fileInputRef} type="file" accept="image/*" onChange={handleLogoUpload} className="text-xs" />
+            {form.logoUrl && <button type="button" className="text-xs font-bold text-red-600" onClick={() => { const next = { ...form, logoUrl: "" }; setForm(next); saveSettings(next); }}>Remove</button>}
+          </div>
+        </Field>
+        <Field label="Company Name"><input className={inputCls} value={form.companyName} onChange={(e) => setForm({ ...form, companyName: e.target.value })} /></Field>
+        <Field label="Address"><input className={inputCls} value={form.companyAddress} onChange={(e) => setForm({ ...form, companyAddress: e.target.value })} /></Field>
+        <Field label="Phone"><input className={inputCls} value={form.companyPhone} onChange={(e) => setForm({ ...form, companyPhone: e.target.value })} /></Field>
+        <Btn onClick={saveCompanyInfo}>Save</Btn>
+      </div>
+
+      <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">Branches</div>
+          <Btn small onClick={() => setShowBranchForm(true)}>Add Branch</Btn>
+        </div>
+        {branches.length === 0 && <div className="text-slate-400 text-sm">Koi branch nahi bani.</div>}
+        <div className="divide-y divide-slate-100">
+          {branches.map((b) => (
+            <div key={b.id} className="py-2 flex items-center justify-between text-sm">
+              <span className="font-bold">{b.name}</span>
+              {b.id !== "branch_main" && (
+                <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete branch ${b.name}?`)) deleteBranch(b.id); }}>Delete</button>
+              )}
+            </div>
+          ))}
+        </div>
+        {showBranchForm && (
+          <div className="flex gap-2 mt-3">
+            <input className={inputCls} placeholder="Branch name" value={branchName} onChange={(e) => setBranchName(e.target.value)} />
+            <Btn small onClick={submitBranch}>Save</Btn>
+            <Btn small variant="ghost" onClick={() => setShowBranchForm(false)}>Cancel</Btn>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">Users (Admin / Staff)</div>
+          <Btn small onClick={openNewUser}>+ Add User</Btn>
+        </div>
+        <div className="divide-y divide-slate-100">
+          {users.map((u) => (
+            <div key={u.id} className="py-2 flex items-center justify-between text-sm">
+              <div>
+                <span className="font-bold">{u.name || u.username}</span>{" "}
+                <span className="text-[10px] font-bold uppercase px-2 py-0.5 bg-slate-100 text-slate-600 ml-1">{u.role}</span>
+                {u.branchId && <span className="text-slate-400 text-xs ml-2">{branches.find((b) => b.id === u.branchId)?.name}</span>}
+              </div>
+              <div>
+                <button className="text-xs font-bold text-slate-500 hover:text-blue-700 mr-3" onClick={() => openEditUser(u)}>Edit</button>
+                <button className="text-xs font-bold text-slate-500 hover:text-red-600" onClick={() => { if (confirm(`Delete user ${u.username}?`)) deleteUser(u.id); }}>Delete</button>
+              </div>
+            </div>
+          ))}
+        </div>
+        {showUserForm && (
+          <div className="mt-3 border-t border-slate-200 pt-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Username"><input className={inputCls} value={userForm.username} onChange={(e) => setUserForm({ ...userForm, username: e.target.value })} /></Field>
+              <Field label="Password"><input className={inputCls} value={userForm.password} onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} /></Field>
+            </div>
+            <Field label="Full name"><input className={inputCls} value={userForm.name} onChange={(e) => setUserForm({ ...userForm, name: e.target.value })} /></Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Role">
+                <select className={inputCls} value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })}>
+                  <option value="admin">Admin</option><option value="staff">Staff</option>
+                </select>
+              </Field>
+              <Field label="Branch">
+                <select className={inputCls} value={userForm.branchId || ""} onChange={(e) => setUserForm({ ...userForm, branchId: e.target.value })}>
+                  <option value="">All Branches</option>
+                  {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div className="flex gap-2"><Btn onClick={submitUser}>Save</Btn><Btn variant="ghost" onClick={() => setShowUserForm(false)}>Cancel</Btn></div>
+          </div>
+        )}
+      </div>
+
+      <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-3">Backup</div>
+        <div className="flex gap-2">
+          <Btn onClick={exportBackup}>Download Backup (JSON)</Btn>
+          <Btn variant="ghost" onClick={() => restoreInputRef.current?.click()}>Restore from File</Btn>
+          <input ref={restoreInputRef} type="file" accept="application/json" onChange={handleRestoreFile} className="hidden" />
+        </div>
+      </div>
+
+      <div className="flex items-center gap-2 mb-6">
+        <span className="text-[11px] uppercase tracking-wide font-bold text-slate-500">Language</span>
+        <LanguageSwitcher />
+      </div>
+    </div>
+  );
+}
+
+/* ==================== Print styles ====================
+   BUGFIX: window.print() / "Download PDF" was printing the ENTIRE app
+   (sidebar, top bar, on-screen buttons) instead of just the intended
+   printable content, because no @media print rule ever made the hidden
+   #print-ledger template visible, and nothing hid everything else.
+   This component defines the one global rule every printable view relies
+   on: hide everything on the page except whichever element carries the
+   "print-area" class (there is only ever one visible at a time — the
+   Ledger's #print-ledger, an Invoice's #print-invoice, or a Commission
+   transaction's #print-commission), and force THAT element visible even
+   if it's normally display:none on screen. */
+function PrintStyles() {
+  return (
+    <style>{`
+      @media print {
+        body * { visibility: hidden; }
+        .print-area, .print-area * { visibility: visible; }
+        .print-area { display: block !important; position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 16px; }
+      }
+    `}</style>
+  );
+}
+
+/* ==================== Root App Component ==================== */
+
+function App() {
+  const [loading, setLoading] = useState(true);
+  // Startup screen (built in — see STARTUP SCREEN block near the end of this file).
+  const [loadError, setLoadError] = useState("");
+  const [loadStage, setLoadStage] = useState("");
+  const [loadAttempt, setLoadAttempt] = useState(0);
+  const [startupDone, setStartupDone] = useState(false);
+  const [splashLogo] = useState(readCachedLogo);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [page, setPage] = useState("dashboard");
+  const [navOpen, setNavOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [newInvoiceSignal, setNewInvoiceSignal] = useState(0);
+  const [verifyTarget, setVerifyTarget] = useState(docVerifyParse);
+  const [verifyDeferred, setVerifyDeferred] = useState(false);
+  const [scanOpen, setScanOpen] = useState(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [scanFlash, setScanFlash] = useState(false);
+  const [prefill, setPrefill] = useState(null);
+  const [focusCustomerId, setFocusCustomerId] = useState(null);
+  const [focusInvoiceId, setFocusInvoiceId] = useState(null);
+  const [focusPromiseId, setFocusPromiseId] = useState(null);
+
+  const [users, setUsers] = useState(DEFAULT_USERS);
+  const [customers, setCustomers] = useState([]);
+  const [invoices, setInvoices] = useState([]);
+  const [payments, setPayments] = useState([]);
+  const [returns, setReturns] = useState([]);
+  const [exchanges, setExchanges] = useState([]);
+  const [creditNotes, setCreditNotes] = useState([]);
+  const [promises, setPromises] = useState([]);
+  const [transfers, setTransfers] = useState([]);
+  const [adjustments, setAdjustments] = useState([]);
+  const [leads, setLeads] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [drivers, setDrivers] = useState([]);
+  const [offers, setOffers] = useState([]);
+  const [bookings, setBookings] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [orderTargets, setOrderTargets] = useState([]);
+  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [branches, setBranches] = useState(DEFAULT_BRANCHES);
+  const [auditLog, setAuditLog] = useState([]);
+
+  // Commission Management System state (additive; never modifies invoice/
+  // customer/payment tables above).
+  const [commissionAgents, setCommissionAgents] = useState([]);
+  const [commissionRules, setCommissionRules] = useState([]);
+  const [commissionTransactions, setCommissionTransactions] = useState([]);
+  const [commissionPayments, setCommissionPayments] = useState([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoadError("");
+    (async () => {
+      try {
+        const d = await loadStartupData((stage) => { if (!cancelled) setLoadStage(stage); });
+        if (cancelled) return;
+        setUsers(d.users); setCustomers(d.customers); setInvoices(d.invoices); setPayments(d.payments); setReturns(d.returns);
+        setExchanges(d.exchanges); setCreditNotes(d.creditNotes); setPromises(d.promises); setTransfers(d.transfers); setAdjustments(d.adjustments);
+        setLeads(d.leads); setProducts(d.products); setDrivers(d.drivers); setOffers(d.offers); setBookings(d.bookings); setOrders(d.orders);
+        setSettings({ ...DEFAULT_SETTINGS, ...d.settings }); setBranches(d.branches); setAuditLog(d.auditLog);
+        setCommissionAgents(d.commissionAgents); setCommissionRules(d.commissionRules); setCommissionTransactions(d.commissionTransactions); setCommissionPayments(d.commissionPayments);
+        setOrderTargets(d.orderTargets || []);
+        setLoading(false);
+      } catch (e) {
+        console.error("startup data load failed", e);
+        if (!cancelled) setLoadError((e && e.userMessage) || STARTUP_MSG_FAILED);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [loadAttempt]);
+
+  // Keep a copy of the company logo in this browser so the next startup
+  // splash can show it before the database has answered.
+  useEffect(() => {
+    if (!loading) cacheLogo(settings.logoUrl);
+  }, [loading, settings.logoUrl]);
+
+  // Supabase realtime — when configured, keeps every connected device in
+  // sync live. Falls back to purely local state when Supabase isn't set up.
+  useEffect(() => {
+    if (!supabase) return;
+    const setterByKey = {
+      "ct-users": setUsers, "ct-customers": setCustomers, "ct-invoices": setInvoices, "ct-payments": setPayments,
+      "ct-returns": setReturns, "ct-exchanges": setExchanges, "ct-creditnotes": setCreditNotes, "ct-promises": setPromises,
+      "ct-transfers": setTransfers, "ct-adjustments": setAdjustments, "ct-leads": setLeads, "ct-products": setProducts,
+      "ct-drivers": setDrivers, "ct-offers": setOffers, "ct-bookings": setBookings, "ct-orders": setOrders,
+      "ct-settings": (v) => setSettings({ ...DEFAULT_SETTINGS, ...v }), "ct-branches": setBranches, "ct-auditlog": setAuditLog,
+      "ct-commissionagents": setCommissionAgents, "ct-commissionrules": setCommissionRules,
+      "ct-commissiontransactions": setCommissionTransactions, "ct-commissionpayments": setCommissionPayments,
+      "ct-ordertargets": setOrderTargets,
+    };
+    const channel = supabase
+      .channel("kv_store_changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, (payload) => {
+        const row = payload.new || payload.old;
+        if (!row) return;
+        const setter = setterByKey[row.key];
+        if (setter && payload.new) setter(payload.new.value);
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, []);
+
+  const persist = {
+    users: (v) => { setUsers(v); storeSet("ct-users", v); },
+    customers: (v) => { setCustomers(v); storeSet("ct-customers", v); },
+    invoices: (v) => { setInvoices(v); storeSet("ct-invoices", v); },
+    payments: (v) => { setPayments(v); storeSet("ct-payments", v); },
+    returns: (v) => { setReturns(v); storeSet("ct-returns", v); },
+    exchanges: (v) => { setExchanges(v); storeSet("ct-exchanges", v); },
+    creditNotes: (v) => { setCreditNotes(v); storeSet("ct-creditnotes", v); },
+    promises: (v) => { setPromises(v); storeSet("ct-promises", v); },
+    transfers: (v) => { setTransfers(v); storeSet("ct-transfers", v); },
+    adjustments: (v) => { setAdjustments(v); storeSet("ct-adjustments", v); },
+    leads: (v) => { setLeads(v); storeSet("ct-leads", v); },
+    products: (v) => { setProducts(v); storeSet("ct-products", v); },
+    drivers: (v) => { setDrivers(v); storeSet("ct-drivers", v); },
+    offers: (v) => { setOffers(v); storeSet("ct-offers", v); },
+    bookings: (v) => { setBookings(v); storeSet("ct-bookings", v); },
+    orders: (v) => { setOrders(v); storeSet("ct-orders", v); },
+    orderTargets: (v) => { setOrderTargets(v); storeSet("ct-ordertargets", v); },
+    settings: (v) => { setSettings(v); storeSet("ct-settings", v); },
+    branches: (v) => { setBranches(v); storeSet("ct-branches", v); },
+    auditLog: (v) => { setAuditLog(v); storeSet("ct-auditlog", v); },
+    commissionAgents: (v) => { setCommissionAgents(v); storeSet("ct-commissionagents", v); },
+    commissionRules: (v) => { setCommissionRules(v); storeSet("ct-commissionrules", v); },
+    commissionTransactions: (v) => { setCommissionTransactions(v); storeSet("ct-commissiontransactions", v); },
+    commissionPayments: (v) => { setCommissionPayments(v); storeSet("ct-commissionpayments", v); },
+  };
+
+  function logAudit(action, reference, reason) {
+    setAuditLog((prev) => {
+      const next = [...prev, {
+        id: uid("aud"), action, reference, reason: reason || "",
+        user: currentUser?.name || currentUser?.username || "System", at: new Date().toISOString(),
+      }];
+      storeSet("ct-auditlog", next);
+      return next;
+    });
+  }
+
+  /* ---------- Customers ---------- */
+  function saveCustomer(data) {
+    const exists = customers.some((c) => c.id === data.id);
+    persist.customers(exists ? customers.map((c) => (c.id === data.id ? data : c)) : [...customers, data]);
+    logAudit(exists ? "Customer Updated" : "Customer Created", data.name, "");
+  }
+  function deleteCustomer(id) {
+    persist.customers(customers.filter((c) => c.id !== id));
+  }
+  function openLedger(customerId) { setFocusCustomerId(customerId); setPage("ledger"); }
+
+  /* ---------- Commission helpers (defined before invoice handlers that call them) ---------- */
+  function nextCommissionAgentCode() {
+    return "COM-" + String(settings.commissionAgentCounter || 1).padStart(4, "0");
+  }
+
+  function syncCommissionForInvoice(inv) {
+    const existing = commissionTransactions.find((tx) => tx.invoiceId === inv.id && tx.status !== "Cancelled");
+    if (!inv.commissionAgentId) {
+      if (existing) {
+        const updated = { ...existing, status: "Cancelled", remainingAmount: 0, cancelReason: "Commission agent removed from invoice" };
+        persist.commissionTransactions(commissionTransactions.map((t) => (t.id === existing.id ? updated : t)));
+        logAudit("Commission Cancelled", `${existing.invoiceNumber} — ${existing.agentName}`, "Commission agent removed from invoice");
+      }
+      return;
+    }
+    const agent = commissionAgents.find((a) => a.id === inv.commissionAgentId);
+    if (!agent) return;
+    const { total, lines } = computeCommissionForInvoice(agent, commissionRules, inv.items, inv.date, inv.subtotal);
+    if (existing && existing.agentId === agent.id) {
+      const paid = Number(existing.paidAmount) || 0;
+      const remaining = Math.max(0, roundMoney(total - paid));
+      const updated = {
+        ...existing, saleAmount: inv.subtotal, commissionAmount: total, breakdown: lines,
+        remainingAmount: remaining,
+        commissionType: lines.length === 1 ? lines[0].commissionType : "mixed",
+        commissionRate: lines.length === 1 ? lines[0].commissionRate : 0,
+        status: existing.status === "Paid" && remaining > 0 ? "Approved" : existing.status,
+      };
+      persist.commissionTransactions(commissionTransactions.map((t) => (t.id === existing.id ? updated : t)));
+      return;
+    }
+    let workingList = commissionTransactions;
+    if (existing) {
+      const cancelled = { ...existing, status: "Cancelled", remainingAmount: 0, cancelReason: "Commission agent changed on invoice" };
+      workingList = workingList.map((t) => (t.id === existing.id ? cancelled : t));
+      logAudit("Commission Cancelled", `${existing.invoiceNumber} — ${existing.agentName}`, "Commission agent changed on invoice");
+    }
+    if (total > 0) {
+      const tx = {
+        id: uid("ctx"), agentId: agent.id, agentName: agent.name,
+        invoiceId: inv.id, invoiceNumber: inv.number, customerId: inv.customerId, customerName: inv.customerName,
+        invoiceDate: inv.date, saleAmount: inv.subtotal,
+        commissionType: lines.length === 1 ? lines[0].commissionType : "mixed",
+        commissionRate: lines.length === 1 ? lines[0].commissionRate : 0,
+        commissionAmount: total, breakdown: lines, paidAmount: 0, remainingAmount: total,
+        status: "Pending", createdAt: new Date().toISOString(),
+      };
+      workingList = [...workingList, tx];
+      logAudit("Commission Created", `${tx.invoiceNumber} — ${agent.name}`, `Commission ${fmtMoney(total)} generated`);
+    }
+    persist.commissionTransactions(workingList);
+  }
+
+  function recalcCommissionAfterReturnOrExchange(invoiceId, nextReturns, nextExchanges) {
+    const inv = invoices.find((i) => i.id === invoiceId);
+    if (!inv || !inv.commissionAgentId) return;
+    const existing = commissionTransactions.find((tx) => tx.invoiceId === invoiceId && tx.status !== "Cancelled");
+    if (!existing) return;
+    const agent = commissionAgents.find((a) => a.id === inv.commissionAgentId);
+    if (!agent) return;
+    const { total, lines } = recalculatedCommissionAmount(agent, commissionRules, inv, nextReturns, nextExchanges);
+    const paid = Number(existing.paidAmount) || 0;
+    const remaining = Math.max(0, roundMoney(total - paid));
+    const updated = {
+      ...existing, commissionAmount: total, breakdown: lines, remainingAmount: remaining,
+      status: existing.status === "Paid" && remaining > 0 ? "Approved" : existing.status,
+    };
+    persist.commissionTransactions(commissionTransactions.map((t) => (t.id === existing.id ? updated : t)));
+    logAudit("Commission Adjusted", `${existing.invoiceNumber} — ${agent.name}`, "Recalculated after return/exchange");
+  }
+
+  /* ---------- Invoices ---------- */
+  function saveInvoice(inv) {
+    if (invoices.some((i) => i.id === inv.id)) return; // duplicate submit
+    const bookingError = validateBookingInvoice(inv, null, bookings, invoices, payments);
+    if (bookingError) { alert(bookingError); return; }
+    if (inv.fromBookingId && inv.bookingQty != null) {
+      const b = bookings.find((x) => x.id === inv.fromBookingId);
+      if (b) {
+        commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Delivery Invoiced",
+          `${inv.number}: ${fmtQty(inv.bookingQty)} ${b.unit || ""} @ ${fmtMoney(inv.bookingRate)}${Number(inv.advanceApplied) > 0 ? ` · advance applied ${fmtMoney(inv.advanceApplied)}` : ""}`)]));
+      }
+      logAudit("Booking Delivery Invoiced", inv.bookingRef || inv.fromBookingId, `${inv.number} — ${fmtQty(inv.bookingQty)} ${b?.unit || ""}`);
+    }
+    persist.invoices([...invoices, inv]);
+    persist.settings({ ...settings, invoiceCounter: settings.invoiceCounter + 1 });
+    if (inv.paymentReceived > 0) {
+      persist.payments([...payments, {
+        id: uid("pay"), customerId: inv.customerId, customerName: inv.customerName, date: inv.date,
+        amount: inv.paymentReceived, method: "Cash", note: `Against ${inv.number}`, invoiceId: inv.id, branchId: inv.branchId || "",
+      }]);
+    }
+    syncCommissionForInvoice(inv);
+    logAudit("Invoice Created", inv.number, "");
+  }
+
+  function updateInvoice(inv, original) {
+    const bookingError = validateBookingInvoice(inv, original, bookings, invoices, payments);
+    if (bookingError) { alert(bookingError); return; }
+    const editEntry = {
+      action: "Edited", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString(),
+      previousValues: { total: original.total, status: original.status },
+      newValues: { total: inv.total, status: inv.status },
+    };
+    const finalInv = { ...inv, editHistory: [...(original.editHistory || []), editEntry] };
+    persist.invoices(invoices.map((i) => (i.id === inv.id ? finalInv : i)));
+    const linkedPayment = payments.find((p) => p.invoiceId === inv.id || p.note === `Against ${original.number}`);
+    if (inv.paymentReceived !== original.paymentReceived) {
+      if (linkedPayment) {
+        persist.payments(payments.map((p) => (p === linkedPayment ? { ...p, amount: inv.paymentReceived, invoiceId: inv.id, note: `Against ${inv.number}` } : p)));
+      } else if (inv.paymentReceived > 0) {
+        persist.payments([...payments, { id: uid("pay"), customerId: inv.customerId, customerName: inv.customerName, date: inv.date, amount: inv.paymentReceived, method: "Cash", note: `Against ${inv.number}`, invoiceId: inv.id, branchId: inv.branchId || "" }]);
+      }
+    }
+    syncCommissionForInvoice(finalInv);
+    logAudit("Invoice Edited", inv.number, "");
+  }
+
+  function cancelInvoiceFn(inv) {
+    const editEntry = { action: "Cancelled", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString() };
+    const updated = { ...inv, docStatus: "Cancelled", editHistory: [...(inv.editHistory || []), editEntry] };
+    persist.invoices(invoices.map((i) => (i.id === inv.id ? updated : i)));
+    const linkedTx = commissionTransactions.find((tx) => tx.invoiceId === inv.id && tx.status !== "Cancelled");
+    if (linkedTx) {
+      const updatedTx = { ...linkedTx, status: "Cancelled", remainingAmount: 0, cancelReason: "Invoice cancelled" };
+      persist.commissionTransactions(commissionTransactions.map((t) => (t.id === linkedTx.id ? updatedTx : t)));
+      logAudit("Commission Cancelled", `${linkedTx.invoiceNumber} — ${linkedTx.agentName}`, "Invoice cancelled");
+    }
+    logAudit("Invoice Cancelled", inv.number, "");
+  }
+
+  function savePayment(p) {
+    persist.payments([...payments, p]);
+    if (p.promiseId) {
+      const promise = promises.find((pr) => pr.id === p.promiseId);
+      if (promise) {
+        const nextPaid = roundMoney((Number(promise.paidAmount) || 0) + p.amount);
+        persist.promises(promises.map((pr) => (pr.id === promise.id ? { ...pr, paidAmount: nextPaid } : pr)));
+      }
+    }
+    logAudit("Payment Recorded", p.customerName, fmtMoney(p.amount));
+  }
+
+  // Payment Edit — updates the existing payment record in place (never
+  // creates a second one). The ledger and customer balance are recomputed
+  // from the payments table on every render, so replacing the record is
+  // what "removes the old amount and applies the new one" there. The two
+  // places that keep their own stored totals are synced here by hand:
+  //   - Promises: the old amount is reversed from the old promise and the
+  //     new amount applied to the selected promise (same or different).
+  //   - The linked invoice (if this payment was recorded on an invoice):
+  //     its Payment Received / Balance Due / status follow the new amount.
+  function updatePayment(original, data) {
+    const current = payments.find((p) => p.id === original.id);
+    if (!current) return;
+    const oldAmount = Number(current.amount) || 0;
+    const newAmount = Number(data.amount) || 0;
+    const oldPromiseId = current.promiseId || "";
+    const newPromiseId = data.promiseId || "";
+    const editEntry = {
+      action: "Edited", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString(),
+      previousValues: { customerName: current.customerName, date: current.date, amount: oldAmount, method: current.method, promiseId: oldPromiseId, note: current.note || "" },
+      newValues: { customerName: data.customerName, date: data.date, amount: newAmount, method: data.method, promiseId: newPromiseId, note: data.note || "" },
+    };
+    const updated = {
+      ...current, ...data, id: current.id, amount: newAmount, promiseId: newPromiseId,
+      editHistory: [...(current.editHistory || []), editEntry],
+    };
+    persist.payments(payments.map((p) => (p.id === current.id ? updated : p)));
+
+    if ((oldPromiseId || newPromiseId) && (oldPromiseId !== newPromiseId || oldAmount !== newAmount)) {
+      persist.promises(promises.map((pr) => {
+        if (pr.id !== oldPromiseId && pr.id !== newPromiseId) return pr;
+        let paid = Number(pr.paidAmount) || 0;
+        if (pr.id === oldPromiseId) paid -= oldAmount;
+        if (pr.id === newPromiseId) paid += newAmount;
+        return { ...pr, paidAmount: Math.max(0, roundMoney(paid)) };
+      }));
+    }
+
+    if (oldAmount !== newAmount) {
+      const linkedInv = current.invoiceId
+        ? invoices.find((i) => i.id === current.invoiceId)
+        : (current.note && current.note.startsWith("Against ")
+          ? invoices.find((i) => i.number === current.note.replace("Against ", "").trim())
+          : null);
+      if (linkedInv && !isInvoiceCancelled(linkedInv) && linkedInv.customerType !== "Cash") {
+        const balanceDue = roundMoney((Number(linkedInv.total) || 0) - newAmount - (Number(linkedInv.advanceApplied) || 0));
+        const status = balanceDue <= 0 ? "Paid" : (newAmount > 0 || Number(linkedInv.advanceApplied) > 0) ? "Partial" : "Unpaid";
+        const invEditEntry = {
+          action: "Payment Edited", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString(),
+          previousValues: { paymentReceived: linkedInv.paymentReceived, status: linkedInv.status },
+          newValues: { paymentReceived: newAmount, status },
+        };
+        persist.invoices(invoices.map((i) => (i.id === linkedInv.id
+          ? { ...i, paymentReceived: newAmount, balanceDue, status, editHistory: [...(i.editHistory || []), invEditEntry] }
+          : i)));
+      }
+    }
+
+    logAudit(
+      "Payment Edited",
+      current.customerName === updated.customerName ? updated.customerName : `${current.customerName} \u2192 ${updated.customerName}`,
+      `${fmtMoney(oldAmount)} \u2192 ${fmtMoney(newAmount)}`
+    );
+  }
+
+  /* ---------- Sales Return / Exchange ---------- */
+  function onCreateReturn(data) {
+    const returnCode = "RET-" + String(settings.returnCounter).padStart(4, "0");
+    const record = { id: uid("ret"), code: returnCode, status: "Active", ...data };
+    const nextReturns = [...returns, record];
+    persist.returns(nextReturns);
+
+    const cnNumber = "CN-" + String(settings.creditNoteCounter).padStart(4, "0");
+    const cn = { id: uid("cn"), number: cnNumber, date: data.date, customerId: data.customerId, customerName: data.customerName, amount: data.amount, reason: data.reason, status: "Active", linkedInvoiceNumber: "", returnId: record.id };
+    persist.creditNotes([...creditNotes, cn]);
+
+    persist.settings({ ...settings, returnCounter: settings.returnCounter + 1, creditNoteCounter: settings.creditNoteCounter + 1 });
+
+    recalcCommissionAfterReturnOrExchange(data.invoiceId, nextReturns, exchanges);
+    logAudit("Sales Return", returnCode, data.reason);
+  }
+
+  function onDeleteReturn(record, reason) {
+    const updated = { ...record, status: "Deleted", deleteReason: reason };
+    const nextReturns = returns.map((r) => (r.id === record.id ? updated : r));
+    persist.returns(nextReturns);
+    const linkedCn = creditNotes.find((cn) => cn.returnId === record.id);
+    if (linkedCn) persist.creditNotes(creditNotes.map((cn) => (cn.id === linkedCn.id ? { ...cn, status: "Reversed" } : cn)));
+    recalcCommissionAfterReturnOrExchange(record.invoiceId, nextReturns, exchanges);
+    logAudit("Sales Return Deleted", record.code, reason);
+  }
+
+  function onCreateExchange(data) {
+    const code = "EX-" + String(settings.exchangeCounter).padStart(4, "0");
+    const record = { id: uid("ex"), code, status: "Active", ...data };
+    const nextExchanges = [...exchanges, record];
+    persist.exchanges(nextExchanges);
+    persist.settings({ ...settings, exchangeCounter: settings.exchangeCounter + 1 });
+    recalcCommissionAfterReturnOrExchange(data.invoiceId, returns, nextExchanges);
+    logAudit("Exchange", code, data.reason);
+  }
+
+  function onDeleteExchange(record, reason) {
+    const updated = { ...record, status: "Deleted", deleteReason: reason };
+    const nextExchanges = exchanges.map((ex) => (ex.id === record.id ? updated : ex));
+    persist.exchanges(nextExchanges);
+    recalcCommissionAfterReturnOrExchange(record.invoiceId, returns, nextExchanges);
+    logAudit("Exchange Deleted", record.code, reason);
+  }
+
+  function onLinkCreditNoteInvoice(cnId, invoiceNumber) {
+    persist.creditNotes(creditNotes.map((cn) => (cn.id === cnId ? { ...cn, linkedInvoiceNumber: invoiceNumber } : cn)));
+  }
+
+  /* ---------- Outstanding Transfer / Adjustments ---------- */
+  function onCreateTransfer(data) {
+    const code = "OT-" + String(settings.transferCounter).padStart(4, "0");
+    const record = { id: uid("tr"), code, date: todayISO(), status: "Active", createdBy: currentUser?.name || currentUser?.username, ...data };
+    persist.transfers([...transfers, record]);
+    persist.settings({ ...settings, transferCounter: settings.transferCounter + 1 });
+    logAudit("Outstanding Transfer", code, data.reason);
+  }
+  function onReverseTransfer(record, reason) {
+    persist.transfers(transfers.map((t) => (t.id === record.id ? { ...t, status: "Reversed", reverseReason: reason } : t)));
+    logAudit("Outstanding Transfer Reversed", record.code, reason);
+  }
+
+  function onCreateAdjustment(data) {
+    const code = "ADJ-" + String(settings.adjustmentCounter).padStart(4, "0");
+    const record = { id: uid("adj"), code, status: "Active", createdBy: currentUser?.name || currentUser?.username, ...data };
+    persist.adjustments([...adjustments, record]);
+    persist.settings({ ...settings, adjustmentCounter: settings.adjustmentCounter + 1 });
+    logAudit("Adjustment Created", code, data.reason);
+  }
+  function onUpdateAdjustment(original, data) {
+    persist.adjustments(adjustments.map((a) => (a.id === original.id ? { ...original, ...data } : a)));
+    logAudit("Adjustment Updated", original.code, data.reason);
+  }
+  function onReverseAdjustment(record, reason) {
+    persist.adjustments(adjustments.map((a) => (a.id === record.id ? { ...a, status: "Reversed", reverseReason: reason } : a)));
+    logAudit("Adjustment Reversed", record.code, reason);
+  }
+
+  /* ---------- Promise To Pay ---------- */
+  function onCreatePromise(data) {
+    const code = "PTP-" + String(settings.promiseCounter).padStart(4, "0");
+    const record = { id: uid("ptp"), code, status: "Pending", paidAmount: 0, ...data };
+    persist.promises([...promises, record]);
+    persist.settings({ ...settings, promiseCounter: settings.promiseCounter + 1 });
+    logAudit("Promise Created", code, fmtMoney(data.amount));
+  }
+  function onUpdatePromise(original, data) {
+    persist.promises(promises.map((p) => (p.id === original.id ? { ...original, ...data } : p)));
+    logAudit("Promise Updated", original.code, "");
+  }
+  function onCancelPromise(record, reason) {
+    persist.promises(promises.map((p) => (p.id === record.id ? { ...p, status: "Cancelled", cancelReason: reason } : p)));
+    logAudit("Promise Cancelled", record.code, reason);
+  }
+
+  /* ---------- Bookings / Orders ---------- */
+  /* ---------- Advance Booking (upgraded — see "ADVANCE BOOKING UPGRADE v2") ---------- */
+  function bookingActor() { return currentUser?.name || currentUser?.username || "System"; }
+  function bookingIsAdmin() { return currentUser?.role === "admin"; }
+  function bookingHistoryEntry(action, details) {
+    return { action, details: details || "", by: bookingActor(), at: new Date().toISOString() };
+  }
+  function bookingWithHistory(b, entries, patch) {
+    return { ...b, ...(patch || {}), history: [...(b.history || []), ...entries] };
+  }
+  function commitBooking(updated) {
+    persist.bookings(bookings.map((x) => (x.id === updated.id ? updated : x)));
+  }
+  function findBookingOrAlert(bookingId) {
+    const b = bookings.find((x) => x.id === bookingId);
+    if (!b) alert("Booking not found. Please refresh and try again.");
+    return b || null;
+  }
+  function bookingPaymentRecord(b, { id, amount, date, method, note, kind }) {
+    const isRefund = kind === "Refund";
+    return {
+      id: id || uid("pay"), customerId: b.customerId, customerName: b.customerName,
+      date: date || todayISO(), amount: roundMoney(amount), method: method || "Cash",
+      note: `${isRefund ? "Refund" : "Advance"} for Booking ${b.code}${note ? " — " + note : ""}`,
+      bookingId: b.id, bookingCode: b.code, promiseId: "",
+      branchId: b.branchId || currentUser?.branchId || "",
+      ...(isRefund ? { kind: "Refund" } : {}),
+      createdBy: bookingActor(), createdAt: new Date().toISOString(),
+    };
+  }
+
+  function onCreateAdvanceBooking(data) {
+    const customer = customers.find((c) => c.id === data.customerId);
+    const qty = roundQty(Number(data.qty) || 0);
+    const rate = roundMoney(Number(data.rate) || 0);
+    const advance = roundMoney(Number(data.advanceAmount) || 0);
+    const productName = String(data.productName || "").trim();
+    if (!customer) { alert("Customer select karein."); return false; }
+    if (!productName) { alert("Select a product or enter the custom item name."); return false; }
+    if (!(qty > 0)) { alert("Booked quantity must be more than 0."); return false; }
+    if (!(rate > 0)) { alert("Locked rate must be more than 0."); return false; }
+    if (advance < 0) { alert("Advance cannot be negative."); return false; }
+    if (advance > roundMoney(qty * rate) + 0.005) { alert("Advance cannot be more than the booking value."); return false; }
+    if (!data.date) { alert("Booking date is required."); return false; }
+    if (data.advancePaymentId && payments.some((p) => p.id === data.advancePaymentId)) { alert("This booking was already saved."); return false; }
+    let n = Number(settings.bookingCounter) || 1;
+    let code;
+    do { code = "BK-" + String(n).padStart(4, "0"); n += 1; } while (bookings.some((b) => b.code === code));
+    const history = [bookingHistoryEntry("Created", `${fmtQty(qty)} ${data.unit || ""} ${productName} @ ${fmtMoney(rate)} = ${fmtMoney(qty * rate)}`)];
+    if (advance > 0) history.push(bookingHistoryEntry("Advance Received", `${fmtMoney(advance)} (${data.advanceMethod || "Cash"})`));
+    const record = {
+      id: uid("bk"), v: 2, code, status: "Booked",
+      customerId: customer.id, customerName: customer.name, customerPhone: customer.phone || "",
+      productId: data.productId || "", productName, unit: data.unit || "",
+      qty, rate, originalRate: rate, advanceAmount: 0,
+      date: data.date, expiryDate: addOneMonth(data.date),
+      notes: data.notes || "", terms: data.terms || "",
+      branchId: customer.branchId || currentUser?.branchId || "",
+      createdBy: bookingActor(), createdAt: new Date().toISOString(),
+      rateHistory: [], renewals: [], history,
+    };
+    persist.bookings([...bookings, record]);
+    persist.settings({ ...settings, bookingCounter: n });
+    if (advance > 0) {
+      persist.payments([...payments, bookingPaymentRecord(record, { id: data.advancePaymentId, amount: advance, date: data.date, method: data.advanceMethod })]);
+    }
+    logAudit("Advance Booking Created", code, `${customer.name} — ${fmtQty(qty)} ${data.unit || ""} @ ${fmtMoney(rate)}`);
+    if (advance > 0) logAudit("Booking Advance Received", code, fmtMoney(advance));
+    return record;
+  }
+
+  function onReceiveAdvance(bookingId, data) {
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    if (data.id && payments.some((p) => p.id === data.id)) { alert("This advance was already recorded."); return false; }
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled" || st.status === "Completed") { alert(`Booking ${b.code} is ${st.status}.`); return false; }
+    const amount = roundMoney(Number(data.amount) || 0);
+    if (!(amount > 0)) { alert("Amount 0 se zyada hona chahiye."); return false; }
+    if (!data.date) { alert("Date is required."); return false; }
+    if (amount > st.remainingAmount + 0.005) { alert(`Advance cannot be more than the remaining booking amount (${fmtMoney(st.remainingAmount)}).`); return false; }
+    const pay = bookingPaymentRecord(b, { id: data.id, amount, date: data.date, method: data.method, note: data.note });
+    persist.payments([...payments, pay]);
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Advance Received", `${fmtMoney(amount)} (${pay.method}) — ${paymentReceiptNo(pay)}`)]));
+    logAudit("Booking Advance Received", b.code, fmtMoney(amount));
+    return true;
+  }
+
+  function onEditAdvance(bookingId, paymentId, data) {
+    if (!bookingIsAdmin()) { alert("Only admin can edit a booking advance."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const p = payments.find((x) => x.id === paymentId && x.bookingId === b.id && x.kind !== "Refund");
+    if (!p) { alert("Advance payment not found."); return false; }
+    const reason = String(data.reason || "").trim();
+    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+    const amount = roundMoney(Number(data.amount) || 0);
+    if (!(amount > 0)) { alert("Amount 0 se zyada hona chahiye."); return false; }
+    const oldAmount = roundMoney(Number(p.amount) || 0);
+    const st = computeBookingState(b, invoices, payments);
+    if (roundMoney(st.unusedAdvance - oldAmount + amount) < -0.005) {
+      alert(`Part of this advance is already applied to invoices or refunded. Minimum allowed is ${fmtMoney(Math.max(0, oldAmount - st.unusedAdvance))}.`); return false;
+    }
+    if (amount - oldAmount > st.remainingAmount + 0.005) {
+      alert(`Total advance cannot be more than the booking value. Maximum allowed is ${fmtMoney(oldAmount + st.remainingAmount)}.`); return false;
+    }
+    updatePayment(p, {
+      customerId: p.customerId, customerName: p.customerName, date: data.date || p.date, amount,
+      method: data.method || p.method, promiseId: "", note: `Advance for Booking ${b.code} — ${reason}`,
+    });
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Advance Edited", `${paymentReceiptNo(p)}: ${fmtMoney(oldAmount)} → ${fmtMoney(amount)} — ${reason}`)]));
+    logAudit("Booking Advance Edited", b.code, `${fmtMoney(oldAmount)} → ${fmtMoney(amount)} — ${reason}`);
+    return true;
+  }
+
+  function onRefundAdvance(bookingId, data) {
+    if (!bookingIsAdmin()) { alert("Only admin can refund a booking advance."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    if (data.id && payments.some((p) => p.id === data.id)) { alert("This refund was already recorded."); return false; }
+    const reason = String(data.reason || "").trim();
+    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+    const amount = roundMoney(Number(data.amount) || 0);
+    const st = computeBookingState(b, invoices, payments);
+    if (!(amount > 0)) { alert("Amount 0 se zyada hona chahiye."); return false; }
+    if (amount > Math.max(0, st.unusedAdvance) + 0.005) { alert(`Refund cannot be more than the refundable balance (${fmtMoney(Math.max(0, st.unusedAdvance))}).`); return false; }
+    const refund = bookingPaymentRecord(b, { id: data.id, amount, date: data.date, method: data.method, note: reason, kind: "Refund" });
+    persist.payments([...payments, refund]);
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Advance Refunded", `${fmtMoney(amount)} (${refund.method}) — ${reason}`)]));
+    logAudit("Booking Advance Refunded", b.code, `${fmtMoney(amount)} — ${reason}`);
+    return true;
+  }
+
+  function onCancelBooking(bookingId, data) {
+    if (!bookingIsAdmin()) { alert("Only admin can cancel a booking."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled") { alert(`Booking ${b.code} is already cancelled.`); return false; }
+    if (st.status === "Completed") { alert(`Booking ${b.code} is fully delivered. Use Refund for any unused advance.`); return false; }
+    const reason = String(data.reason || "").trim();
+    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+    const refundAmount = roundMoney(Number(data.refundAmount) || 0);
+    if (refundAmount < 0 || refundAmount > Math.max(0, st.unusedAdvance) + 0.005) { alert(`Refund cannot be more than the refundable balance (${fmtMoney(Math.max(0, st.unusedAdvance))}).`); return false; }
+    if (refundAmount > 0 && data.refundId && payments.some((p) => p.id === data.refundId)) { alert("This refund was already recorded."); return false; }
+    const entries = [bookingHistoryEntry("Cancelled", `${reason} — undelivered ${fmtQty(st.remainingQty)} ${b.unit || ""}`)];
+    let refund = null;
+    if (refundAmount > 0) {
+      refund = bookingPaymentRecord(b, { id: data.refundId, amount: refundAmount, date: data.refundDate, method: data.refundMethod, note: reason, kind: "Refund" });
+      entries.push(bookingHistoryEntry("Advance Refunded", `${fmtMoney(refundAmount)} (${refund.method}) — ${reason}`));
+    }
+    commitBooking(bookingWithHistory(b, entries, { status: "Cancelled", cancelReason: reason, cancelledBy: bookingActor(), cancelledAt: new Date().toISOString() }));
+    if (refund) persist.payments([...payments, refund]);
+    logAudit("Advance Booking Cancelled", b.code, reason);
+    if (refund) logAudit("Booking Advance Refunded", b.code, `${fmtMoney(refundAmount)} — ${reason}`);
+    return true;
+  }
+
+  function onRenewBooking(bookingId, data) {
+    if (!bookingIsAdmin()) { alert("Only admin can renew a booking."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled" || st.status === "Completed") { alert(`Booking ${b.code} is ${st.status}.`); return false; }
+    const reason = String(data.reason || "").trim();
+    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+    const base = todayISO() > (b.expiryDate || "") ? todayISO() : b.expiryDate;
+    const to = addOneMonth(base);
+    const renewal = { from: b.expiryDate || "", to, reason, by: bookingActor(), at: new Date().toISOString() };
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Renewed", `${fmtDate(b.expiryDate)} → ${fmtDate(to)} — ${reason}`)], { expiryDate: to, renewals: [...(b.renewals || []), renewal] }));
+    logAudit("Advance Booking Renewed", b.code, `${b.expiryDate} → ${to} — ${reason}`);
+    return true;
+  }
+
+  function onChangeBookingRate(bookingId, data) {
+    if (!bookingIsAdmin()) { alert("Only admin can change a locked rate."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled" || st.status === "Completed") { alert(`Booking ${b.code} is ${st.status}.`); return false; }
+    const reason = String(data.reason || "").trim();
+    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+    const newRate = roundMoney(Number(data.newRate) || 0);
+    if (!(newRate > 0)) { alert("Rate must be more than 0."); return false; }
+    const newValue = roundMoney(st.deliveredAmount + st.remainingQty * newRate);
+    if (st.netAdvance + st.legacyAdvance > newValue + 0.005) { alert(`Advance received (${fmtMoney(st.netAdvance + st.legacyAdvance)}) would be more than the new booking value (${fmtMoney(newValue)}). Refund the difference first.`); return false; }
+    const change = { oldRate: b.rate, newRate, reason, by: bookingActor(), at: new Date().toISOString() };
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Rate Changed", `${fmtMoney(b.rate)} → ${fmtMoney(newRate)} — ${reason}`)], {
+      rate: newRate, originalRate: b.originalRate != null ? b.originalRate : b.rate, rateHistory: [...(b.rateHistory || []), change],
+    }));
+    logAudit("Booking Rate Changed", b.code, `${fmtMoney(b.rate)} → ${fmtMoney(newRate)} — ${reason}`);
+    return true;
+  }
+
+  function onUpdateBookingDetails(bookingId, data) {
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Notes / Terms Updated", "")], { notes: data.notes || "", terms: data.terms || "" }));
+    logAudit("Advance Booking Updated", b.code, "Notes / terms");
+    return true;
+  }
+
+  function onPostLegacyAdvance(bookingId) {
+    if (!bookingIsAdmin()) { alert("Only admin can do this."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const amount = roundMoney(Number(b.advanceAmount) || 0);
+    if (b.v === 2 || b.legacyAdvancePosted || !(amount > 0)) { alert("There is no older advance to post for this booking."); return false; }
+    const pay = bookingPaymentRecord(b, { amount, date: b.date, method: "Cash", note: "older booking advance posted to ledger" });
+    persist.payments([...payments, pay]);
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Old Advance Posted To Ledger", `${fmtMoney(amount)} dated ${fmtDate(b.date)}`)], { legacyAdvancePosted: true }));
+    logAudit("Booking Advance Received", b.code, `${fmtMoney(amount)} (older booking advance posted)`);
+    return true;
+  }
+
+  function saveBooking(b) { persist.bookings(bookings.map((x) => (x.id === b.id ? b : x))); }
+  // Booking status is now derived from real delivery invoices, so nothing is
+  // marked "Completed" by hand here any more (delivery is logged in saveInvoice).
+  function onBookingFulfilled() {}
+
+  function onCreateOrder(data) {
+    const code = "ORD-" + String(settings.orderCounter).padStart(4, "0");
+    const record = { id: uid("ord"), code, status: "Pending", ...data };
+    persist.orders([...orders, record]);
+    persist.settings({ ...settings, orderCounter: settings.orderCounter + 1 });
+    logAudit("Order Created", code, "");
+  }
+  function saveOrder(o) {
+    const prev = orders.find((x) => x.id === o.id);
+    persist.orders(orders.map((x) => (x.id === o.id ? o : x)));
+    if (prev && prev.status !== o.status) logAudit("Order Status Changed", o.code, `${prev.status} → ${o.status}`);
+  }
+  // Daily Order edit (Daily Targets recalculate automatically from orders).
+  function onUpdateOrder(original, data) {
+    const cur = orders.find((x) => x.id === original.id);
+    if (!cur) return;
+    const fields = ["productName", "qty", "date", "customerName"];
+    const changes = fields.filter((f) => String(cur[f]) !== String(data[f])).map((f) => `${f}: ${cur[f]} → ${data[f]}`).join(", ");
+    const entry = { action: "Edited", editedBy: currentUser?.name || currentUser?.username, editedAt: new Date().toISOString(), changes };
+    persist.orders(orders.map((x) => (x.id === cur.id ? { ...cur, ...data, id: cur.id, code: cur.code, status: cur.status, editHistory: [...(cur.editHistory || []), entry] } : x)));
+    logAudit("Order Edited", cur.code, changes || "no change");
+  }
+
+  /* ---------- Daily Order Targets ---------- */
+  function onSaveTarget(original, data) {
+    const actor = currentUser?.name || currentUser?.username || "System";
+    const now = new Date().toISOString();
+    if (!original) {
+      if (orderTargets.some((tg) => tg.date === data.date && tg.productId === data.productId)) { alert("This product already has a target for this date."); return false; }
+      const rec = { id: uid("tgt"), ...data, createdBy: actor, createdAt: now, updatedBy: actor, updatedAt: now, history: [] };
+      persist.orderTargets([...orderTargets, rec]);
+      logAudit("Daily Target Created", `${data.productName} ${data.date}`, `${fmtQty(data.targetQty)} ${data.unit}${data.targetOrders ? ` / ${data.targetOrders} orders` : ""}`);
+      return true;
+    }
+    const cur = orderTargets.find((x) => x.id === original.id);
+    if (!cur) { alert("Target not found."); return false; }
+    const change = { at: now, by: actor, from: { targetQty: cur.targetQty, targetOrders: cur.targetOrders, unit: cur.unit, notes: cur.notes }, to: { targetQty: data.targetQty, targetOrders: data.targetOrders, unit: data.unit, notes: data.notes } };
+    // date + product are never changed on edit, so other days' targets are untouched
+    persist.orderTargets(orderTargets.map((x) => (x.id === cur.id ? { ...cur, targetQty: data.targetQty, targetOrders: data.targetOrders, unit: data.unit, notes: data.notes, updatedBy: actor, updatedAt: now, history: [...(cur.history || []), change] } : x)));
+    logAudit("Daily Target Updated", `${cur.productName} ${cur.date}`, `${fmtQty(cur.targetQty)} → ${fmtQty(data.targetQty)} ${data.unit}`);
+    return true;
+  }
+  function onDeleteTarget(id) {
+    if (currentUser?.role !== "admin") { alert("Only admin can delete a target."); return; }
+    const cur = orderTargets.find((x) => x.id === id);
+    if (!cur) return;
+    persist.orderTargets(orderTargets.filter((x) => x.id !== id));
+    logAudit("Daily Target Deleted", `${cur.productName} ${cur.date}`, `${fmtQty(cur.targetQty)} ${cur.unit}`);
+  }
+  function onOrderFulfilled(id) { persist.orders(orders.map((o) => (o.id === id ? { ...o, status: "Completed" } : o))); }
+
+  function convertBookingToInvoice(b) {
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled") { alert(`Booking ${b.code} is cancelled.`); return; }
+    if (st.status === "Completed") { alert(`Booking ${b.code} is already fully delivered.`); return; }
+    if (st.status === "Expired") { alert(`Booking ${b.code} expired on ${fmtDate(b.expiryDate)}. An admin must renew it before delivery at the locked rate.`); return; }
+    if (prefill && prefill.sourceType === "booking" && prefill.sourceId === b.id) { setPage("invoices"); return; }
+    const suggestedAdvance = roundMoney(Math.max(0, Math.min(st.unusedAdvance, st.remainingQty * st.rate)));
+    setPrefill({
+      sourceType: "booking", sourceId: b.id, sourceCode: b.code, customerId: b.customerId, productId: b.productId,
+      productName: b.productName, unit: b.unit, qty: st.remainingQty, rate: st.rate, suggestedAdvance,
+    });
+    setPage("invoices");
+  }
+  function convertOrderToInvoice(o) {
+    const product = products.find((p) => p.id === o.productId);
+    setPrefill({ sourceType: "order", sourceId: o.id, sourceCode: o.code, customerId: o.customerId, productId: o.productId, productName: o.productName, unit: o.unit, qty: o.qty, rate: product ? product.price : 0 });
+    setPage("invoices");
+  }
+
+  /* ---------- Leads / Products / Drivers / Offers ---------- */
+  function saveLead(l) {
+    const exists = leads.some((x) => x.id === l.id);
+    persist.leads(exists ? leads.map((x) => (x.id === l.id ? l : x)) : [...leads, l]);
+  }
+  function deleteLead(id) { persist.leads(leads.filter((l) => l.id !== id)); }
+
+  function saveProduct(p) {
+    const exists = products.some((x) => x.id === p.id);
+    persist.products(exists ? products.map((x) => (x.id === p.id ? p : x)) : [...products, p]);
+  }
+  function deleteProduct(id) { persist.products(products.filter((p) => p.id !== id)); }
+
+  function saveDriver(d) {
+    const exists = drivers.some((x) => x.id === d.id);
+    persist.drivers(exists ? drivers.map((x) => (x.id === d.id ? d : x)) : [...drivers, d]);
+    if (!exists) persist.settings({ ...settings, driverCounter: settings.driverCounter + 1 });
+  }
+  function deleteDriver(id) { persist.drivers(drivers.filter((d) => d.id !== id)); }
+
+  function saveOffer(o) {
+    const exists = offers.some((x) => x.id === o.id);
+    persist.offers(exists ? offers.map((x) => (x.id === o.id ? o : x)) : [...offers, o]);
+  }
+  function deleteOffer(id) { persist.offers(offers.filter((o) => o.id !== id)); }
+
+  /* ---------- Branches / Users / Settings / Backup ---------- */
+  function saveBranch(b) { persist.branches([...branches, b]); }
+  function deleteBranch(id) { persist.branches(branches.filter((b) => b.id !== id)); }
+  function saveUser(u) {
+    const exists = users.some((x) => x.id === u.id);
+    persist.users(exists ? users.map((x) => (x.id === u.id ? u : x)) : [...users, u]);
+  }
+  function deleteUser(id) { persist.users(users.filter((u) => u.id !== id)); }
+  function onResetUsers() { persist.users(DEFAULT_USERS); }
+  function saveSettings(s) { persist.settings(s); }
+
+  function exportBackup() {
+    const data = {
+      users, customers, invoices, payments, returns, exchanges, creditNotes, promises, transfers, adjustments,
+      leads, products, drivers, offers, bookings, orders, settings, branches, auditLog,
+      commissionAgents, commissionRules, commissionTransactions, commissionPayments, orderTargets,
+      vouchers: finState.vouchers, finSettings: finState.settings, cashClosings: finState.closings, cashMoves: finState.moves,
+    };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `chaudhary_traders_backup_${todayISO()}.json`; a.click();
+    URL.revokeObjectURL(url);
+  }
+  function onRestoreBackup(data) {
+    if (data.users) persist.users(data.users);
+    if (data.customers) persist.customers(data.customers);
+    if (data.invoices) persist.invoices(data.invoices);
+    if (data.payments) persist.payments(data.payments);
+    if (data.returns) persist.returns(data.returns);
+    if (data.exchanges) persist.exchanges(data.exchanges);
+    if (data.creditNotes) persist.creditNotes(data.creditNotes);
+    if (data.promises) persist.promises(data.promises);
+    if (data.transfers) persist.transfers(data.transfers);
+    if (data.adjustments) persist.adjustments(data.adjustments);
+    if (data.leads) persist.leads(data.leads);
+    if (data.products) persist.products(data.products);
+    if (data.drivers) persist.drivers(data.drivers);
+    if (data.offers) persist.offers(data.offers);
+    if (data.bookings) persist.bookings(data.bookings);
+    if (data.orders) persist.orders(data.orders);
+    if (data.orderTargets) persist.orderTargets(data.orderTargets);
+    if (data.settings) persist.settings({ ...DEFAULT_SETTINGS, ...data.settings });
+    if (data.branches) persist.branches(data.branches);
+    if (data.auditLog) persist.auditLog(data.auditLog);
+    if (data.commissionAgents) persist.commissionAgents(data.commissionAgents);
+    if (data.commissionRules) persist.commissionRules(data.commissionRules);
+    if (data.commissionTransactions) persist.commissionTransactions(data.commissionTransactions);
+    if (data.commissionPayments) persist.commissionPayments(data.commissionPayments);
+    if (Array.isArray(data.vouchers)) finMutate("vouchers", () => data.vouchers);
+    if (data.finSettings) finMutate("settings", () => finNormalizeSettings(data.finSettings));
+    if (Array.isArray(data.cashClosings)) finMutate("closings", () => data.cashClosings);
+    if (Array.isArray(data.cashMoves)) finMutate("moves", () => data.cashMoves);
+  }
+
+  /* ---------- Commission Management handlers ---------- */
+  function createCommissionAgent(data) {
+    const code = nextCommissionAgentCode();
+    const agent = { id: code, ...data, createdAt: todayISO(), createdBy: currentUser?.name || currentUser?.username };
+    persist.commissionAgents([...commissionAgents, agent]);
+    persist.settings({ ...settings, commissionAgentCounter: (settings.commissionAgentCounter || 1) + 1 });
+    logAudit("Commission Agent Created", agent.id, agent.name);
+  }
+  function updateCommissionAgent(original, data) {
+    const updated = { ...original, ...data };
+    persist.commissionAgents(commissionAgents.map((a) => (a.id === original.id ? updated : a)));
+    logAudit("Commission Agent Updated", original.id, updated.name);
+  }
+  function toggleCommissionAgentStatus(agent) {
+    const nextStatus = agent.status === "Active" ? "Inactive" : "Active";
+    persist.commissionAgents(commissionAgents.map((a) => (a.id === agent.id ? { ...a, status: nextStatus } : a)));
+    logAudit(nextStatus === "Active" ? "Commission Agent Activated" : "Commission Agent Deactivated", agent.id, agent.name);
+  }
+
+  function createCommissionRule(data) {
+    const rule = { id: uid("crule"), ...data, createdAt: todayISO() };
+    persist.commissionRules([...commissionRules, rule]);
+    logAudit("Commission Rule Created", rule.agentId, `${rule.productMatch} — ${fmtCommissionRate(rule.commissionType, rule.commissionRate)}`);
+  }
+  function updateCommissionRule(original, data) {
+    const updated = { ...original, ...data };
+    persist.commissionRules(commissionRules.map((r) => (r.id === original.id ? updated : r)));
+    logAudit("Commission Rule Updated", original.agentId, `${updated.productMatch} — ${fmtCommissionRate(updated.commissionType, updated.commissionRate)}`);
+  }
+
+  function approveCommissionTransaction(tx) {
+    const updated = { ...tx, status: "Approved" };
+    persist.commissionTransactions(commissionTransactions.map((t) => (t.id === tx.id ? updated : t)));
+    logAudit("Commission Approved", `${tx.invoiceNumber} — ${tx.agentName}`, "");
+  }
+  function cancelCommissionTransaction(tx, reason) {
+    const updated = { ...tx, status: "Cancelled", remainingAmount: 0, cancelReason: reason };
+    persist.commissionTransactions(commissionTransactions.map((t) => (t.id === tx.id ? updated : t)));
+    logAudit("Commission Cancelled", `${tx.invoiceNumber} — ${tx.agentName}`, reason);
+  }
+
+  function payCommissionTransaction(tx, data) {
+    const paidAmount = roundMoney((Number(tx.paidAmount) || 0) + data.amount);
+    const remainingAmount = Math.max(0, roundMoney(tx.commissionAmount - paidAmount));
+    const updated = { ...tx, paidAmount, remainingAmount, status: remainingAmount <= 0 ? "Paid" : tx.status };
+    persist.commissionTransactions(commissionTransactions.map((t) => (t.id === tx.id ? updated : t)));
+    const payment = {
+      id: uid("cpay"), agentId: tx.agentId, agentName: tx.agentName,
+      date: data.date, amount: data.amount, method: data.method,
+      referenceNumber: data.referenceNumber, notes: data.notes,
+      allocations: [{ transactionId: tx.id, amount: data.amount }],
+      createdBy: currentUser?.name || currentUser?.username, createdAt: new Date().toISOString(),
+    };
+    persist.commissionPayments([...commissionPayments, payment]);
+    logAudit("Commission Paid", `${tx.invoiceNumber} — ${tx.agentName}`, fmtMoney(data.amount));
+  }
+
+  function payCommissionAgent(agent, data) {
+    const eligible = commissionTransactions
+      .filter((tx) => tx.agentId === agent.id && tx.status === "Approved" && tx.remainingAmount > 0)
+      .sort((a, b) => new Date(a.invoiceDate) - new Date(b.invoiceDate));
+    let amountLeft = data.amount;
+    const allocations = [];
+    const updates = {};
+    for (const tx of eligible) {
+      if (amountLeft <= 0) break;
+      const applied = Math.min(amountLeft, tx.remainingAmount);
+      const paidAmount = roundMoney((Number(tx.paidAmount) || 0) + applied);
+      const remainingAmount = Math.max(0, roundMoney(tx.commissionAmount - paidAmount));
+      updates[tx.id] = { ...tx, paidAmount, remainingAmount, status: remainingAmount <= 0 ? "Paid" : tx.status };
+      allocations.push({ transactionId: tx.id, amount: roundMoney(applied) });
+      amountLeft = roundMoney(amountLeft - applied);
+    }
+    persist.commissionTransactions(commissionTransactions.map((t) => updates[t.id] || t));
+    const payment = {
+      id: uid("cpay"), agentId: agent.id, agentName: agent.name,
+      date: data.date, amount: data.amount, method: data.method,
+      referenceNumber: data.referenceNumber, notes: data.notes,
+      allocations, createdBy: currentUser?.name || currentUser?.username, createdAt: new Date().toISOString(),
+    };
+    persist.commissionPayments([...commissionPayments, payment]);
+    logAudit("Commission Paid", agent.name, fmtMoney(data.amount));
+  }
+
+  /* ---------- Branch-scoped visibility ---------- */
+  // Products, drivers, and the entire Commission module stay global/
+  // unscoped (same as the pre-existing pattern for products/drivers) —
+  // only customers/invoices/payments are filtered per-branch for staff
+  // who are assigned to a specific branch.
+  const isBranchScoped = currentUser && currentUser.role !== "admin" && !!currentUser.branchId;
+  const visibleCustomers = isBranchScoped ? customers.filter((c) => c.branchId === currentUser.branchId) : customers;
+  const visibleCustomerIds = new Set(visibleCustomers.map((c) => c.id));
+  const visibleInvoices = isBranchScoped
+    ? invoices.filter((i) => (i.branchId ? i.branchId === currentUser.branchId : visibleCustomerIds.has(i.customerId)))
+    : invoices;
+  const visiblePayments = isBranchScoped
+    ? payments.filter((p) => (p.branchId ? p.branchId === currentUser.branchId : visibleCustomerIds.has(p.customerId)))
+    : payments;
+
+  // Premium shell: notifications / sidebar badges and the Ctrl+K search.
+  const shellAlerts = useMemo(() => {
+    if (loading || !currentUser || currentUser.role === "customer") return { list: [], badges: {} };
+    return computeShellAlerts({
+      customers: visibleCustomers, invoices: visibleInvoices, payments: visiblePayments, returns, exchanges,
+      promises, transfers, adjustments, bookings: isBranchScoped ? bookings.filter((b) => visibleCustomerIds.has(b.customerId)) : bookings,
+    });
+  }, [loading, currentUser, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, bookings]);
+
+  // Payment vouchers waiting for this user's approval (sidebar badge + bell).
+  const finLive = useFin();
+  const finAlerts = useMemo(() => {
+    if (loading || !currentUser || currentUser.role === "customer") return { list: [], count: 0 };
+    const mine = finLive.vouchers.filter((v) => v.status === "Pending" && finCanApprove(finLive.settings, currentUser, v));
+    const today = todayISO();
+    const due = finAllKishts(finLive.vouchers).filter(({ v, k }) => v.status === "Approved" && k.status !== "Paid" && k.date <= today);
+    return {
+      count: mine.length,
+      dueCount: due.length,
+      list: [
+        ...mine.map((v) => ({ id: "vc" + v.id, icon: "voucher", tone: "text-amber-400", page: "vouchers", title: `${v.number} — ${v.payee} · ${fmtMoney(v.amount)}`, sub: t("Voucher waiting for your approval") })),
+        ...due.map(({ v, k, idx, n }) => ({ id: "vk" + v.id + k.id, icon: "calendar", tone: k.date < today ? "text-rose-400" : "text-emerald-400", page: "paymentsDue", title: `${v.number}${n > 1 ? ` (${idx + 1}/${n})` : ""} — ${v.payee} · ${fmtMoney(k.amount)}`, sub: k.date < today ? `${t("Overdue")} · ${fmtDate(k.date)}` : t("Payment due today") })),
+      ],
+    };
+  }, [loading, currentUser, finLive.vouchers, finLive.settings]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === "k") { e.preventDefault(); setPaletteOpen((v) => !v); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // The customer portal keeps its light design; staff get their chosen theme.
+  useEffect(() => {
+    applyThemeClass(currentUser && currentUser.role === "customer" ? "light" : themeState);
+  }, [currentUser]);
+
+  // Scanner / camera / QR link → open the voucher or invoice inside the app.
+  function handleScan(parsed) {
+    if (!parsed) return;
+    setScanFlash(true);
+    setTimeout(() => setScanFlash(false), 900);
+    setCameraOpen(false);
+    if (parsed.kind === "v") { setScanOpen({ id: parsed.id, k: parsed.k || 0, r: parsed.r || 0, n: Date.now() }); return; }
+    if (parsed.kind === "vn") {
+      const v = finState.vouchers.find((x) => String(x.number).toUpperCase() === parsed.number);
+      setScanOpen({ id: v ? v.id : "__missing", n: Date.now() });
+      return;
+    }
+    let invId = parsed.kind === "i" ? parsed.id : "";
+    if (parsed.kind === "in") {
+      const inv = invoices.find((i) => String(i.number).toUpperCase() === parsed.number);
+      if (!inv) return;
+      invId = inv.id;
+    }
+    setScanOpen(null);
+    setFocusInvoiceId(invId);
+    setPage("invoices");
+  }
+  useEffect(() => {
+    if (!verifyTarget || !currentUser || !finIsStaff(currentUser)) return;
+    const tgt = verifyTarget;
+    docVerifyClearHash();
+    setVerifyTarget(null);
+    setVerifyDeferred(false);
+    handleScan(tgt);
+  }, [verifyTarget, currentUser]);
+
+  // QR code links (#verify=…) open a read-only document page.
+  useEffect(() => {
+    const onHash = () => setVerifyTarget(docVerifyParse());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  function goPage(p) { setPage(p); setNavOpen(false); }
+  function openNewInvoice() { setPage("invoices"); setNavOpen(false); setNewInvoiceSignal((n) => n + 1); }
+  function openInvoiceById(id) { setFocusInvoiceId(id); setPage("invoices"); }
+
+  function handleLogin(user) { setCurrentUser(user); }
+  function handleLogout() { setCurrentUser(null); setPage("dashboard"); }
+
+  // Splash -> (loading screen while data loads) -> login / dashboard / portal.
+  // Login is never shown before startup data has finished loading.
+  if (loading || !startupDone) {
+    return (
+      <>
+        <I18nDomBridge />
+        <StartupScreen
+          ready={!loading}
+          error={loadError ? t(loadError) : ""}
+          status={loadStage === "remote" ? t("Fetching your data from the database…") : loadStage === "local" ? t("Opening the data saved on this device…") : ""}
+          onRetry={() => setLoadAttempt((n) => n + 1)}
+          onDone={() => setStartupDone(true)}
+          logoUrl={splashLogo || (loading ? "" : settings.logoUrl || "")}
+          labels={{ loading: t("Loading your workspace…"), retry: t("Retry"), safe: t("Nothing was changed — your saved data is safe.") }}
+        />
+      </>
+    );
+  }
+
+  if (verifyTarget && !verifyDeferred && !(currentUser && finIsStaff(currentUser))) {
+    return (
+      <>
+        <ThemeStyles />
+        <DocVerifyPage target={verifyTarget} invoices={invoices} settings={settings} onOpen={() => {
+          // Staff login first; after login the same document opens inside the app.
+          setVerifyDeferred(true);
+          applyThemeClass(themeState);
+        }} />
+      </>
+    );
+  }
+
+  if (!currentUser) {
+    return (
+      <>
+        <I18nDomBridge />
+        <Login users={users} customers={customers} onLogin={handleLogin} companyName={settings.companyName} logoUrl={settings.logoUrl} onResetUsers={onResetUsers} />
+      </>
+    );
+  }
+
+  if (currentUser.role === "customer") {
+    return (
+      <>
+        <I18nDomBridge />
+        <PrintStyles />
+        <CustomerPortal
+          currentUser={currentUser} customers={customers} invoices={invoices} payments={payments}
+          returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
+          offers={offers} settings={settings}
+        />
+      </>
+    );
+  }
+
+  const nextDriverCode = "DRV-" + String(settings.driverCounter).padStart(4, "0");
+
+  const pages = {
+    dashboard: (
+      <Dashboard
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments}
+        returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
+        leads={leads} bookings={bookings} onOpenPromises={() => setPage("promises")}
+        settings={settings} currentUser={currentUser} onNavigate={goPage} onNewInvoice={openNewInvoice} onOpenInvoice={openInvoiceById}
+      />
+    ),
+    customers: (
+      <Customers
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments}
+        returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
+        saveCustomer={saveCustomer} deleteCustomer={deleteCustomer} openLedger={openLedger}
+        branches={branches} currentUser={currentUser}
+      />
+    ),
+    invoices: (
+      <Invoices
+        customers={visibleCustomers} products={products} drivers={drivers}
+        invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments}
+        commissionAgents={commissionAgents} commissionRules={commissionRules} commissionTransactions={commissionTransactions}
+        bookings={bookings} settings={settings} currentUser={currentUser}
+        saveInvoice={saveInvoice} updateInvoice={updateInvoice} cancelInvoice={cancelInvoiceFn}
+        prefill={prefill} onClearPrefill={() => setPrefill(null)}
+        onBookingFulfilled={onBookingFulfilled} onOrderFulfilled={onOrderFulfilled}
+        focusInvoiceId={focusInvoiceId} setFocusInvoiceId={setFocusInvoiceId}
+        onGoToReturn={() => setPage("returns")} onGoToExchange={() => setPage("exchange")}
+        newInvoiceSignal={newInvoiceSignal}
+      />
+    ),
+    invoiceHistory: <InvoiceHistoryPage invoices={visibleInvoices} auditLog={auditLog} />,
+    returns: (
+      <SalesReturnPage
+        customers={visibleCustomers} invoices={visibleInvoices} returns={returns} exchanges={exchanges}
+        onCreateReturn={onCreateReturn} onDeleteReturn={onDeleteReturn} currentUser={currentUser}
+      />
+    ),
+    exchange: (
+      <ExchangePage
+        customers={visibleCustomers} products={products} invoices={visibleInvoices} returns={returns} exchanges={exchanges}
+        onCreateExchange={onCreateExchange} onDeleteExchange={onDeleteExchange} currentUser={currentUser}
+      />
+    ),
+    creditNotes: <CreditNotesPage creditNotes={creditNotes} onLinkInvoice={onLinkCreditNoteInvoice} />,
+    ledger: (
+      <LedgerView
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments}
+        focusId={focusCustomerId || visibleCustomers[0]?.id} setFocusId={setFocusCustomerId}
+        settings={settings} currentUser={currentUser}
+        onCreateAdjustment={onCreateAdjustment} onUpdateAdjustment={onUpdateAdjustment} onReverseAdjustment={onReverseAdjustment}
+      />
+    ),
+    payments: (
+      <Payments
+        customers={visibleCustomers} payments={visiblePayments} promises={promises} savePayment={savePayment}
+        updatePayment={updatePayment} invoices={visibleInvoices} returns={returns} exchanges={exchanges}
+        transfers={transfers} adjustments={adjustments} settings={settings}
+        currentUser={currentUser} logProofAudit={logAudit}
+      />
+    ),
+    outstandingTransfer: (
+      <OutstandingTransferPage
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments} currentUser={currentUser}
+        onCreateTransfer={onCreateTransfer} onReverseTransfer={onReverseTransfer}
+      />
+    ),
+    adjustments: (
+      <AdjustmentsPage
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments} currentUser={currentUser}
+        onCreateAdjustment={onCreateAdjustment} onUpdateAdjustment={onUpdateAdjustment} onReverseAdjustment={onReverseAdjustment}
+      />
+    ),
+    commission: (
+      <CommissionPage
+        agents={commissionAgents} rules={commissionRules} transactions={commissionTransactions} payments={commissionPayments}
+        products={products} invoices={invoices} currentUser={currentUser}
+        onCreateAgent={createCommissionAgent} onUpdateAgent={updateCommissionAgent} onToggleAgentStatus={toggleCommissionAgentStatus}
+        onCreateRule={createCommissionRule} onUpdateRule={updateCommissionRule}
+        onApproveTransaction={approveCommissionTransaction} onCancelTransaction={cancelCommissionTransaction}
+        onPayAgent={payCommissionAgent} onPayTransaction={payCommissionTransaction}
+      />
+    ),
+    bookings: (
+      <Bookings
+        customers={visibleCustomers} products={products}
+        bookings={isBranchScoped ? bookings.filter((b) => visibleCustomerIds.has(b.customerId)) : bookings}
+        invoices={invoices} payments={payments} settings={settings} currentUser={currentUser} branches={branches}
+        onCreateAdvanceBooking={onCreateAdvanceBooking} onConvertToInvoice={convertBookingToInvoice}
+        onOpenInvoice={(id) => { setFocusInvoiceId(id); setPage("invoices"); }}
+        onReceiveAdvance={onReceiveAdvance} onEditAdvance={onEditAdvance} onRefundAdvance={onRefundAdvance}
+        onCancelBooking={onCancelBooking} onRenewBooking={onRenewBooking} onChangeBookingRate={onChangeBookingRate}
+        onUpdateBookingDetails={onUpdateBookingDetails} onPostLegacyAdvance={onPostLegacyAdvance}
+      />
+    ),
+    orders: (
+      <Orders customers={visibleCustomers} products={products} orders={orders} onCreateOrder={onCreateOrder}
+        orderTargets={orderTargets} currentUser={currentUser} onSaveTarget={onSaveTarget} onDeleteTarget={onDeleteTarget} onUpdateOrder={onUpdateOrder}
+        saveOrder={saveOrder} onConvertToInvoice={convertOrderToInvoice} />
+    ),
+    promises: (
+      <PromiseToPayPage
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments} currentUser={currentUser}
+        onCreatePromise={onCreatePromise} onUpdatePromise={onUpdatePromise} onCancelPromise={onCancelPromise}
+        focusPromiseId={focusPromiseId} setFocusPromiseId={setFocusPromiseId}
+      />
+    ),
+    leads: <Leads leads={leads} saveLead={saveLead} deleteLead={deleteLead} />,
+    products: <Products products={products} saveProduct={saveProduct} deleteProduct={deleteProduct} />,
+    drivers: <Drivers drivers={drivers} saveDriver={saveDriver} deleteDriver={deleteDriver} nextCode={nextDriverCode} />,
+    offers: <Offers offers={offers} saveOffer={saveOffer} deleteOffer={deleteOffer} />,
+    reports: (
+      <Reports
+        customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments} orders={orders}
+        commissionAgents={commissionAgents} commissionRules={commissionRules} commissionTransactions={commissionTransactions}
+        products={products}
+      />
+    ),
+    assistant: <SalesAssistant customers={visibleCustomers} />,
+    estimator: <CementEstimator settings={settings} />,
+    vouchers: <VouchersPage currentUser={currentUser} users={users} branches={branches} settings={settings} />,
+    paymentsDue: <PaymentsDuePage currentUser={currentUser} users={users} branches={branches} payments={visiblePayments} invoices={visibleInvoices} settings={settings} />,
+    cashbook: <CashBookPage currentUser={currentUser} invoices={visibleInvoices} payments={visiblePayments} settings={settings} />,
+    insights: (
+      <InsightsPage customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
+        promises={promises} transfers={transfers} adjustments={adjustments} settings={settings} />
+    ),
+    settings: (
+      <Settings
+        settings={settings} saveSettings={saveSettings}
+        users={users} saveUser={saveUser} deleteUser={deleteUser}
+        branches={branches} saveBranch={saveBranch} deleteBranch={deleteBranch}
+        onRestoreBackup={onRestoreBackup} exportBackup={exportBackup}
+      />
+    ),
+  };
+
+  const branchLabel = currentUser.branchId
+    ? (branches.find((b) => b.id === currentUser.branchId)?.name || t("Branch"))
+    : (branches.length > 1 ? t("All Branches") : (branches[0]?.name || ""));
+
+  return (
+    <>
+      <I18nDomBridge />
+      <PrintStyles />
+      <ThemeStyles />
+      {/* Receiving Proof (add-only): current admin / staff user for upload permissions */}
+      <RecvSessionUser user={currentUser} />
+      <div className="ct-app ct-mesh flex h-[100dvh] overflow-hidden">
+        <Sidebar
+          page={page} setPage={goPage} role={currentUser.role} onLogout={handleLogout}
+          companyName={settings.companyName} logoUrl={settings.logoUrl}
+          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount }}
+        />
+        <div className="flex-1 min-w-0 flex flex-col">
+          <AppHeader
+            page={page} currentUser={currentUser} alerts={[...finAlerts.list, ...shellAlerts.list]}
+            onMenu={() => setNavOpen(true)} onSearch={() => setPaletteOpen(true)} onNewInvoice={openNewInvoice} onGo={goPage}
+            onCameraScan={finIsStaff(currentUser) ? () => setCameraOpen(true) : null} scanFlash={scanFlash}
+          />
+          <main className="ct-content ct-scroll flex-1 overflow-y-auto">
+            <div key={page} className="ct-page max-w-[1600px] mx-auto p-3 sm:p-5 lg:p-7 pb-28 lg:pb-8">
+              {pages[page] || pages.dashboard}
+            </div>
+            <FinScanListener enabled={finIsStaff(currentUser)} onScan={handleScan} />
+            {cameraOpen && <FinCameraScan onResult={handleScan} onClose={() => setCameraOpen(false)} />}
+            {scanOpen && (
+              <VoucherWorkspace key={scanOpen.n} voucherId={scanOpen.id} focusK={scanOpen.k} rev={scanOpen.r}
+                currentUser={currentUser} users={users} branches={branches} company={settings} onClose={() => setScanOpen(null)} />
+            )}
+          </main>
+        </div>
+      </div>
+      <MobileTabBar page={page} onGo={goPage} onNewInvoice={openNewInvoice} onMore={() => setNavOpen(true)} />
+      <CommandPalette
+        open={paletteOpen} onClose={() => setPaletteOpen(false)} role={currentUser.role}
+        customers={visibleCustomers} invoices={visibleInvoices}
+        onPage={goPage} onCustomer={(id) => openLedger(id)} onInvoice={openInvoiceById}
+      />
+    </>
+  );
+}
+
+/* ============================================================
+   RECEIVING PROOF  —  ADD-ONLY MODULE
+   ------------------------------------------------------------
+   Paper flow, nothing online for the customer:
+
+     Invoice -> "Receiving" -> print Receiving Slip
+     -> customer signs the PAPER
+     -> admin / staff uploads a photo of the signed paper
+     -> Invoice shows "Receiving Proof — View"
+
+   This block only ADDS code. It never writes to invoices, customers,
+   payments, ledger, returns, exchanges, products or settings — it only
+   READS an invoice (number, customer name, item name / qty / unit) to
+   draw the slip. A receiving proof has no effect on payment or ledger.
+
+   Storage (same kv store the ERP already uses, its own keys only):
+     ct-receiving-proof:<invoiceId>:<receivingId>   one record per proof
+       { receiving_id, invoice_id, invoice_number, proof_image,
+         uploaded_by, uploaded_at, status }
+
+   Integration points in the existing file (3 inserted lines, 0 changed):
+     1. InvoiceDetail, end of the printable invoice body
+          <RecvInvoicePrintProof />   (print / PDF only — invisible on screen)
+     2. InvoiceDetail, below the invoice body
+          <RecvInvoiceSection />      (the small on-screen option + Receiving button)
+     3. App, admin / staff shell
+          <RecvSessionUser />         (tells this module who is logged in)
+   ============================================================ */
+
+const RECV_PROOF_PREFIX = "ct-receiving-proof:";
+const RECV_PROOF_STATUS = { AVAILABLE: "PROOF_AVAILABLE", DELETED: "DELETED" };
+const RECV_CONFIG = {
+  allowedImageTypes: ["image/jpeg", "image/png", "image/webp"],
+  maxUploadBytes: 15 * 1024 * 1024, // largest photo / scan that may be picked
+  proofMaxEdge: 1800,               // stored image long edge (px) — keeps a signature readable
+  proofMaxStoredChars: 1300000,     // about 1 MB after compression
+};
+
+// Urdu labels for the new screens only. Kept in their own dictionary (not
+// merged into the ERP's translations) so existing wording cannot change.
+const RECV_URDU = {
+  "Receiving": "وصولی",
+  "Material Receiving": "مال کی وصولی",
+  "Receiving Proof": "وصولی کا ثبوت",
+  "Receiving Proof Available": "وصولی کا ثبوت موجود ہے",
+  "Available": "موجود",
+  "Proof Uploaded": "ثبوت اپ لوڈ ہو گیا",
+  "Not Uploaded": "اپ لوڈ نہیں ہوا",
+  "Invoice": "انوائس",
+  "Customer": "گاہک",
+  "Materials": "سامان",
+  "Customer Signature": "گاہک کے دستخط",
+  "Date": "تاریخ",
+  "Print Receiving Slip": "وصولی سلپ پرنٹ کریں",
+  "Upload Proof": "ثبوت اپ لوڈ کریں",
+  "Upload Another Proof": "ایک اور ثبوت اپ لوڈ کریں",
+  "Uploading...": "اپ لوڈ ہو رہا ہے...",
+  "View": "دیکھیں",
+  "Replace": "تبدیل کریں",
+  "Delete": "حذف کریں",
+  "Proof": "ثبوت",
+  "Uploaded by": "اپ لوڈ کنندہ",
+  "Signed Slip Image": "دستخط شدہ سلپ کی تصویر",
+  "Delete this receiving proof?": "کیا یہ وصولی کا ثبوت حذف کریں؟",
+  "Could not load receiving proof.": "وصولی کا ثبوت لوڈ نہیں ہو سکا۔",
+  "Could not save. Please check your internet and try again.": "محفوظ نہیں ہو سکا۔ براہِ کرم انٹرنیٹ چیک کر کے دوبارہ کوشش کریں۔",
+  "Only JPG, PNG or WEBP images are allowed.": "صرف JPG، PNG یا WEBP تصاویر کی اجازت ہے۔",
+  "Image is too large.": "تصویر بہت بڑی ہے۔",
+  "Could not read this image.": "یہ تصویر پڑھی نہیں جا سکی۔",
+  "Only admin or staff can do this.": "یہ کام صرف ایڈمن یا اسٹاف کر سکتے ہیں۔",
+  "Tap the image to zoom.": "بڑا کرنے کے لیے تصویر پر ٹیپ کریں۔",
+};
+function recvT(key) {
+  const source = String(key ?? "");
+  if (languageState !== "ur") return source;
+  return RECV_URDU[source] || t(source);
+}
+
+/* ---------------- Receiving Proof: who is logged in ----------------
+   <RecvSessionUser /> is mounted only inside the admin / staff shell, so on
+   the login screen and in the customer portal there is no session user here
+   and nothing of this feature is shown or usable. */
+
+let recvSessionUserState = null;
+const recvSessionListeners = new Set();
+
+function recvSetSessionUser(user) {
+  recvSessionUserState = user || null;
+  recvSessionListeners.forEach((listener) => listener());
+}
+
+function RecvSessionUser({ user }) {
+  useEffect(() => {
+    recvSetSessionUser(user);
+    return () => recvSetSessionUser(null);
+  }, [user]);
+  return null;
+}
+
+function useRecvSessionUser() {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const listener = () => bump((n) => n + 1);
+    recvSessionListeners.add(listener);
+    return () => { recvSessionListeners.delete(listener); };
+  }, []);
+  return recvSessionUserState;
+}
+
+function recvIsStaff(user) {
+  return !!user && user.role !== "customer";
+}
+
+/* ---------------- Receiving Proof: storage (own keys only) ----------------
+   Unlike storeGet/storeSet these never fall back silently: when the shared
+   database is configured and a call fails, the user is told, so a proof is
+   never shown as saved when it was not. */
+
+function recvProofKey(invoiceId, receivingId) {
+  return RECV_PROOF_PREFIX + invoiceId + ":" + receivingId;
+}
+
+// Create only — never overwrites an existing record.
+async function recvCreate(key, value) {
+  if (supabase) {
+    const { error } = await supabase.from("kv_store").insert({ key, value, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    return;
+  }
+  if (window.localStorage.getItem(LS_PREFIX + key) !== null) throw new Error("Receiving proof key already exists");
+  window.localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
+}
+
+async function recvPut(key, value) {
+  if (supabase) {
+    const { error } = await supabase.from("kv_store").upsert({ key, value, updated_at: new Date().toISOString() });
+    if (error) throw error;
+    return;
+  }
+  window.localStorage.setItem(LS_PREFIX + key, JSON.stringify(value));
+}
+
+// Every proof record of ONE invoice. The key prefix narrows the query and
+// each record's own invoice_id is checked again, so a proof can never be
+// returned for a different invoice.
+async function recvListProofs(invoiceId) {
+  const prefix = recvProofKey(invoiceId, "");
+  let values = [];
+  if (supabase) {
+    const pattern = prefix.replace(/[\\%_]/g, (ch) => "\\" + ch) + "%";
+    const { data, error } = await supabase.from("kv_store").select("key,value").like("key", pattern);
+    if (error) throw error;
+    values = (data || []).filter((row) => String(row.key).startsWith(prefix)).map((row) => row.value);
+  } else {
+    const full = LS_PREFIX + prefix;
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const k = window.localStorage.key(i);
+      if (!k || !k.startsWith(full)) continue;
+      try { values.push(JSON.parse(window.localStorage.getItem(k))); } catch {}
+    }
+  }
+  return values
+    .filter((v) => v && v.invoice_id === invoiceId && v.receiving_id)
+    .sort((a, b) => (Number(a.sequence) || 0) - (Number(b.sequence) || 0));
+}
+
+/* ---------------- Receiving Proof: per-invoice state ----------------
+   Shared by the on-screen section and the print-only section so both always
+   show the same thing after an upload / replace / delete. */
+
+const recvProofCache = new Map();    // invoiceId -> { records, failed }
+const recvProofInFlight = new Map(); // invoiceId -> Promise
+const recvProofListeners = new Set();
+
+function recvRefreshProofs(invoiceId) {
+  if (recvProofInFlight.has(invoiceId)) return recvProofInFlight.get(invoiceId);
+  const job = (async () => {
+    try {
+      const records = await recvListProofs(invoiceId);
+      recvProofCache.set(invoiceId, { records, failed: false });
+    } catch (e) {
+      console.error("receiving proof load failed", e);
+      const previous = recvProofCache.get(invoiceId);
+      recvProofCache.set(invoiceId, { records: previous ? previous.records : null, failed: true });
+    } finally {
+      recvProofInFlight.delete(invoiceId);
+      recvProofListeners.forEach((listener) => listener());
+    }
+  })();
+  recvProofInFlight.set(invoiceId, job);
+  return job;
+}
+
+function recvSafeImageSrc(value) {
+  return typeof value === "string" && /^data:image\/(png|jpeg|webp);base64,/.test(value) ? value : "";
+}
+
+// Returns { all, proofs, loading, failed }. `proofs` = uploaded, not deleted,
+// belonging to exactly this invoice, oldest first.
+function useRecvProofs(invoiceId, enabled) {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    if (!enabled || !invoiceId) return undefined;
+    const listener = () => bump((n) => n + 1);
+    recvProofListeners.add(listener);
+    recvRefreshProofs(invoiceId);
+    return () => { recvProofListeners.delete(listener); };
+  }, [invoiceId, enabled]);
+  const entry = enabled ? recvProofCache.get(invoiceId) : null;
+  const all = (entry && entry.records) || [];
+  const proofs = all.filter((r) => r.invoice_id === invoiceId && r.status === RECV_PROOF_STATUS.AVAILABLE && recvSafeImageSrc(r.proof_image));
+  return { all, proofs, loading: !!enabled && !entry, failed: !!(entry && entry.failed) };
+}
+
+/* ---------------- Receiving Proof: image handling ----------------
+   The stored proof is never the uploaded file itself. The file must be a
+   real JPG / PNG / WEBP (checked by type AND by its first bytes), is decoded
+   by the browser, and only a freshly re-drawn JPEG is saved. */
+
+async function recvSniffImageType(file) {
+  const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  if (head[0] === 0xff && head[1] === 0xd8 && head[2] === 0xff) return "image/jpeg";
+  if (head[0] === 0x89 && head[1] === 0x50 && head[2] === 0x4e && head[3] === 0x47) return "image/png";
+  if (head[0] === 0x52 && head[1] === 0x49 && head[2] === 0x46 && head[3] === 0x46 &&
+      head[8] === 0x57 && head[9] === 0x45 && head[10] === 0x42 && head[11] === 0x50) return "image/webp";
+  return "";
+}
+
+function recvLoadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("decode")); };
+    img.src = url;
+  });
+}
+
+// Returns a compressed JPEG data URL, or throws an Error whose message is a
+// sentence that can be shown to the user.
+async function recvProcessProofImage(file) {
+  if (!file) throw new Error("Could not read this image.");
+  if (!RECV_CONFIG.allowedImageTypes.includes(file.type)) throw new Error("Only JPG, PNG or WEBP images are allowed.");
+  if (file.size > RECV_CONFIG.maxUploadBytes) throw new Error("Image is too large.");
+  const sniffed = await recvSniffImageType(file);
+  if (!RECV_CONFIG.allowedImageTypes.includes(sniffed)) throw new Error("Only JPG, PNG or WEBP images are allowed.");
+  let img;
+  try { img = await recvLoadImage(file); } catch { throw new Error("Could not read this image."); }
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (!w || !h) throw new Error("Could not read this image.");
+  const canvas = document.createElement("canvas");
+  let edge = RECV_CONFIG.proofMaxEdge;
+  let quality = 0.85;
+  let out = "";
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const scale = Math.min(1, edge / Math.max(w, h));
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    out = canvas.toDataURL("image/jpeg", quality);
+    if (out.length <= RECV_CONFIG.proofMaxStoredChars) break;
+    edge = Math.round(edge * 0.8);
+    quality = Math.max(0.55, quality - 0.07);
+  }
+  if (!out.startsWith("data:image/jpeg") || out.length > RECV_CONFIG.proofMaxStoredChars) throw new Error("Image is too large.");
+  return out;
+}
+
+/* ---------------- Receiving Proof: save / replace / delete ---------------- */
+
+// INV-1025 -> "1025", CT-0012 -> "0012"
+function recvInvoicePart(invoiceNumber) {
+  const cleaned = String(invoiceNumber || "").replace(/^[A-Za-z]+[-\s]*/, "").replace(/[^A-Za-z0-9]/g, "").slice(0, 24);
+  return cleaned || "X";
+}
+
+function recvUserLabel(user) {
+  return (user && (user.name || user.username)) || "";
+}
+
+function recvRequireStaff() {
+  const user = recvSessionUserState;
+  if (!recvIsStaff(user)) throw new Error("Only admin or staff can do this.");
+  return user;
+}
+
+async function recvAddProof(invoice, image) {
+  const user = recvRequireStaff();
+  let lastError = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    // Number from the stored records, so two people uploading at the same
+    // time cannot overwrite each other (create never overwrites).
+    const existing = await recvListProofs(invoice.id);
+    const sequence = existing.reduce((max, r) => Math.max(max, Number(r.sequence) || 0), 0) + 1 + attempt;
+    const receivingId = `REC-${recvInvoicePart(invoice.number)}-${String(sequence).padStart(3, "0")}`;
+    const record = {
+      receiving_id: receivingId,
+      invoice_id: invoice.id,
+      invoice_number: invoice.number,
+      sequence,
+      proof_image: image,
+      uploaded_by: recvUserLabel(user),
+      uploaded_at: new Date().toISOString(),
+      status: RECV_PROOF_STATUS.AVAILABLE,
+    };
+    try {
+      await recvCreate(recvProofKey(invoice.id, receivingId), record);
+      return record;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError || new Error("Receiving proof was not saved");
+}
+
+async function recvReplaceProof(invoice, record, image) {
+  const user = recvRequireStaff();
+  if (record.invoice_id !== invoice.id) throw new Error("Receiving proof does not belong to this invoice");
+  const next = {
+    ...record,
+    proof_image: image,
+    uploaded_by: recvUserLabel(user),
+    uploaded_at: new Date().toISOString(),
+    replaced: true,
+    status: RECV_PROOF_STATUS.AVAILABLE,
+  };
+  await recvPut(recvProofKey(invoice.id, record.receiving_id), next);
+  return next;
+}
+
+async function recvDeleteProof(invoice, record) {
+  const user = recvRequireStaff();
+  if (record.invoice_id !== invoice.id) throw new Error("Receiving proof does not belong to this invoice");
+  const next = {
+    ...record,
+    proof_image: null,
+    status: RECV_PROOF_STATUS.DELETED,
+    deleted_by: recvUserLabel(user),
+    deleted_at: new Date().toISOString(),
+  };
+  await recvPut(recvProofKey(invoice.id, record.receiving_id), next);
+  return next;
+}
+
+/* ---------------- Receiving Proof: small shared pieces ---------------- */
+
+function RecvModal({ title, onClose, children, wide, hideInPrint = true }) {
+  return (
+    <div className={`fixed inset-0 bg-black/60 flex items-start justify-center p-3 overflow-y-auto ${hideInPrint ? "print:hidden" : ""}`} style={{ zIndex: wide ? 70 : 60 }}>
+      <div className={`bg-white w-full ${wide ? "max-w-2xl" : "max-w-sm"} mt-8 mb-8 border-t-4 border-slate-900 shadow-xl`}>
+        <div className="flex items-center justify-between px-4 py-2.5 border-b border-slate-200">
+          <h3 className="font-black uppercase tracking-tight text-slate-900 text-sm">{title}</h3>
+          <button type="button" onClick={onClose} aria-label="Close" data-recv="modal-close" className="text-slate-400 hover:text-slate-900 text-xl leading-none">×</button>
+        </div>
+        <div className="p-4">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+// Print rules for the Receiving Slip. They apply ONLY while the Receiving
+// page is open (body has class "recv-print-slip"); at any other time the
+// existing invoice / receipt printing is exactly as before.
+function RecvPrintStyles() {
+  return (
+    <style>{`
+      @media print {
+        body.recv-print-slip * { visibility: hidden !important; }
+        body.recv-print-slip .recv-slip, body.recv-print-slip .recv-slip * { visibility: visible !important; }
+        body.recv-print-slip .recv-slip {
+          position: absolute !important; left: 0; top: 0; width: 100%; margin: 0;
+          padding: 28px 36px; border: 0 !important; background: #fff; font-size: 16px;
+        }
+        body.recv-print-slip .recv-slip .recv-slip-line { margin-top: 56px; }
+      }
+    `}</style>
+  );
+}
+
+/* ---------------- Receiving Proof: the Receiving Slip ---------------- */
+
+function RecvSlip({ invoice, settings }) {
+  const items = (invoice.items || []).filter((it) => it && it.name);
+  return (
+    <div className="recv-slip border border-slate-300 bg-white px-4 py-4 text-slate-900" data-recv="slip">
+      <div className="text-center">
+        {settings && settings.companyName && (
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">{settings.companyName}</div>
+        )}
+        <div className="text-base font-black uppercase tracking-wide">{recvT("Material Receiving")}</div>
+      </div>
+      <div className="mt-3 text-sm space-y-0.5">
+        <div><span className="text-slate-500">{recvT("Invoice")}:</span> <span className="font-bold" dir="ltr">#{invoice.number}</span></div>
+        <div><span className="text-slate-500">{recvT("Customer")}:</span> <span className="font-bold">{invoice.customerName}</span></div>
+      </div>
+      <div className="border-t border-dashed border-slate-400 my-3" />
+      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">{recvT("Materials")}</div>
+      <div className="mt-1 space-y-2">
+        {items.map((it, idx) => (
+          <div key={idx}>
+            <div className="text-sm font-bold">{it.name}</div>
+            <div className="text-sm text-slate-600" dir="ltr">{fmtQty(it.qty)}{it.unit ? " " + it.unit : ""}</div>
+          </div>
+        ))}
+      </div>
+      <div className="border-t border-dashed border-slate-400 my-3" />
+      <div className="text-sm">
+        <div>{recvT("Customer Signature")}:</div>
+        <div className="recv-slip-line mt-8 border-b border-slate-900" />
+        <div className="mt-4">{recvT("Date")}:</div>
+        <div className="recv-slip-line mt-8 border-b border-slate-900" />
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- Receiving Proof: View lightbox ---------------- */
+
+function RecvProofLightbox({ invoice, proofs, startId, onClose }) {
+  const startIndex = Math.max(0, proofs.findIndex((p) => p.receiving_id === startId));
+  const [index, setIndex] = useState(startIndex);
+  const [zoomed, setZoomed] = useState(false);
+  const safeIndex = Math.min(index, proofs.length - 1);
+  const proof = proofs[safeIndex];
+  if (!proof || proof.invoice_id !== invoice.id) return null;
+  const src = recvSafeImageSrc(proof.proof_image);
+  return (
+    <RecvModal title={<><span>{recvT("Receiving Proof")}</span> <span dir="ltr" className="text-slate-500">· {invoice.number}</span></>} onClose={onClose} wide>
+      <div className="bg-slate-100 border border-slate-200 overflow-auto" style={{ maxHeight: "72vh" }}>
+        <img
+          src={src} alt="Receiving Proof" data-recv="lightbox-image" data-recv-id={proof.receiving_id}
+          onClick={() => setZoomed((z) => !z)}
+          style={zoomed ? { maxWidth: "none", cursor: "zoom-out" } : { maxWidth: "100%", maxHeight: "70vh", margin: "0 auto", display: "block", cursor: "zoom-in" }}
+        />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-3 flex-wrap text-xs text-slate-500">
+        <div data-recv="lightbox-caption">
+          <span className="font-black text-slate-900">{recvT("Proof")} #{safeIndex + 1}</span>
+          <span dir="ltr"> · {fmtDate(proof.uploaded_at)}</span>
+          {proof.uploaded_by && <span> · {recvT("Uploaded by")}: {proof.uploaded_by}</span>}
+        </div>
+        {proofs.length > 1 && (
+          <div className="flex items-center gap-2" dir="ltr">
+            <button type="button" className="px-2 py-1 border border-slate-300 font-bold disabled:opacity-40" disabled={safeIndex === 0} onClick={() => { setZoomed(false); setIndex(safeIndex - 1); }}>‹</button>
+            <span className="font-bold">{safeIndex + 1} / {proofs.length}</span>
+            <button type="button" className="px-2 py-1 border border-slate-300 font-bold disabled:opacity-40" disabled={safeIndex >= proofs.length - 1} onClick={() => { setZoomed(false); setIndex(safeIndex + 1); }}>›</button>
+          </div>
+        )}
+      </div>
+      <div className="mt-1 text-[11px] text-slate-400">{recvT("Tap the image to zoom.")}</div>
+    </RecvModal>
+  );
+}
+
+/* ---------------- Receiving Proof: the small Receiving page ----------------
+   Opened by the "Receiving" button inside the invoice (admin / staff only):
+   the printable slip, and upload / view / replace of the signed-paper photo. */
+
+function RecvReceivingPage({ invoice, settings, proofs, failed, onClose, onView }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const uploadRef = React.useRef(null);
+  const replaceRef = React.useRef(null);
+  const replaceTarget = React.useRef(null);
+
+  // While this page is open, printing (button or Ctrl+P) prints the slip.
+  useEffect(() => {
+    document.body.classList.add("recv-print-slip");
+    return () => { document.body.classList.remove("recv-print-slip"); };
+  }, []);
+
+  async function run(work) {
+    if (busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await work();
+    } catch (e) {
+      console.error("receiving proof save failed", e);
+      setError(RECV_URDU[e.message] ? e.message : "Could not save. Please check your internet and try again.");
+    } finally {
+      await recvRefreshProofs(invoice.id);
+      setBusy(false);
+    }
+  }
+
+  function handleUpload(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    run(async () => { await recvAddProof(invoice, await recvProcessProofImage(file)); });
+  }
+
+  function handleReplace(e) {
+    const file = e.target.files && e.target.files[0];
+    const target = replaceTarget.current;
+    e.target.value = "";
+    replaceTarget.current = null;
+    if (!file || !target) return;
+    run(async () => { await recvReplaceProof(invoice, target, await recvProcessProofImage(file)); });
+  }
+
+  function handleDelete(record) {
+    if (!confirm(recvT("Delete this receiving proof?"))) return;
+    run(async () => { await recvDeleteProof(invoice, record); });
+  }
+
+  const smallBtn = "px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide border";
+
+  return (
+    <RecvModal title={<>📦 {recvT("Receiving")}</>} onClose={onClose} hideInPrint={false}>
+      <RecvSlip invoice={invoice} settings={settings} />
+      <button type="button" data-recv="print-slip" onClick={() => window.print()} className="mt-3 w-full px-3 py-2 text-sm font-bold uppercase tracking-wide bg-slate-900 text-white hover:bg-slate-700">
+        🖨 {recvT("Print Receiving Slip")}
+      </button>
+
+      <div className="mt-4 pt-3 border-t border-slate-200" data-recv="proof-area">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="text-xs font-black uppercase text-slate-700">📷 {recvT("Receiving Proof")}</div>
+          {proofs.length > 0
+            ? <div className="text-xs font-bold text-emerald-700" data-recv="page-status">✓ {recvT("Receiving Proof Available")}</div>
+            : <div className="text-xs text-slate-400" data-recv="page-status">{recvT("Not Uploaded")}</div>}
+        </div>
+
+        <input ref={uploadRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" data-recv="upload-input" onChange={handleUpload} />
+        <input ref={replaceRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" data-recv="replace-input" onChange={handleReplace} />
+
+        {proofs.length > 0 && (
+          <div className="mt-2 space-y-2">
+            {proofs.map((p, idx) => (
+              <div key={p.receiving_id} className="border border-slate-200 p-2 flex items-center gap-3" data-recv="proof-row">
+                <img src={recvSafeImageSrc(p.proof_image)} alt={recvT("Signed Slip Image")} data-recv="proof-thumb" onClick={() => onView(p.receiving_id)} className="w-16 h-16 object-cover border border-slate-300 cursor-pointer shrink-0" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-black text-slate-900">
+                    {proofs.length > 1 ? <span>{recvT("Proof")} #{idx + 1}</span> : <span className="text-emerald-700">✓ {recvT("Proof Uploaded")}</span>}
+                  </div>
+                  <div className="text-[11px] text-slate-500">
+                    <span dir="ltr">{fmtDate(p.uploaded_at)}</span>
+                    {p.uploaded_by && <span> · {p.uploaded_by}</span>}
+                  </div>
+                  <div className="mt-1.5 flex gap-1.5 flex-wrap">
+                    <button type="button" data-recv="row-view" disabled={busy} onClick={() => onView(p.receiving_id)} className={`${smallBtn} border-slate-300 text-blue-700 hover:bg-slate-100`}>{recvT("View")}</button>
+                    <button type="button" data-recv="row-replace" disabled={busy} onClick={() => { replaceTarget.current = p; if (replaceRef.current) replaceRef.current.click(); }} className={`${smallBtn} border-slate-300 text-slate-600 hover:bg-slate-100`}>{recvT("Replace")}</button>
+                    <button type="button" data-recv="row-delete" disabled={busy} onClick={() => handleDelete(p)} className={`${smallBtn} border-red-200 text-red-600 hover:bg-red-50`}>{recvT("Delete")}</button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <button
+          type="button" data-recv="upload-btn" disabled={busy}
+          onClick={() => uploadRef.current && uploadRef.current.click()}
+          className={proofs.length > 0
+            ? "mt-2 text-xs font-bold text-blue-700 hover:underline"
+            : "mt-2 w-full px-3 py-2 text-sm font-bold uppercase tracking-wide border border-slate-300 text-slate-700 hover:bg-slate-100"}
+        >
+          {busy ? recvT("Uploading...") : proofs.length > 0 ? "+ " + recvT("Upload Another Proof") : recvT("Upload Proof")}
+        </button>
+
+        {error && <div className="mt-2 text-xs font-bold text-red-600" data-recv="proof-error">{recvT(error)}</div>}
+        {failed && !error && <div className="mt-2 text-xs font-bold text-red-600">{recvT("Could not load receiving proof.")}</div>}
+      </div>
+    </RecvModal>
+  );
+}
+
+/* ---------------- Receiving Proof: small option inside the invoice ----------------
+   On screen only (hidden when printing). Admin / staff only. */
+
+function RecvInvoiceSection({ invoice, settings }) {
+  useLanguage();
+  const user = useRecvSessionUser();
+  const allowed = recvIsStaff(user);
+  const { proofs, loading, failed } = useRecvProofs(invoice.id, allowed);
+  const [showPage, setShowPage] = useState(false);
+  const [viewId, setViewId] = useState(null);
+  if (!allowed) return null;
+  const latest = proofs.length ? proofs[proofs.length - 1] : null;
+
+  return (
+    <>
+    <RecvPrintStyles />
+    <div className="mt-4 print:hidden border border-slate-200 text-xs" data-recv="invoice-section">
+      <div className="px-3 py-2 flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="font-black uppercase text-slate-700">📷 {recvT("Receiving Proof")}</span>
+          {loading && <span className="text-slate-400">{recvT("Loading...")}</span>}
+          {!loading && latest && <span className="font-bold text-emerald-700" data-recv="invoice-status">✓ {recvT("Available")}</span>}
+          {!loading && !latest && !failed && <span className="text-slate-400" data-recv="invoice-status">{recvT("Not Uploaded")}</span>}
+          {!loading && !latest && failed && <span className="font-bold text-red-600">{recvT("Could not load receiving proof.")}</span>}
+        </div>
+        <div className="flex items-center gap-2">
+          <button type="button" data-recv="open-receiving" onClick={() => setShowPage(true)} className="px-2.5 py-1 font-bold uppercase tracking-wide border border-slate-900 text-slate-900 hover:bg-slate-100">📦 {recvT("Receiving")}</button>
+        </div>
+      </div>
+      {/* One line per proof, each with its own View */}
+      {proofs.map((p, idx) => (
+        <div key={p.receiving_id} className="px-3 py-1.5 border-t border-slate-100 flex items-center justify-between gap-3" data-recv="invoice-proof-row">
+          <span className="text-slate-600">
+            <span className="font-bold text-slate-900">{recvT("Proof")} #{idx + 1}</span> · <span dir="ltr">{fmtDate(p.uploaded_at)}</span>
+          </span>
+          <button type="button" data-recv="invoice-view" onClick={() => setViewId(p.receiving_id)} className="px-2.5 py-1 font-bold uppercase tracking-wide border border-slate-300 text-blue-700 hover:bg-slate-100">{recvT("View")}</button>
+        </div>
+      ))}
+    </div>
+    {/* Rendered outside the print-hidden box above so the slip can be printed. */}
+    {showPage && (
+      <RecvReceivingPage invoice={invoice} settings={settings} proofs={proofs} failed={failed} onClose={() => setShowPage(false)} onView={setViewId} />
+    )}
+    {viewId && proofs.length > 0 && (
+      <RecvProofLightbox invoice={invoice} proofs={proofs} startId={viewId} onClose={() => setViewId(null)} />
+    )}
+    </>
+  );
+}
+
+/* ---------------- Receiving Proof: printed / PDF invoice ----------------
+   Invisible on screen. When an invoice that has proof is printed or saved
+   as PDF:
+     - the small "Receiving Proof — Available" block is added at the end of
+       the invoice (a View button cannot work on paper / inside a PDF), and
+     - each signed-slip image is added on its own page AFTER the invoice.
+   Page 1 (the invoice itself) is laid out exactly as before, and invoices
+   without proof print exactly as before.
+
+   How the image pages work: the invoice prints from a fixed window, which
+   the browser repeats on every printed page. So the image pages are added
+   to the end of the document (outside that window) with a solid white
+   background on top, which leaves page 1 alone and gives clean image pages.
+   Set RECV_PRINT_PROOF_IMAGES to false to print only the small block. */
+
+const RECV_PRINT_PROOF_IMAGES = true;
+const RECV_PRINT_PAGES_CSS = `
+  .recv-print-proof-pages { display: none; }
+  @media print {
+    .recv-print-proof-pages { display: block; }
+    body.recv-print-slip .recv-print-proof-pages { display: none !important; }
+    .recv-print-proof-pages, .recv-print-proof-pages * { visibility: visible !important; }
+    .recv-print-proof-page {
+      break-before: page; page-break-before: always; break-inside: avoid; page-break-inside: avoid;
+      position: relative; z-index: 2147483000; background: #fff; box-sizing: border-box;
+      min-height: 200mm; box-shadow: 0 110mm 0 0 #fff; padding: 6mm 8mm 0;
+      font-family: inherit; color: #0f172a;
+    }
+    .recv-print-proof-page .recv-print-proof-title { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4mm; }
+    .recv-print-proof-page img { display: block; max-width: 100%; max-height: 190mm; }
+  }
+`;
+
+function RecvInvoicePrintProof({ invoice }) {
+  useLanguage();
+  const user = useRecvSessionUser();
+  const allowed = recvIsStaff(user);
+  const { proofs } = useRecvProofs(invoice.id, allowed);
+  const show = allowed && proofs.length > 0;
+  const language = languageState;
+
+  // Image pages live at the end of <body> only while this invoice is open.
+  useEffect(() => {
+    if (!show || !RECV_PRINT_PROOF_IMAGES) return undefined;
+    const host = document.createElement("div");
+    host.className = "recv-print-proof-pages";
+    host.setAttribute("data-recv", "print-pages");
+    const style = document.createElement("style");
+    style.textContent = RECV_PRINT_PAGES_CSS;
+    host.appendChild(style);
+    proofs.forEach((p, idx) => {
+      if (p.invoice_id !== invoice.id) return;
+      const src = recvSafeImageSrc(p.proof_image);
+      if (!src) return;
+      const pageEl = document.createElement("div");
+      pageEl.className = "recv-print-proof-page";
+      const title = document.createElement("div");
+      title.className = "recv-print-proof-title";
+      title.textContent = `${recvT("Receiving Proof")} · ${invoice.number} · ${recvT("Proof")} #${idx + 1} · ${fmtDate(p.uploaded_at)}`;
+      const img = document.createElement("img");
+      img.alt = "Receiving Proof";
+      img.src = src;
+      pageEl.appendChild(title);
+      pageEl.appendChild(img);
+      host.appendChild(pageEl);
+    });
+    document.body.appendChild(host);
+    return () => { host.remove(); };
+  }, [show, invoice.id, invoice.number, language, proofs.map((p) => p.receiving_id + "|" + p.uploaded_at).join(",")]);
+
+  if (!show) return null;
+  return (
+    <div className="hidden print:block mt-4 pt-3 border-t border-slate-300 text-xs" data-recv="print-proof">
+      <div className="font-black uppercase tracking-wide text-slate-900">{recvT("Receiving Proof")}</div>
+      <div className="font-bold text-emerald-700">✓ {recvT("Available")}</div>
+      {proofs.map((p, idx) => (
+        <div key={p.receiving_id} className="text-slate-500">
+          {recvT("Proof")} #{idx + 1} · <span dir="ltr">{fmtDate(p.uploaded_at)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/* ============================================================
+   PAYMENT PROOF  —  payment screenshot / proof upload
+   ------------------------------------------------------------
+   Part of the existing Payments page (Add Payment form, Payments
+   table, Payment Receipt). It never creates, edits or deletes a
+   payment, and never touches invoices, ledger, promises, bookings or
+   commission. A screenshot is supporting evidence only: uploading,
+   verifying or rejecting it does not change any amount or status
+   anywhere else.
+
+   Where things are stored
+   - The image file:
+       Supabase configured  -> private Storage bucket "payment-proofs"
+                               (path payments/<paymentId>/<time>-<rand>.jpg),
+                               viewed through short-lived signed URLs.
+       Supabase not set up  -> this browser's localStorage only (same
+                               device-only fallback the ERP already uses
+                               for all of its data).
+   - The link to the payment: one kv_store record per payment,
+       key  "ct-payment-proof:<paymentId>"
+       { payment_id, receipt_no, storage, path, uploaded_by, uploaded_at,
+         verification_status, verified_by, verified_at, reject_reason,
+         active, history[], ... }
+     It is kept out of the shared "ct-payments" array on purpose: that
+     array is rewritten whole on every payment save, so writing proof
+     data into it could overwrite a payment saved at the same moment on
+     another device. A separate record per payment id cannot.
+   - Transaction reference: saved on the payment itself (payment.reference)
+     because it is entered with the payment, even when no image is added.
+
+   Verification status ("Pending Verification" / "Verified" / "Rejected")
+   lives only on the proof record and is shown only next to the proof.
+   ============================================================ */
+
+const PPROOF_KEY_PREFIX = "ct-payment-proof:";
+const PPROOF_BUCKET = "payment-proofs";
+const PPROOF_STATUS = { PENDING: "Pending Verification", VERIFIED: "Verified", REJECTED: "Rejected" };
+const PPROOF_STATUS_TONE = {
+  "Pending Verification": "bg-amber-100 text-amber-700",
+  Verified: "bg-emerald-100 text-emerald-700",
+  Rejected: "bg-red-100 text-red-700",
+};
+const PPROOF_CONFIG = {
+  allowedTypes: ["image/jpeg", "image/png", "image/webp"],
+  maxUploadBytes: 10 * 1024 * 1024,    // largest file staff may pick
+  maxEdge: 2000,                        // stored image long edge (px) — keeps small print readable
+  maxStoredBytes: 4.5 * 1024 * 1024,    // must stay under the bucket's 5 MB limit
+  localMaxChars: 1200000,               // localStorage fallback: about 0.9 MB per image
+  signedUrlSeconds: 600,                // view / download links expire after 10 minutes
+};
+// Which roles may do what. Customers never reach the Payments page at all.
+const PPROOF_PERMS = {
+  upload: ["admin", "staff"],          // upload missing proof, replace an unverified proof
+  replaceVerified: ["admin"],
+  delete: ["admin"],
+  verify: ["admin"],                   // verify or reject
+};
+
+const PPROOF_URDU = {
+  "Payment Proof": "ادائیگی کا ثبوت",
+  "Upload Payment Screenshot": "ادائیگی کا اسکرین شاٹ اپ لوڈ کریں",
+  "Choose Image": "تصویر منتخب کریں",
+  "Take Photo": "تصویر کھینچیں",
+  "Replace Image": "تصویر تبدیل کریں",
+  "Remove Image": "تصویر ہٹائیں",
+  "Checking image...": "تصویر چیک ہو رہی ہے...",
+  "JPG, PNG or WEBP · up to 10 MB": "JPG، PNG یا WEBP · زیادہ سے زیادہ 10 MB",
+  "Transaction Reference (optional)": "ٹرانزیکشن حوالہ (اختیاری)",
+  "Transaction Reference": "ٹرانزیکشن حوالہ",
+  "View Screenshot": "اسکرین شاٹ دیکھیں",
+  "View Payment Proof": "ادائیگی کا ثبوت دیکھیں",
+  "No Proof Uploaded": "کوئی ثبوت اپ لوڈ نہیں ہوا",
+  "Upload Proof": "ثبوت اپ لوڈ کریں",
+  "Save Replacement": "تبدیلی محفوظ کریں",
+  "Replace Proof": "ثبوت تبدیل کریں",
+  "Delete Proof": "ثبوت حذف کریں",
+  "Verify": "تصدیق کریں",
+  "Reject": "مسترد کریں",
+  "Confirm Reject": "مسترد کرنے کی تصدیق",
+  "Rejection Reason": "مسترد کرنے کی وجہ",
+  "Pending Verification": "تصدیق زیرِ التوا",
+  "Verified": "تصدیق شدہ",
+  "Rejected": "مسترد",
+  "Verification": "تصدیق",
+  "Uploading...": "اپ لوڈ ہو رہا ہے...",
+  "Saving...": "محفوظ ہو رہا ہے...",
+  "Loading image...": "تصویر لوڈ ہو رہی ہے...",
+  "Open": "کھولیں",
+  "Retry": "دوبارہ کوشش کریں",
+  "Uploaded By": "اپ لوڈ کنندہ",
+  "Uploaded At": "اپ لوڈ کا وقت",
+  "Verified By": "تصدیق کنندہ",
+  "Rejected By": "مسترد کنندہ",
+  "Proof History": "ثبوت کی ہسٹری",
+  "Proof attached": "ثبوت منسلک ہے",
+  "No proof attached": "کوئی ثبوت منسلک نہیں",
+  "Payment Proof Details": "ادائیگی کے ثبوت کی تفصیلات",
+  "A screenshot is supporting evidence only. Uploading, verifying or rejecting it does not change the payment amount, the invoice or the customer ledger.":
+    "اسکرین شاٹ صرف معاون ثبوت ہے۔ اسے اپ لوڈ، تصدیق یا مسترد کرنے سے ادائیگی کی رقم، انوائس یا گاہک کا لیجر تبدیل نہیں ہوتا۔",
+  "Delete this payment proof? The payment itself will not be deleted.": "کیا یہ ادائیگی کا ثبوت حذف کریں؟ ادائیگی خود حذف نہیں ہوگی۔",
+  "Payment recorded. Screenshot uploaded — Pending Verification.": "ادائیگی درج ہو گئی۔ اسکرین شاٹ اپ لوڈ ہو گیا — تصدیق زیرِ التوا۔",
+  "Payment recorded, but the screenshot was NOT uploaded:": "ادائیگی درج ہو گئی، لیکن اسکرین شاٹ اپ لوڈ نہیں ہوا:",
+  "Use Upload Proof in the Payment Proof column to try again.": "دوبارہ کوشش کے لیے ادائیگی کے ثبوت والے کالم میں ثبوت اپ لوڈ کریں۔",
+  "Payment recorded.": "ادائیگی درج ہو گئی۔",
+  "Proof uploaded — Pending Verification.": "ثبوت اپ لوڈ ہو گیا — تصدیق زیرِ التوا۔",
+  "Proof replaced — Pending Verification.": "ثبوت تبدیل ہو گیا — تصدیق زیرِ التوا۔",
+  "Proof deleted. The payment was not changed.": "ثبوت حذف ہو گیا۔ ادائیگی میں کوئی تبدیلی نہیں ہوئی۔",
+  "Proof marked as Verified.": "ثبوت کی تصدیق ہو گئی۔",
+  "Proof marked as Rejected.": "ثبوت مسترد کر دیا گیا۔",
+  "Only JPG, PNG or WEBP images are allowed.": "صرف JPG، PNG یا WEBP تصاویر کی اجازت ہے۔",
+  "Image is larger than 10 MB.": "تصویر 10 MB سے بڑی ہے۔",
+  "Image is too large to store. Please use a smaller screenshot.": "تصویر محفوظ کرنے کے لیے بہت بڑی ہے۔ براہِ کرم چھوٹا اسکرین شاٹ استعمال کریں۔",
+  "Could not read this image.": "یہ تصویر پڑھی نہیں جا سکی۔",
+  "The image could not be loaded.": "تصویر لوڈ نہیں ہو سکی۔",
+  "Upload failed. Please check your internet and try again.": "اپ لوڈ ناکام ہو گیا۔ براہِ کرم انٹرنیٹ چیک کر کے دوبارہ کوشش کریں۔",
+  "Could not save. Please check your internet and try again.": "محفوظ نہیں ہو سکا۔ براہِ کرم انٹرنیٹ چیک کر کے دوبارہ کوشش کریں۔",
+  "Could not load payment proofs.": "ادائیگی کے ثبوت لوڈ نہیں ہو سکے۔",
+  "Browser storage is full. Delete old proofs or set up Supabase.": "براؤزر اسٹوریج بھر گئی ہے۔ پرانے ثبوت حذف کریں یا Supabase سیٹ اپ کریں۔",
+  "You do not have permission to do this.": "آپ کو یہ کام کرنے کی اجازت نہیں ہے۔",
+  "Only admin can replace a verified proof.": "تصدیق شدہ ثبوت صرف ایڈمن تبدیل کر سکتا ہے۔",
+  "Rejection reason is required.": "مسترد کرنے کی وجہ درج کرنا ضروری ہے۔",
+  "This payment has no proof.": "اس ادائیگی کا کوئی ثبوت نہیں ہے۔",
+  "Select an image first.": "پہلے تصویر منتخب کریں۔",
+  "Images on this device only (Supabase not configured).": "تصاویر صرف اسی ڈیوائس پر ہیں (Supabase سیٹ اپ نہیں)۔",
+  "Uploaded": "اپ لوڈ ہوا",
+  "Replaced": "تبدیل ہوا",
+};
+Object.entries(PPROOF_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
+
+// Error whose message is a translatable sentence that can be shown to staff.
+function pproofError(message, cause) {
+  const e = new Error(message);
+  e.pproofUser = true;
+  if (cause) { e.cause = cause; console.error("payment proof:", message, cause); }
+  return e;
+}
+function pproofMessage(e, fallback) {
+  return e && e.pproofUser ? e.message : fallback;
+}
+
+function pproofCan(user, action) {
+  return !!user && user.role !== "customer" && (PPROOF_PERMS[action] || []).includes(user.role);
+}
+function pproofRequire(user, action) {
+  if (!pproofCan(user, action)) throw pproofError("You do not have permission to do this.");
+}
+function pproofActor(user) {
+  return (user && (user.name || user.username)) || "Staff";
+}
+
+/* ---------------- Image checks + re-encode ----------------
+   Type is checked twice (the browser's file type AND the file's first
+   bytes), then the browser decodes it and a fresh JPEG is drawn. The
+   original file is never stored, so anything that is not a real image
+   cannot get through. */
+
+async function pproofSniffType(file) {
+  const h = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+  if (h[0] === 0xff && h[1] === 0xd8 && h[2] === 0xff) return "image/jpeg";
+  if (h[0] === 0x89 && h[1] === 0x50 && h[2] === 0x4e && h[3] === 0x47) return "image/png";
+  if (h[0] === 0x52 && h[1] === 0x49 && h[2] === 0x46 && h[3] === 0x46 &&
+      h[8] === 0x57 && h[9] === 0x45 && h[10] === 0x42 && h[11] === 0x50) return "image/webp";
+  return "";
+}
+
+function pproofDecode(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("decode")); };
+    img.src = url;
+  });
+}
+
+function pproofCanvasBlob(canvas, quality) {
+  return new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/jpeg", quality));
+}
+
+function pproofBlobToDataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+// Returns { blob, previewUrl, width, height, bytes, originalName }.
+async function pproofPrepareImage(file) {
+  if (!file) throw pproofError("Could not read this image.");
+  if (!PPROOF_CONFIG.allowedTypes.includes(file.type)) throw pproofError("Only JPG, PNG or WEBP images are allowed.");
+  if (file.size > PPROOF_CONFIG.maxUploadBytes) throw pproofError("Image is larger than 10 MB.");
+  const sniffed = await pproofSniffType(file);
+  if (!PPROOF_CONFIG.allowedTypes.includes(sniffed)) throw pproofError("Only JPG, PNG or WEBP images are allowed.");
+  let img;
+  try { img = await pproofDecode(file); } catch { throw pproofError("Could not read this image."); }
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (!w || !h) throw pproofError("Could not read this image.");
+  const limit = supabase ? PPROOF_CONFIG.maxStoredBytes : Math.floor(PPROOF_CONFIG.localMaxChars * 0.74);
+  const canvas = document.createElement("canvas");
+  let edge = PPROOF_CONFIG.maxEdge;
+  let quality = 0.88;
+  let blob = null;
+  for (let attempt = 0; attempt < 7; attempt++) {
+    const scale = Math.min(1, edge / Math.max(w, h));
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    blob = await pproofCanvasBlob(canvas, quality);
+    if (blob && blob.size <= limit) break;
+    edge = Math.round(edge * 0.82);
+    quality = Math.max(0.6, quality - 0.06);
+  }
+  if (!blob || blob.size > limit) throw pproofError("Image is too large to store. Please use a smaller screenshot.");
+  return {
+    blob, previewUrl: URL.createObjectURL(blob), width: canvas.width, height: canvas.height,
+    bytes: blob.size, originalName: String(file.name || "").slice(0, 120),
+  };
+}
+
+// Data URL of the image that fits in maxChars (re-encodes smaller if needed).
+async function pproofFitDataUrl(blob, maxChars) {
+  let dataUrl = await pproofBlobToDataUrl(blob);
+  if (/^data:image\/jpeg;base64,/.test(dataUrl) && dataUrl.length <= maxChars) return dataUrl;
+  let img;
+  try { img = await pproofDecode(blob); } catch { throw pproofError("Could not read this image."); }
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  const canvas = document.createElement("canvas");
+  let edge = Math.min(PPROOF_CONFIG.maxEdge, Math.max(w, h));
+  let quality = 0.82;
+  for (let attempt = 0; attempt < 8; attempt++) {
+    edge = Math.round(edge * 0.82);
+    quality = Math.max(0.55, quality - 0.05);
+    const scale = Math.min(1, edge / Math.max(w, h));
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    dataUrl = canvas.toDataURL("image/jpeg", quality);
+    if (dataUrl.length <= maxChars) return dataUrl;
+  }
+  throw pproofError("Image is too large to store. Please use a smaller screenshot.");
+}
+
+function pproofFmtBytes(n) {
+  const v = Number(n) || 0;
+  return v >= 1024 * 1024 ? (v / 1024 / 1024).toFixed(1) + " MB" : Math.max(1, Math.round(v / 1024)) + " KB";
+}
+
+/* ---------------- kv record storage (throws on failure) ---------------- */
+
+function pproofKey(paymentId) { return PPROOF_KEY_PREFIX + paymentId; }
+
+async function pproofKvGet(paymentId) {
+  const key = pproofKey(paymentId);
+  if (supabase) {
+    const { data, error } = await supabase.from("kv_store").select("value").eq("key", key).maybeSingle();
+    if (error) throw pproofError("Could not save. Please check your internet and try again.", error);
+    return data ? data.value : null;
+  }
+  const raw = window.localStorage.getItem(LS_PREFIX + key);
+  return raw ? JSON.parse(raw) : null;
+}
+
+async function pproofKvPut(record) {
+  const key = pproofKey(record.payment_id);
+  if (supabase) {
+    const { error } = await supabase.from("kv_store").upsert({ key, value: record, updated_at: new Date().toISOString() });
+    if (error) throw pproofError("Could not save. Please check your internet and try again.", error);
+    return;
+  }
+  try {
+    window.localStorage.setItem(LS_PREFIX + key, JSON.stringify(record));
+  } catch (e) {
+    throw pproofError("Browser storage is full. Delete old proofs or set up Supabase.", e);
+  }
+}
+
+async function pproofKvListAll() {
+  const out = {};
+  if (supabase) {
+    const { data, error } = await supabase.from("kv_store").select("key,value").like("key", PPROOF_KEY_PREFIX + "%");
+    if (error) throw error;
+    (data || []).forEach((row) => {
+      const v = row.value;
+      if (String(row.key).startsWith(PPROOF_KEY_PREFIX) && v && v.payment_id && row.key === pproofKey(v.payment_id)) out[v.payment_id] = v;
+    });
+    return out;
+  }
+  const full = LS_PREFIX + PPROOF_KEY_PREFIX;
+  for (let i = 0; i < window.localStorage.length; i++) {
+    const k = window.localStorage.key(i);
+    if (!k || !k.startsWith(full)) continue;
+    try {
+      const v = JSON.parse(window.localStorage.getItem(k));
+      if (v && v.payment_id && k === LS_PREFIX + pproofKey(v.payment_id)) out[v.payment_id] = v;
+    } catch {}
+  }
+  return out;
+}
+
+/* ---------------- shared cache + live updates ---------------- */
+
+const pproofState = { loaded: false, failed: false, records: {} };
+const pproofListeners = new Set();
+let pproofInFlight = null;
+let pproofChannel = null;
+let pproofSubscribers = 0;
+
+function pproofEmit() { pproofListeners.forEach((l) => l()); }
+
+function pproofRefreshAll() {
+  if (pproofInFlight) return pproofInFlight;
+  pproofInFlight = (async () => {
+    try {
+      pproofState.records = await pproofKvListAll();
+      pproofState.failed = false;
+    } catch (e) {
+      console.error("payment proof load failed", e);
+      pproofState.failed = true;
+    } finally {
+      pproofState.loaded = true;
+      pproofInFlight = null;
+      pproofEmit();
+    }
+  })();
+  return pproofInFlight;
+}
+
+function pproofSetRecord(record) {
+  pproofState.records = { ...pproofState.records, [record.payment_id]: record };
+  pproofEmit();
+}
+
+// The active (not deleted) proof record of one payment, or null.
+function pproofActiveRecord(paymentId) {
+  const r = pproofState.records[paymentId];
+  return r && r.active && r.payment_id === paymentId && (r.path || r.data_url) ? r : null;
+}
+
+function usePaymentProofs() {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const listener = () => bump((n) => n + 1);
+    pproofListeners.add(listener);
+    pproofSubscribers += 1;
+    pproofRefreshAll();
+    if (supabase && !pproofChannel && typeof supabase.channel === "function") {
+      pproofChannel = supabase
+        .channel("payment_proof_changes")
+        .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, (payload) => {
+          const row = payload.new;
+          if (!row || !String(row.key || "").startsWith(PPROOF_KEY_PREFIX)) return;
+          const v = row.value;
+          if (v && v.payment_id && row.key === pproofKey(v.payment_id)) pproofSetRecord(v);
+        })
+        .subscribe();
+    }
+    return () => {
+      pproofListeners.delete(listener);
+      pproofSubscribers -= 1;
+      if (pproofSubscribers <= 0 && pproofChannel) {
+        try { supabase.removeChannel(pproofChannel); } catch {}
+        pproofChannel = null;
+      }
+    };
+  }, []);
+  return { loaded: pproofState.loaded, failed: pproofState.failed, recordFor: pproofActiveRecord };
+}
+
+/* ---------------- actions ---------------- */
+
+function pproofHistory(user, action, details) {
+  return { action, details: details || "", by: pproofActor(user), role: user?.role || "", at: new Date().toISOString() };
+}
+
+function pproofRandom() {
+  return Math.random().toString(36).slice(2, 8);
+}
+
+// Upload proof for a payment (new or missing) — or replace the current one.
+// Never touches the payment record itself.
+async function pproofUpload(user, payment, prepared, invoice) {
+  pproofRequire(user, "upload");
+  if (!payment || !payment.id) throw pproofError("Could not save. Please check your internet and try again.");
+  if (!prepared || !prepared.blob) throw pproofError("Select an image first.");
+  const existing = await pproofKvGet(payment.id);
+  if (existing && existing.payment_id !== payment.id) throw pproofError("Could not save. Please check your internet and try again.");
+  const replacing = !!(existing && existing.active && (existing.path || existing.data_url));
+  if (replacing && existing.verification_status === PPROOF_STATUS.VERIFIED && !pproofCan(user, "replaceVerified")) {
+    throw pproofError("Only admin can replace a verified proof.");
+  }
+
+  let stored;
+  if (supabase) {
+    const safeId = String(payment.id).replace(/[^A-Za-z0-9_-]/g, "");
+    const path = `payments/${safeId}/${Date.now()}-${pproofRandom()}.jpg`;
+    let res;
+    try {
+      res = await supabase.storage.from(PPROOF_BUCKET).upload(path, prepared.blob, { contentType: "image/jpeg", upsert: false, cacheControl: "3600" });
+    } catch (e) {
+      res = { error: e };
+    }
+    if (!res.error) {
+      stored = { storage: "supabase", path, data_url: null };
+    } else {
+      // Storage bucket missing / blocked by a policy / not reachable.
+      // Fall back to the same place the ERP already keeps Receiving Proof
+      // images: a compressed image inside this proof's own kv_store record.
+      // If the database is also unreachable, saving the record below fails
+      // and staff see "Could not save" — never a fake success.
+      const reason = String((res.error && (res.error.message || res.error.error || res.error.statusCode)) || "storage error");
+      console.warn("payment proof: Storage upload failed, saving image in the database record instead —", reason, res.error);
+      const dataUrl = await pproofFitDataUrl(prepared.blob, PPROOF_CONFIG.localMaxChars);
+      stored = { storage: "database", path: null, data_url: dataUrl, storage_fallback_reason: reason.slice(0, 200) };
+    }
+  } else {
+    const dataUrl = await pproofBlobToDataUrl(prepared.blob);
+    if (!/^data:image\/jpeg;base64,/.test(dataUrl) || dataUrl.length > PPROOF_CONFIG.localMaxChars) {
+      throw pproofError("Image is too large to store. Please use a smaller screenshot.");
+    }
+    stored = { storage: "local", path: null, data_url: dataUrl };
+  }
+  if (stored.storage !== "database") stored.storage_fallback_reason = "";
+
+  const now = new Date().toISOString();
+  const record = {
+    ...(existing || {}),
+    payment_id: payment.id,
+    receipt_no: paymentReceiptNo(payment),
+    customer_id: payment.customerId || "",
+    customer_name: payment.customerName || "",
+    invoice_id: invoice ? invoice.id : (payment.invoiceId || ""),
+    invoice_number: invoice ? invoice.number : "",
+    ...stored,
+    mime: "image/jpeg",
+    bytes: prepared.bytes, width: prepared.width, height: prepared.height,
+    original_name: prepared.originalName || "",
+    uploaded_by: pproofActor(user), uploaded_by_role: user.role, uploaded_at: now,
+    // A new / replaced image always needs to be checked again.
+    verification_status: PPROOF_STATUS.PENDING,
+    verified_by: "", verified_at: "", reject_reason: "",
+    deleted_by: "", deleted_at: "",
+    active: true,
+    version: (Number(existing?.version) || 0) + 1,
+    history: [
+      ...((existing && existing.history) || []),
+      pproofHistory(user, replacing ? "Replaced" : "Uploaded", `${pproofFmtBytes(prepared.bytes)} · ${prepared.width}×${prepared.height}`),
+    ],
+  };
+
+  try {
+    await pproofKvPut(record);
+  } catch (e) {
+    // The link was not saved, so the new file would be unreachable: remove it.
+    if (stored.storage === "supabase") {
+      try { await supabase.storage.from(PPROOF_BUCKET).remove([stored.path]); } catch {}
+    }
+    throw e;
+  }
+  if (replacing && existing.storage === "supabase" && existing.path && existing.path !== record.path) {
+    try {
+      const { error } = await supabase.storage.from(PPROOF_BUCKET).remove([existing.path]);
+      if (error) console.warn("old payment proof file was not removed", existing.path, error);
+    } catch (e) { console.warn("old payment proof file was not removed", existing.path, e); }
+  }
+  pproofSetRecord(record);
+  return { record, replaced: replacing };
+}
+
+// Delete the proof only — the payment stays exactly as it is.
+async function pproofDelete(user, paymentId) {
+  pproofRequire(user, "delete");
+  const existing = await pproofKvGet(paymentId);
+  if (!existing || !existing.active || existing.payment_id !== paymentId) throw pproofError("This payment has no proof.");
+  const oldPath = existing.storage === "supabase" ? existing.path : null;
+  const record = {
+    ...existing,
+    active: false, path: null, data_url: null,
+    verification_status: "", deleted_by: pproofActor(user), deleted_at: new Date().toISOString(),
+    version: (Number(existing.version) || 0) + 1,
+    history: [...(existing.history || []), pproofHistory(user, "Deleted", "")],
+  };
+  // Unlink first, then remove the file: if the file removal fails, the proof
+  // is still gone from the ERP (an unreachable file, never a broken link).
+  await pproofKvPut(record);
+  if (oldPath) {
+    try {
+      const { error } = await supabase.storage.from(PPROOF_BUCKET).remove([oldPath]);
+      if (error) console.warn("payment proof file was not removed", oldPath, error);
+    } catch (e) { console.warn("payment proof file was not removed", oldPath, e); }
+  }
+  pproofSetRecord(record);
+  return record;
+}
+
+async function pproofSetVerification(user, paymentId, status, reason) {
+  pproofRequire(user, "verify");
+  if (status !== PPROOF_STATUS.VERIFIED && status !== PPROOF_STATUS.REJECTED) throw pproofError("You do not have permission to do this.");
+  const why = String(reason || "").trim();
+  if (status === PPROOF_STATUS.REJECTED && !why) throw pproofError("Rejection reason is required.");
+  const existing = await pproofKvGet(paymentId);
+  if (!existing || !existing.active || existing.payment_id !== paymentId) throw pproofError("This payment has no proof.");
+  const record = {
+    ...existing,
+    verification_status: status,
+    verified_by: pproofActor(user), verified_at: new Date().toISOString(),
+    reject_reason: status === PPROOF_STATUS.REJECTED ? why : "",
+    version: (Number(existing.version) || 0) + 1,
+    history: [...(existing.history || []), pproofHistory(user, status, why)],
+  };
+  await pproofKvPut(record);
+  pproofSetRecord(record);
+  return record;
+}
+
+// A URL the browser can show / download. Supabase: signed, short-lived.
+async function pproofImageUrl(record, downloadName) {
+  if (!record || !record.active) throw pproofError("The image could not be loaded.");
+  if (record.storage === "local" || record.storage === "database") {
+    if (!/^data:image\/jpeg;base64,/.test(record.data_url || "")) throw pproofError("The image could not be loaded.");
+    return record.data_url;
+  }
+  if (!supabase || !record.path) throw pproofError("The image could not be loaded.");
+  const { data, error } = await supabase.storage.from(PPROOF_BUCKET)
+    .createSignedUrl(record.path, PPROOF_CONFIG.signedUrlSeconds, downloadName ? { download: downloadName } : undefined);
+  if (error || !data || !data.signedUrl) throw pproofError("The image could not be loaded.", error);
+  return data.signedUrl;
+}
+
+/* ---------------- UI: image picker (Add Payment form + modal) ---------------- */
+
+function PaymentProofPicker({ value, onChange, disabled }) {
+  const fileRef = React.useRef(null);
+  const camRef = React.useRef(null);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState("");
+
+  async function pick(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    setChecking(true);
+    setError("");
+    try {
+      const prepared = await pproofPrepareImage(file);
+      if (value && value.previewUrl) URL.revokeObjectURL(value.previewUrl);
+      onChange(prepared);
+    } catch (err) {
+      setError(pproofMessage(err, "Could not read this image."));
+    } finally {
+      setChecking(false);
+    }
+  }
+
+  function remove() {
+    if (value && value.previewUrl) URL.revokeObjectURL(value.previewUrl);
+    onChange(null);
+    setError("");
+  }
+
+  const smallBtn = "px-3 py-1.5 text-xs font-bold uppercase tracking-wide border transition-colors";
+  return (
+    <div data-pproof="picker">
+      <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" className="hidden" data-pproof="file-input" onChange={pick} disabled={disabled} />
+      <input ref={camRef} type="file" accept="image/*" capture="environment" className="hidden" data-pproof="camera-input" onChange={pick} disabled={disabled} />
+      {value ? (
+        <div className="flex items-start gap-3 border border-slate-200 bg-slate-50 p-2" data-pproof="preview">
+          <img src={value.previewUrl} alt={t("Payment Proof")} className="w-24 h-24 object-contain bg-white border border-slate-300 shrink-0" data-pproof="preview-img" />
+          <div className="min-w-0 flex-1 text-xs">
+            <div className="font-bold text-slate-700 truncate">{value.originalName || "image"}</div>
+            <div className="text-slate-500" dir="ltr">{pproofFmtBytes(value.bytes)} · {value.width}×{value.height}</div>
+            <div className="mt-2 flex gap-2 flex-wrap">
+              <button type="button" disabled={disabled || checking} className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-white`} onClick={() => fileRef.current && fileRef.current.click()} data-pproof="replace-picked">{t("Replace Image")}</button>
+              <button type="button" disabled={disabled || checking} className={`${smallBtn} border-red-200 text-red-600 hover:bg-red-50`} onClick={remove} data-pproof="remove-picked">{t("Remove Image")}</button>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <div className="flex gap-2 flex-wrap">
+          <button type="button" disabled={disabled || checking} className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-slate-100`} onClick={() => fileRef.current && fileRef.current.click()} data-pproof="choose">📎 {t("Choose Image")}</button>
+          <button type="button" disabled={disabled || checking} className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-slate-100 sm:hidden`} onClick={() => camRef.current && camRef.current.click()} data-pproof="camera">📷 {t("Take Photo")}</button>
+        </div>
+      )}
+      {checking && <div className="text-xs text-slate-500 mt-1">{t("Checking image...")}</div>}
+      {error && <div className="text-xs font-bold text-red-600 mt-1" data-pproof="picker-error">{t(error)}</div>}
+      <div className="text-[10px] text-slate-400 mt-1">{t("JPG, PNG or WEBP · up to 10 MB")}{!supabase ? " · " + t("Images on this device only (Supabase not configured).") : ""}</div>
+    </div>
+  );
+}
+
+function PaymentProofBadge({ status }) {
+  if (!status) return null;
+  return <span className={`text-[10px] font-bold uppercase px-2 py-0.5 whitespace-nowrap ${PPROOF_STATUS_TONE[status] || "bg-slate-100 text-slate-500"}`} data-pproof="status">{t(status)}</span>;
+}
+
+/* ---------------- UI: cell in the Payments table ---------------- */
+
+function PaymentProofCell({ record, loaded, failed, canUpload, onOpen }) {
+  if (!loaded) return <span className="text-xs text-slate-400">{t("Loading...")}</span>;
+  if (record) {
+    return (
+      <div className="flex flex-col items-start gap-1" data-pproof="cell" data-pproof-has="1">
+        <PaymentProofBadge status={record.verification_status} />
+        <button type="button" className="text-xs font-bold text-blue-700 hover:underline whitespace-nowrap" onClick={onOpen} data-pproof="view">📎 {t("View Screenshot")}</button>
+      </div>
+    );
+  }
+  return (
+    <div className="flex flex-col items-start gap-1" data-pproof="cell" data-pproof-has="0">
+      <span className="text-xs text-slate-400 whitespace-nowrap">{failed ? t("Could not load payment proofs.") : t("No Proof Uploaded")}</span>
+      {canUpload && !failed && (
+        <button type="button" className="text-xs font-bold text-slate-500 hover:text-blue-700 whitespace-nowrap" onClick={onOpen} data-pproof="upload-open">+ {t("Upload Proof")}</button>
+      )}
+    </div>
+  );
+}
+
+/* ---------------- UI: proof details / viewer modal ---------------- */
+
+function PaymentProofModal({ payment, invoice, record, currentUser, onClose, onAudit }) {
+  const [url, setUrl] = useState("");
+  const [imgState, setImgState] = useState("idle"); // idle | loading | ok | error
+  const [reloadKey, setReloadKey] = useState(0);
+  const [picked, setPicked] = useState(null);
+  const [replacing, setReplacing] = useState(false);
+  const [rejecting, setRejecting] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const receiptNo = paymentReceiptNo(payment);
+  const fileName = `Payment-Proof-${receiptNo}.jpg`;
+  const canUpload = pproofCan(currentUser, "upload");
+  const canReplace = record && (record.verification_status !== PPROOF_STATUS.VERIFIED ? canUpload : pproofCan(currentUser, "replaceVerified"));
+  const canDelete = pproofCan(currentUser, "delete");
+  const canVerify = pproofCan(currentUser, "verify");
+
+  useEffect(() => {
+    let cancelled = false;
+    setUrl("");
+    if (!record) { setImgState("idle"); return undefined; }
+    setImgState("loading");
+    pproofImageUrl(record)
+      .then((u) => { if (!cancelled) setUrl(u); })
+      .catch(() => { if (!cancelled) setImgState("error"); });
+    return () => { cancelled = true; };
+  }, [record && record.version, record && record.path, reloadKey]);
+
+  useEffect(() => () => { if (picked && picked.previewUrl) URL.revokeObjectURL(picked.previewUrl); }, [picked]);
+
+  async function run(kind, work, okMessage, audit) {
+    if (busy) return;
+    setBusy(kind);
+    setError("");
+    setNotice("");
+    try {
+      await work();
+      setNotice(okMessage);
+      if (audit && onAudit) onAudit(audit[0], `${receiptNo} — ${payment.customerName}`, audit[1] || "");
+    } catch (e) {
+      setError(pproofMessage(e, "Could not save. Please check your internet and try again."));
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function uploadPicked() {
+    if (!picked) { setError("Select an image first."); return; }
+    const wasReplace = !!record;
+    run("upload", async () => {
+      await pproofUpload(currentUser, payment, picked, invoice);
+      setPicked(null);
+      setReplacing(false);
+    }, wasReplace ? "Proof replaced — Pending Verification." : "Proof uploaded — Pending Verification.",
+    [wasReplace ? "Payment Proof Replaced" : "Payment Proof Uploaded", ""]);
+  }
+
+  function doDelete() {
+    if (!confirm(t("Delete this payment proof? The payment itself will not be deleted."))) return;
+    run("delete", () => pproofDelete(currentUser, payment.id), "Proof deleted. The payment was not changed.", ["Payment Proof Deleted", ""]);
+  }
+
+  function doVerify() {
+    run("verify", () => pproofSetVerification(currentUser, payment.id, PPROOF_STATUS.VERIFIED, ""), "Proof marked as Verified.", ["Payment Proof Verified", ""]);
+  }
+
+  function doReject() {
+    if (!rejectReason.trim()) { setError("Rejection reason is required."); return; }
+    run("reject", async () => {
+      await pproofSetVerification(currentUser, payment.id, PPROOF_STATUS.REJECTED, rejectReason);
+      setRejecting(false);
+      setRejectReason("");
+    }, "Proof marked as Rejected.", ["Payment Proof Rejected", rejectReason.trim()]);
+  }
+
+  async function openFull() {
+    try {
+      const u = url || await pproofImageUrl(record);
+      if (u.startsWith("data:")) {
+        const blob = await (await fetch(u)).blob();
+        window.open(URL.createObjectURL(blob), "_blank", "noopener");
+      } else {
+        window.open(u, "_blank", "noopener");
+      }
+    } catch (e) { setError(pproofMessage(e, "The image could not be loaded.")); }
+  }
+
+  async function download() {
+    try {
+      const u = await pproofImageUrl(record, fileName);
+      const a = document.createElement("a");
+      a.href = u; a.download = fileName; a.rel = "noopener";
+      document.body.appendChild(a); a.click(); a.remove();
+    } catch (e) { setError(pproofMessage(e, "The image could not be loaded.")); }
+  }
+
+  const row = (label, value) => (
+    <div className="flex justify-between gap-3 py-0.5">
+      <span className="text-slate-500">{t(label)}</span>
+      <span className="font-bold text-right break-all">{value || "-"}</span>
+    </div>
+  );
+  const smallBtn = "px-3 py-1.5 text-xs font-bold uppercase tracking-wide border transition-colors disabled:opacity-40";
+  const history = record ? [...(record.history || [])].reverse() : [];
+
+  return (
+    <Modal title="Payment Proof" onClose={onClose} wide>
+      <div data-pproof="modal" data-payment-id={payment.id}>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 text-xs mb-3">
+          <div>
+            {row("Receipt No.", receiptNo)}
+            {row("Customer", payment.customerName)}
+            {row("Invoice", invoice ? invoice.number : "")}
+            {row("Payment Date", fmtDate(payment.date))}
+          </div>
+          <div>
+            {row("Amount", fmtMoney(payment.amount))}
+            {row("Payment Method", payment.method)}
+            {row("Transaction Reference", payment.reference)}
+            {row("Note", payment.note)}
+          </div>
+        </div>
+
+        {record ? (
+          <>
+            <div className="flex items-center justify-between gap-2 flex-wrap border-t border-slate-200 pt-3 mb-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span className="font-black uppercase text-slate-700">{t("Verification")}:</span>
+                <PaymentProofBadge status={record.verification_status} />
+              </div>
+              <div className="text-slate-500">
+                {t("Uploaded By")}: <span className="font-bold text-slate-700">{record.uploaded_by}</span> · <span dir="ltr">{fmtDateTime(record.uploaded_at)}</span>
+              </div>
+            </div>
+            {record.verification_status === PPROOF_STATUS.VERIFIED && (
+              <div className="text-xs text-emerald-700 mb-2">{t("Verified By")}: <span className="font-bold">{record.verified_by}</span> · <span dir="ltr">{fmtDateTime(record.verified_at)}</span></div>
+            )}
+            {record.verification_status === PPROOF_STATUS.REJECTED && (
+              <div className="text-xs text-red-700 bg-red-50 border border-red-200 px-2 py-1 mb-2" data-pproof="reject-reason">
+                {t("Rejected By")}: <span className="font-bold">{record.verified_by}</span> · <span dir="ltr">{fmtDateTime(record.verified_at)}</span>
+                <div>{t("Reason")}: <span className="font-bold">{record.reject_reason}</span></div>
+              </div>
+            )}
+
+            <div className="bg-slate-100 border border-slate-200 flex items-center justify-center overflow-auto" style={{ minHeight: 160, maxHeight: "60vh" }}>
+              {imgState === "loading" && !url && <div className="text-xs text-slate-500 p-6">{t("Loading image...")}</div>}
+              {url && imgState !== "error" && (
+                <img
+                  src={url} alt={t("Payment Proof")} data-pproof="image"
+                  onLoad={() => setImgState("ok")} onError={() => setImgState("error")}
+                  style={{ maxWidth: "100%", maxHeight: "58vh", display: imgState === "ok" ? "block" : "none" }}
+                />
+              )}
+              {url && imgState === "loading" && <div className="text-xs text-slate-500 p-6">{t("Loading image...")}</div>}
+              {imgState === "error" && (
+                <div className="text-center p-6" data-pproof="image-error">
+                  <div className="text-xs font-bold text-red-600">{t("The image could not be loaded.")}</div>
+                  <button type="button" className="mt-2 text-xs font-bold text-blue-700 underline" onClick={() => setReloadKey((k) => k + 1)}>{t("Retry")}</button>
+                </div>
+              )}
+            </div>
+
+            <div className="mt-3 flex gap-2 flex-wrap">
+              <button type="button" className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-slate-100`} disabled={imgState !== "ok"} onClick={openFull} data-pproof="open">{t("Open")}</button>
+              <button type="button" className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-slate-100`} disabled={imgState !== "ok"} onClick={download} data-pproof="download">{t("Download")}</button>
+              {canVerify && record.verification_status !== PPROOF_STATUS.VERIFIED && (
+                <button type="button" className={`${smallBtn} border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700`} disabled={!!busy} onClick={doVerify} data-pproof="verify">{busy === "verify" ? t("Saving...") : "✓ " + t("Verify")}</button>
+              )}
+              {canVerify && record.verification_status !== PPROOF_STATUS.REJECTED && (
+                <button type="button" className={`${smallBtn} border-red-300 text-red-600 hover:bg-red-50`} disabled={!!busy} onClick={() => { setRejecting(true); setError(""); }} data-pproof="reject">{t("Reject")}</button>
+              )}
+              {canReplace && (
+                <button type="button" className={`${smallBtn} border-slate-300 text-slate-700 hover:bg-slate-100`} disabled={!!busy} onClick={() => setReplacing((v) => !v)} data-pproof="replace">{t("Replace Proof")}</button>
+              )}
+              {canDelete && (
+                <button type="button" className={`${smallBtn} border-red-300 text-red-600 hover:bg-red-50`} disabled={!!busy} onClick={doDelete} data-pproof="delete">{busy === "delete" ? t("Saving...") : t("Delete Proof")}</button>
+              )}
+            </div>
+
+            {rejecting && (
+              <div className="mt-3 border border-red-200 bg-red-50 p-3" data-pproof="reject-form">
+                <Field label="Rejection Reason">
+                  <input className={inputCls} value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} autoFocus data-pproof="reject-input" />
+                </Field>
+                <div className="flex gap-2">
+                  <Btn variant="danger" small onClick={doReject} disabled={!!busy}>{busy === "reject" ? "Saving..." : "Confirm Reject"}</Btn>
+                  <Btn variant="ghost" small onClick={() => { setRejecting(false); setRejectReason(""); }}>Cancel</Btn>
+                </div>
+              </div>
+            )}
+
+            {replacing && canReplace && (
+              <div className="mt-3 border border-slate-200 p-3" data-pproof="replace-form">
+                <PaymentProofPicker value={picked} onChange={setPicked} disabled={!!busy} />
+                <div className="mt-2 flex gap-2">
+                  <Btn small onClick={uploadPicked} disabled={!!busy || !picked}>{busy === "upload" ? "Uploading..." : "Save Replacement"}</Btn>
+                  <Btn small variant="ghost" onClick={() => { setReplacing(false); setPicked(null); }}>Cancel</Btn>
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="border-t border-slate-200 pt-3" data-pproof="upload-form">
+            <div className="text-sm font-bold text-slate-500 mb-2">{t("No Proof Uploaded")}</div>
+            {canUpload ? (
+              <>
+                <PaymentProofPicker value={picked} onChange={setPicked} disabled={!!busy} />
+                <div className="mt-2">
+                  <Btn onClick={uploadPicked} disabled={!!busy || !picked}>{busy === "upload" ? "Uploading..." : "Upload Proof"}</Btn>
+                </div>
+              </>
+            ) : (
+              <div className="text-xs text-slate-400">{t("You do not have permission to do this.")}</div>
+            )}
+          </div>
+        )}
+
+        {busy === "upload" && <div className="mt-2 text-xs text-blue-700 font-bold" data-pproof="busy">{t("Uploading...")}</div>}
+        {error && <div className="mt-3 text-xs font-bold text-red-600" data-pproof="error">{t(error)}</div>}
+        {notice && <div className="mt-3 text-xs font-bold text-emerald-700" data-pproof="notice">{t(notice)}</div>}
+
+        {history.length > 0 && (
+          <div className="mt-4">
+            <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-1">{t("Proof History")}</div>
+            <div className="border border-slate-200 divide-y divide-slate-100 max-h-36 overflow-y-auto">
+              {history.map((h, idx) => (
+                <div key={idx} className="px-3 py-1.5 text-xs">
+                  <span className="font-bold text-slate-700">{t(h.action)}</span>{h.details ? <span className="text-slate-500"> — {h.details}</span> : null}
+                  <div className="text-slate-400">{h.by} · <span dir="ltr">{fmtDateTime(h.at)}</span></div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-4 text-[11px] text-slate-400">{t("A screenshot is supporting evidence only. Uploading, verifying or rejecting it does not change the payment amount, the invoice or the customer ledger.")}</div>
+        <div className="mt-3 flex justify-end">
+          <Btn variant="ghost" onClick={onClose}>Close</Btn>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------- UI: line on the Payment Receipt (screen only) ---------------- */
+
+function PaymentProofReceiptLine({ record, onView }) {
+  return (
+    <div className="mt-3 border border-slate-200 px-3 py-2 text-xs flex items-center justify-between gap-2 flex-wrap print:hidden" data-pproof="receipt-line">
+      <div className="flex items-center gap-2">
+        <span className="font-black uppercase text-slate-700">{t("Payment Proof")}:</span>
+        {record ? (
+          <>
+            <span className="font-bold text-slate-700">📎 {t("Proof attached")}</span>
+            <PaymentProofBadge status={record.verification_status} />
+          </>
+        ) : (
+          <span className="text-slate-400">{t("No proof attached")}</span>
+        )}
+      </div>
+      {record && onView && (
+        <button type="button" className="font-bold text-blue-700 hover:underline" onClick={onView} data-pproof="receipt-view">{t("View Payment Proof")}</button>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   APP SHELL PIECES — header, search (Ctrl+K), notifications,
+   mobile bottom tab bar. Navigation only; nothing is written.
+   ============================================================ */
+
+function computeShellAlerts({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, bookings }) {
+  const today = todayISO();
+  const act = (promises || []).filter((p) => p.status !== "Deleted").map(promiseWithComputed);
+  const todays = act.filter((p) => p.expectedDate === today && (p.status === "Pending" || p.status === "Partially Paid"));
+  const broken = act.filter((p) => p.status === "Broken Promise");
+  const outById = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  const overLimit = (customers || []).filter((c) => Number(c.creditLimit) > 0 && (outById[c.id] || 0) > Number(c.creditLimit));
+  const expiring = (bookings || []).filter((b) => computeBookingState(b, invoices, payments).expiringSoon);
+  const list = [];
+  todays.forEach((p) => list.push({ id: "pt" + p.id, icon: "clock", tone: "text-[#e9c77b]", page: "promises", title: `${p.customerName} — ${fmtMoney(p.remainingAmount)}`, sub: t("Today's Promises") }));
+  broken.forEach((p) => list.push({ id: "pb" + p.id, icon: "alert", tone: "text-rose-400", page: "promises", title: `${p.customerName} — ${fmtMoney(p.remainingAmount)}`, sub: t("Broken Promise") }));
+  overLimit.forEach((c) => list.push({ id: "ol" + c.id, icon: "alert", tone: "text-rose-400", page: "customers", title: `${c.name} — ${fmtMoney(outById[c.id])}`, sub: `${t("Over limit")} (${fmtMoney(c.creditLimit)})` }));
+  expiring.forEach((b) => list.push({ id: "bk" + b.id, icon: "calendar", tone: "text-sky-400", page: "bookings", title: `${b.code} — ${b.customerName}`, sub: `${t("Expiring Soon")} · ${fmtDate(b.expiryDate)}` }));
+  return {
+    list,
+    badges: {
+      promises: todays.length + broken.length || 0,
+      bookings: expiring.length || 0,
+    },
+  };
+}
+
+function NotificationsMenu({ alerts, onGo }) {
+  useLanguage();
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef(null);
+  useEffect(() => {
+    if (!open) return undefined;
+    const onDoc = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  const count = alerts.length;
+  return (
+    <div className="relative" ref={ref}>
+      <button type="button" onClick={() => setOpen((v) => !v)} className="relative w-10 h-10 rounded-xl ct-chip flex items-center justify-center ct-t2 hover:opacity-90" aria-label={t("Notifications")}>
+        <UiIcon name="bell" className="w-[18px] h-[18px]" />
+        {count > 0 && (
+          <span className="absolute -top-1 -right-1 min-w-[18px] h-[18px] px-1 rounded-full bg-rose-500 text-white text-[10px] font-bold flex items-center justify-center ring-2 ring-[#060a13]">{count > 99 ? "99+" : count}</span>
+        )}
+      </button>
+      {open && (
+        <div className="ct-modal-panel absolute end-0 mt-2 w-[330px] max-w-[calc(100vw-24px)] rounded-2xl border border-white/10 bg-[#0e1526] shadow-2xl shadow-black/50 z-50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-white/10 text-[13px] font-bold text-white flex justify-between">{t("Notifications")}<span className="text-slate-500">{count}</span></div>
+          <div className="max-h-[360px] overflow-y-auto">
+            {count === 0 && <div className="px-4 py-6 text-center text-[13px] text-slate-400">{t("No new notifications")}</div>}
+            {alerts.map((a) => (
+              <button key={a.id} type="button" onClick={() => { setOpen(false); onGo(a.page); }} className="w-full text-start flex gap-3 px-4 py-2.5 hover:bg-white/5 border-b border-white/5">
+                <span className={`${a.tone} mt-0.5`}><UiIcon name={a.icon} className="w-4 h-4" /></span>
+                <div className="min-w-0">
+                  <div className="text-[12.5px] text-white font-semibold truncate">{a.title}</div>
+                  <div className="text-[11px] text-slate-500">{a.sub}</div>
+                </div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CommandPalette({ open, onClose, role, customers, invoices, onPage, onCustomer, onInvoice }) {
+  const { language } = useLanguage();
+  const [q, setQ] = useState("");
+  const [sel, setSel] = useState(0);
+  const inputRef = React.useRef(null);
+  useEffect(() => { if (open) { setQ(""); setSel(0); setTimeout(() => inputRef.current && inputRef.current.focus(), 20); } }, [open]);
+
+  const results = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    const pages = NAV_GROUPS.flatMap((g) => g.items.filter((it) => !it.adminOnly || role === "admin").map((it) => ({ kind: "page", id: it.id, icon: it.icon, title: t(it.label), sub: t(g.title), key: it.label })));
+    const pageHits = pages.filter((p) => !s || p.title.toLowerCase().includes(s) || p.key.toLowerCase().includes(s)).slice(0, s ? 6 : 8);
+    if (!s) return pageHits;
+    const custHits = (customers || []).filter((c) => (c.name || "").toLowerCase().includes(s) || (c.phone || "").includes(s)).slice(0, 6)
+      .map((c) => ({ kind: "customer", id: c.id, icon: "users", title: c.name, sub: c.phone || t("Customer") }));
+    const invHits = (invoices || []).filter((i) => (i.number || "").toLowerCase().includes(s) || (i.customerName || "").toLowerCase().includes(s)).slice(0, 6)
+      .map((i) => ({ kind: "invoice", id: i.id, icon: "file", title: `${i.number} — ${i.customerName}`, sub: `${fmtDate(i.date)} · ${fmtMoney(i.total)}` }));
+    return [...pageHits, ...custHits, ...invHits];
+  }, [q, customers, invoices, role, language]);
+
+  function pick(r) {
+    if (!r) return;
+    onClose();
+    if (r.kind === "page") onPage(r.id);
+    else if (r.kind === "customer") onCustomer(r.id);
+    else onInvoice(r.id);
+  }
+
+  if (!open) return null;
+  return (
+    <div className="ct-modal-back fixed inset-0 z-[60] bg-slate-950/60 backdrop-blur-sm flex items-start justify-center p-3 pt-[12vh]" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="ct-modal-panel w-full max-w-xl rounded-2xl border border-white/10 bg-[#0e1526] shadow-2xl shadow-black/60 overflow-hidden">
+        <div className="flex items-center gap-3 px-4 border-b border-white/10">
+          <span className="text-slate-500"><UiIcon name="search" className="w-5 h-5" /></span>
+          <input
+            ref={inputRef}
+            value={q}
+            onChange={(e) => { setQ(e.target.value); setSel(0); }}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowDown") { e.preventDefault(); setSel((n) => Math.min(results.length - 1, n + 1)); }
+              else if (e.key === "ArrowUp") { e.preventDefault(); setSel((n) => Math.max(0, n - 1)); }
+              else if (e.key === "Enter") { e.preventDefault(); pick(results[sel]); }
+              else if (e.key === "Escape") onClose();
+            }}
+            placeholder={t("Search pages, customers, invoices…")}
+            className="flex-1 bg-transparent py-4 text-[15px] text-white placeholder:text-slate-500 outline-none"
+          />
+          <span className="text-[10px] font-bold text-slate-500 border border-white/10 rounded px-1.5 py-0.5">ESC</span>
+        </div>
+        <div className="max-h-[50vh] overflow-y-auto py-2">
+          {results.length === 0 && <div className="px-4 py-6 text-center text-[13px] text-slate-400">{t("No results")}</div>}
+          {results.map((r, i) => (
+            <button key={r.kind + r.id} type="button" onMouseEnter={() => setSel(i)} onClick={() => pick(r)}
+              className={`w-full text-start flex items-center gap-3 px-4 py-2.5 ${i === sel ? "bg-emerald-500/12" : ""}`}>
+              <span className={`w-8 h-8 rounded-lg flex items-center justify-center ${i === sel ? "bg-emerald-500/20 text-emerald-300" : "bg-white/5 text-slate-400"}`}><UiIcon name={r.icon} className="w-4 h-4" /></span>
+              <div className="min-w-0 flex-1">
+                <div className="text-[13.5px] text-white font-medium truncate">{r.title}</div>
+                <div className="text-[11px] text-slate-500 truncate">{r.sub}</div>
+              </div>
+              {i === sel && <span className="text-slate-500"><UiIcon name="right" className="w-4 h-4" /></span>}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AppHeader({ page, currentUser, alerts, onMenu, onSearch, onNewInvoice, onGo, onCameraScan, scanFlash }) {
+  useLanguage();
+  const theme = useTheme();
+  const nav = navItemFor(page);
+  const name = currentUser.name || currentUser.username || "";
+  return (
+    <header className="h-[64px] sm:h-[72px] shrink-0 flex items-center gap-2 sm:gap-3 px-3 sm:px-6 border-b ct-line backdrop-blur-xl bg-[#060a13]/40 print:hidden" style={{ backgroundColor: theme === "dark" ? "rgba(6,10,19,.55)" : "rgba(255,255,255,.75)" }}>
+      <button type="button" onClick={onMenu} className="lg:hidden w-10 h-10 rounded-xl ct-chip flex items-center justify-center ct-h" aria-label={t("Menu")}>
+        <UiIcon name="menu" className="w-5 h-5" />
+      </button>
+      <div className="min-w-0 flex-1">
+        <div className="text-[11px] ct-t3 leading-none hidden sm:block">{t(nav.group)}</div>
+        <div className="mt-0 sm:mt-1 flex items-center gap-2 ct-display text-[16px] sm:text-[19px] font-bold ct-h leading-none truncate">
+          <span className="text-emerald-400 hidden sm:inline"><UiIcon name={nav.icon} className="w-[18px] h-[18px]" /></span>
+          <span className="truncate">{t(nav.label)}</span>
+        </div>
+      </div>
+      <button type="button" onClick={onSearch} className="hidden md:flex items-center gap-2 w-[280px] xl:w-[340px] rounded-xl ct-chip px-3.5 py-2.5 text-[13px] ct-t3 hover:opacity-90">
+        <UiIcon name="search" className="w-4 h-4" />
+        <span className="truncate">{t("Search pages, customers, invoices…")}</span>
+        <span className="ms-auto text-[10px] font-bold ct-chip rounded px-1.5 py-0.5">Ctrl K</span>
+      </button>
+      <button type="button" onClick={onSearch} className="md:hidden w-10 h-10 rounded-xl ct-chip flex items-center justify-center ct-t2" aria-label="Search">
+        <UiIcon name="search" className="w-[18px] h-[18px]" />
+      </button>
+      {onCameraScan && (
+        <button type="button" onClick={onCameraScan} title={t("Scanner ready — scan a voucher / invoice QR, or tap to use the camera")}
+          className={`flex items-center gap-2 h-10 rounded-xl px-2.5 sm:px-3 text-[12.5px] font-bold transition ${scanFlash ? "bg-emerald-400 text-[#022c22]" : "bg-emerald-400/12 text-emerald-400 hover:bg-emerald-400/20"}`}>
+          <span className="relative flex w-2 h-2"><span className="absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-60 animate-ping" /><span className="relative inline-flex w-2 h-2 rounded-full bg-emerald-400" /></span>
+          <span className="hidden xl:inline">{t("Scanner ready")}</span>
+          <UiIcon name="scan" className="w-[18px] h-[18px]" />
+        </button>
+      )}
+      <div className="hidden sm:block"><LanguageSwitcher compact /></div>
+      <button type="button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} className="hidden sm:flex w-10 h-10 rounded-xl ct-chip items-center justify-center ct-t2 hover:opacity-90" title={t(theme === "dark" ? "Light mode" : "Dark mode")}>
+        <UiIcon name={theme === "dark" ? "sun" : "moon"} className="w-[18px] h-[18px]" />
+      </button>
+      <NotificationsMenu alerts={alerts} onGo={onGo} />
+      <button type="button" onClick={onNewInvoice} className="hidden lg:flex items-center gap-2 rounded-xl ct-em-btn px-4 py-2.5 text-[13px] font-bold hover:brightness-110 active:scale-[.98] transition">
+        <UiIcon name="plus" className="w-4 h-4" />{t("New Invoice")}
+      </button>
+      <div className="hidden sm:flex items-center gap-2.5 ps-3 border-s ct-line">
+        <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-400 to-violet-600 text-white font-bold flex items-center justify-center text-sm ring-2 ring-emerald-400/60 ring-offset-2 ring-offset-transparent">{uiInitials(name, "U")}</div>
+        <div className="leading-tight hidden xl:block">
+          <div className="text-[13px] ct-h font-semibold">{name}</div>
+          <div className="text-[11px] ct-t3">{t(currentUser.role === "admin" ? "Admin" : "Staff")}</div>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function MobileTabBar({ page, onGo, onNewInvoice, onMore }) {
+  useLanguage();
+  const items = [
+    { id: "dashboard", icon: "home", label: "Home" },
+    { id: "invoices", icon: "file", label: "Invoices" },
+    null,
+    { id: "customers", icon: "users", label: "Customers" },
+    { id: "__more", icon: "more", label: "More" },
+  ];
+  return (
+    <div className="lg:hidden fixed bottom-0 inset-x-0 z-40 px-3 pb-[max(12px,env(safe-area-inset-bottom))] pt-2 print:hidden pointer-events-none">
+      <div className="pointer-events-auto relative flex items-center justify-around rounded-[22px] border border-white/10 bg-[#0d1424]/95 backdrop-blur-xl h-16 shadow-[0_20px_40px_-10px_rgba(0,0,0,.9)]">
+        {items.map((it, i) => it ? (
+          <button key={it.id} type="button" onClick={() => (it.id === "__more" ? onMore() : onGo(it.id))}
+            className={`flex flex-col items-center gap-0.5 w-16 transition-colors ${page === it.id ? "text-emerald-400" : "text-slate-500"}`}>
+            <UiIcon name={it.icon} className="w-[21px] h-[21px]" />
+            <span className="text-[10px] font-semibold">{t(it.label)}</span>
+          </button>
+        ) : <div key={"gap" + i} className="w-14" />)}
+        <button type="button" onClick={onNewInvoice} className="absolute left-1/2 -translate-x-1/2 -top-6 w-14 h-14 rounded-2xl ct-em-btn flex items-center justify-center ring-4 ring-[#060a13] active:scale-95 transition" aria-label={t("New Invoice")}>
+          <UiIcon name="plus" className="w-7 h-7" />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   PRINT / SAVE PDF — paper size picker (58mm · 80mm · A5 · A4)
+   ------------------------------------------------------------
+   Used by the Invoice and the Payment Receipt. Presentation only:
+   it READS the invoice / payment / proof that the screen already
+   shows and never writes anything.
+
+   How the size is applied: the chosen document is rendered into its
+   own print element (portal on <body>) and a temporary @page rule
+   sets the exact paper size. For thermal rolls the page height is
+   measured from the content, so "Save as PDF" produces a slip of the
+   real width (e.g. 80mm), not a full A4 page. Other print areas on
+   the screen are hidden while this document prints.
+   The last choice (size, options, copies) is remembered per document
+   type in this browser.
+   ============================================================ */
+
+const PRINT_PX_PER_MM = 96 / 25.4;
+
+const PRINT_SIZES = {
+  t58: { label: "Thermal 58mm", sub: "Mini printer", desc: "Portable · Bluetooth", widthMm: 58, padMm: 3, thermal: true, font: 10.5 },
+  t80: { label: "Thermal 80mm", sub: "Recommended", desc: "Shop counter printer", widthMm: 80, padMm: 4, thermal: true, font: 12 },
+  a5: { label: "A5", sub: "Invoice page", desc: "148 × 210 mm", widthMm: 148, heightMm: 210, padMm: 9, thermal: false, font: 12 },
+  v5: { label: "A5 Voucher", sub: "Half page", desc: "148 mm · no blank space", widthMm: 148, heightMm: 210, padMm: 8, thermal: false, fitHeight: true, font: 11.5 },
+  full: { label: "Full Page", sub: "Old invoice design", desc: "A4 · same as before", widthMm: 210, heightMm: 297, padMm: 12, thermal: false, font: 16 },
+  a4: { label: "A4", sub: "Full page", desc: "210 × 297 mm", widthMm: 210, heightMm: 297, padMm: 14, thermal: false, font: 14.5 },
+};
+const PRINT_SIZE_ORDER = ["t58", "t80", "a5"];
+
+const PRINT_URDU = {
+  "Print / Save": "پرنٹ / محفوظ کریں",
+  "Paper Size": "کاغذ کا سائز",
+  "Include": "شامل کریں",
+  "Copies": "کاپیاں",
+  "Live Preview": "لائیو پیش منظر",
+  "Save PDF": "پی ڈی ایف محفوظ کریں",
+  "1 Copy": "1 کاپی",
+  "2 Copies (Customer + Office)": "2 کاپیاں (گاہک + دفتر)",
+  "Mini printer": "منی پرنٹر",
+  "Recommended": "تجویز کردہ",
+  "Half page": "آدھا صفحہ",
+  "Full page": "پورا صفحہ",
+  "Portable · Bluetooth": "پورٹیبل · بلوٹوتھ",
+  "Shop counter printer": "دکان کا کاؤنٹر پرنٹر",
+  "Preparing…": "تیار ہو رہا ہے…",
+  "Your last choice is remembered for next time.": "آپ کی آخری پسند اگلی بار کے لیے یاد رکھی جائے گی۔",
+  "PDF is saved in the selected size — a thermal slip stays a slip, A5 stays one invoice page.": "پی ڈی ایف منتخب سائز میں محفوظ ہوگی — تھرمل سلپ رہے گی، A5 ایک انوائس صفحہ۔",
+  "Invoice page": "انوائس صفحہ",
+  "In the print window choose “Save as PDF” as the printer.": "پرنٹ ونڈو میں پرنٹر کے طور پر “Save as PDF” منتخب کریں۔",
+  "Previous Balance": "پچھلا بیلنس",
+  "Driver & Delivery": "ڈرائیور اور ڈیلیوری",
+  "Receiving Proof": "وصولی کا ثبوت",
+  "Material Issued To": "سامان وصول کرنے والا",
+  "Signature Line": "دستخط کی لائن",
+  "Urdu Print": "اردو پرنٹ",
+  "Payment Screenshot / Proof": "ادائیگی کا اسکرین شاٹ / ثبوت",
+  "Balance Summary": "بیلنس کا خلاصہ",
+  "Old balance + net balance": "پرانا بقایا + کل بیلنس",
+  "Driver, vehicle, rent": "ڈرائیور، گاڑی، کرایہ",
+  "Signed slip photo": "دستخط شدہ سلپ کی تصویر",
+  "Who collected the material": "سامان کس نے وصول کیا",
+  "Customer / authorized signature": "گاہک / مجاز دستخط",
+  "Print the document in Urdu": "دستاویز اردو میں پرنٹ کریں",
+  "Image printed under the receipt": "رسید کے نیچے تصویر پرنٹ ہوگی",
+  "Previous · Received · Remaining": "پچھلا · وصول · باقی",
+  "No proof uploaded for this payment.": "اس ادائیگی کا کوئی ثبوت اپ لوڈ نہیں ہوا۔",
+  "Customer Copy": "گاہک کی کاپی",
+  "Office Copy": "دفتر کی کاپی",
+  "SALE INVOICE": "فروخت انوائس",
+  "CASH SALE": "نقد فروخت",
+  "PAYMENT RECEIPT": "ادائیگی کی رسید",
+  "Inv #": "انوائس نمبر",
+  "Receipt #": "رسید نمبر",
+  "Received by": "وصول کنندہ",
+  "Authorized": "مجاز",
+  "Thank you!": "شکریہ!",
+  "Net Balance": "کل بیلنس",
+  "This Invoice Due": "اس انوائس کی رقم باقی",
+  "Received": "وصول",
+  "Paid": "ادا شدہ",
+  "Delivery": "ڈیلیوری",
+  "Rickshaw & Delivery Details": "رکشہ اور ڈیلیوری تفصیل",
+  "Driver": "ڈرائیور",
+  "Rickshaw Rent": "رکشہ کرایہ",
+  "Delivery Charges": "ڈیلیوری چارجز",
+  "Payment Received By": "رقم وصول کنندہ",
+  "Rent": "کرایہ",
+  "Payment Proof": "ادائیگی کا ثبوت",
+  "Verified": "تصدیق شدہ",
+  "Pending Verification": "تصدیق زیرِ التوا",
+  "Rejected": "مسترد",
+  "Ref": "حوالہ",
+  "Method": "طریقہ",
+  "Qty": "مقدار",
+  "Rate": "ریٹ",
+  "Amount": "رقم",
+  "Item": "آئٹم",
+  "Unit": "یونٹ",
+  "Bill To": "بل برائے",
+  "Phone": "فون",
+  "Date": "تاریخ",
+  "Customer": "گاہک",
+  "Subtotal": "ذیلی کل",
+  "Rickshaw + Delivery": "رکشہ + ڈیلیوری",
+  "Discount": "رعایت",
+  "TOTAL": "کل",
+  "Advance Applied": "لاگو شدہ پیشگی",
+  "Remaining Balance": "باقی بیلنس",
+  "Note": "نوٹ",
+  "Returned": "واپس",
+  "Remaining": "باقی",
+  "Booking": "بکنگ",
+  "Ph": "فون",
+  "Page Length": "صفحے کی لمبائی",
+  "Fit to content": "مواد کے مطابق",
+  "Full sheet": "پورا صفحہ",
+  "No empty space below": "نیچے خالی جگہ نہیں",
+  "Whole A4 / A5 page": "پورا A4 / A5 صفحہ",
+};
+Object.entries(PRINT_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
+
+// Label for the PRINTED document (independent of the screen language).
+function printL(key, urdu) {
+  if (!urdu) return key;
+  return PRINT_URDU[key] || translations.ur[key] || key;
+}
+
+function printLoadPrefs(kind, includeDefs, order = PRINT_SIZE_ORDER, defaultSize = "t80") {
+  const base = { size: defaultSize, copies: 1, fit: true, include: {} };
+  includeDefs.forEach((d) => { base.include[d.key] = d.default; });
+  try {
+    const saved = JSON.parse(window.localStorage.getItem("ct-print-pref2:" + kind) || "null");
+    if (saved && typeof saved === "object") {
+      if ((saved.size === "a4" || saved.size === "a5") && !order.includes(saved.size) && order.includes("full")) base.size = "full";
+      else if (saved.size === "a4" && order.includes("a5")) base.size = "a5";
+      else if (order.includes(saved.size)) base.size = saved.size;
+      if (saved.include && typeof saved.include === "object") {
+        includeDefs.forEach((d) => { if (typeof saved.include[d.key] === "boolean") base.include[d.key] = saved.include[d.key]; });
+      }
+    }
+  } catch {}
+  return base;
+}
+
+function printSavePrefs(kind, prefs) {
+  try { window.localStorage.setItem("ct-print-pref2:" + kind, JSON.stringify({ ...prefs, copies: 1 })); } catch {}
+}
+
+function printWaitImages(root, timeoutMs = 6000) {
+  if (!root) return Promise.resolve();
+  const imgs = Array.from(root.querySelectorAll("img"));
+  const pending = imgs.filter((img) => !img.complete);
+  if (!pending.length) return Promise.resolve();
+  return new Promise((resolve) => {
+    let left = pending.length;
+    const done = () => { left -= 1; if (left <= 0) resolve(); };
+    pending.forEach((img) => { img.addEventListener("load", done, { once: true }); img.addEventListener("error", done, { once: true }); });
+    setTimeout(resolve, timeoutMs);
+  });
+}
+
+/* ---------------- Shared document pieces ---------------- */
+
+// Numbers, dates, phones and codes are always isolated left-to-right so an
+// Urdu (RTL) print never reorders them (e.g. "-134,624" stays as written).
+function PrintLtr({ children }) {
+  return <bdi dir="ltr" style={{ unicodeBidi: "isolate" }}>{children}</bdi>;
+}
+
+function PrintRow({ l, v, bold, big, color, lLtr }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 8, fontWeight: bold ? 700 : 400, fontSize: big ? "1.2em" : undefined, color }}>
+      <span>{lLtr ? <PrintLtr>{l}</PrintLtr> : l}</span><span style={{ textAlign: "end", whiteSpace: "nowrap" }}><PrintLtr>{v}</PrintLtr></span>
+    </div>
+  );
+}
+
+function PrintRule({ dashed = true }) {
+  return <div style={{ borderTop: `1px ${dashed ? "dashed" : "solid"} #000`, margin: "1.2mm 0" }} />;
+}
+
+function PrintCopyWrap({ copies, thermal, children }) {
+  const list = copies === 2 ? ["Customer Copy", "Office Copy"] : [null];
+  return (
+    <>
+      {list.map((label, i) => (
+        <div key={i} style={i > 0 ? (thermal ? { borderTop: "1px dashed #000", marginTop: "4mm", paddingTop: "4mm" } : { breakBefore: "page", pageBreakBefore: "always" }) : undefined}>
+          {children(label)}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function printDocStyle(size, urdu, fit = true) {
+  const s = PRINT_SIZES[size];
+  return {
+    width: `${s.widthMm}mm`,
+    minHeight: !s.thermal && !fit ? `${s.heightMm - 1}mm` : undefined,
+    padding: `${s.thermal ? 3 : s.padMm}mm ${s.padMm}mm`,
+    boxSizing: "border-box",
+    background: "#fff",
+    color: "#000",
+    fontSize: `${s.font}px`,
+    lineHeight: 1.42,
+    fontFamily: urdu
+      ? '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif'
+      : s.thermal ? '"Courier New", "DejaVu Sans Mono", ui-monospace, monospace' : 'Inter, Arial, sans-serif',
+    direction: urdu ? "rtl" : "ltr",
+    WebkitPrintColorAdjust: "exact",
+    printColorAdjust: "exact",
+  };
+}
+
+const PRINT_THERMAL_IMG = { display: "block", width: "100%", maxHeight: "120mm", objectFit: "contain", filter: "grayscale(1) contrast(1.15)", margin: "1mm 0" };
+
+/* ---------------- Invoice documents ---------------- */
+
+function InvoiceThermalDoc({ invoice, settings, size, include, copies, urdu, recvProofs }) {
+  const L = (k) => printL(k, urdu);
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
+  const prevBal = (invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0);
+  const delivery = (Number(invoice.rickshawRent) || 0) + (Number(invoice.deliveryCharges) || 0);
+  return (
+    <div style={printDocStyle(size, urdu)}>
+      <PrintCopyWrap copies={copies} thermal>
+        {(copyLabel) => (
+          <div>
+            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.3em" }}>{settings.companyName}</div>
+            {settings.companyAddress && <div style={{ textAlign: "center" }}>{settings.companyAddress}</div>}
+            {settings.companyPhone && <div style={{ textAlign: "center" }}>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+            <PrintRule />
+            <div style={{ textAlign: "center", fontWeight: 700 }}>{L(invoice.customerType === "Cash" ? "CASH SALE" : "SALE INVOICE")}{invoice.docStatus === "Cancelled" ? " — CANCELLED" : ""}</div>
+            {copyLabel && <div style={{ textAlign: "center" }}>({L(copyLabel)})</div>}
+            <PrintRow l={<>{L("Inv #")}: <PrintLtr>{invoice.number}</PrintLtr></>} v={fmtDate(invoice.date)} />
+            <div>{L("Customer")}: <b>{invoice.customerName}</b></div>
+            {invoice.customerPhone && <div>{L("Ph")}: <PrintLtr>{invoice.customerPhone}</PrintLtr></div>}
+            {include.issuedTo && invoice.issuedTo?.name && (
+              <div>{L("Material Issued To")}: {invoice.issuedTo.name}{invoice.issuedTo.relation ? ` (${invoice.issuedTo.relation})` : ""}</div>
+            )}
+            {invoice.bookingRef && <div>{L("Booking")}: {invoice.bookingRef}</div>}
+            <PrintRule />
+            {(invoice.items || []).map((it, i) => (
+              <div key={i} style={{ marginBottom: "0.8mm" }}>
+                <div style={{ fontWeight: 700 }}>{it.name}</div>
+                <PrintRow lLtr l={`${fmtQty(it.qty)} ${it.unit || ""} x ${fmtMoney(it.price).replace("Rs ", "")}`} v={fmtMoney(it.total).replace("Rs ", "")} />
+              </div>
+            ))}
+            <PrintRule />
+            <PrintRow l={L("Subtotal")} v={fmtMoney(invoice.subtotal).replace("Rs ", "")} />
+            {delivery > 0 && <PrintRow l={L("Rickshaw + Delivery")} v={fmtMoney(delivery).replace("Rs ", "")} />}
+            {Number(invoice.discount) > 0 && <PrintRow l={L("Discount")} v={"-" + fmtMoney(invoice.discount).replace("Rs ", "")} />}
+            <PrintRow l={L("TOTAL")} v={fmtMoney(invoice.total)} bold big />
+            <PrintRow l={L("Paid")} v={"-" + fmtMoney(invoice.paymentReceived).replace("Rs ", "")} />
+            {Number(invoice.advanceApplied) > 0 && <PrintRow l={L("Advance Applied")} v={"-" + fmtMoney(invoice.advanceApplied).replace("Rs ", "")} />}
+            <PrintRow l={L("This Invoice Due")} v={fmtMoney(invoice.balanceDue).replace("Rs ", "")} bold />
+            {include.prevBalance && invoice.customerType !== "Cash" && (
+              <>
+                <PrintRule />
+                <PrintRow l={L("Previous Balance")} v={fmtMoney(prevBal).replace("Rs ", "")} />
+                <PrintRow l={L("Net Balance")} v={fmtMoney(outstandingNow)} bold big />
+              </>
+            )}
+            {include.delivery && (invoice.driverName || invoice.driverId || invoice.vehicleType || invoice.vehicleNumber || Number(invoice.rickshawRent) > 0 || Number(invoice.deliveryCharges) > 0 || invoice.receivedBy) && (
+              <>
+                <PrintRule />
+                <div style={{ fontWeight: 700 }}>{L("Rickshaw & Delivery Details")}</div>
+                <div>{L("Driver")}: <PrintLtr>{invoice.driverName || "-"}{invoice.driverId ? ` (${invoice.driverId})` : ""}{invoice.vehicleType ? ` — ${invoice.vehicleType}` : ""}{invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}</PrintLtr></div>
+                <PrintRow l={L("Rickshaw Rent")} v={fmtMoney(invoice.rickshawRent || 0)} />
+                <PrintRow l={L("Delivery Charges")} v={fmtMoney(invoice.deliveryCharges || 0)} />
+                <div>{L("Payment Received By")}: <PrintLtr>{invoice.receivedBy || "-"}</PrintLtr></div>
+              </>
+            )}
+            {include.recvProof && recvProofs.length > 0 && (
+              <>
+                <PrintRule />
+                <div style={{ textAlign: "center", fontWeight: 700 }}>{L("Receiving Proof")}</div>
+                {recvProofs.map((p) => <img key={p.receiving_id} src={recvSafeImageSrc(p.proof_image)} alt="" style={PRINT_THERMAL_IMG} />)}
+              </>
+            )}
+            <PrintRule />
+            <div style={{ textAlign: "center" }}>{L("Thank you!")}</div>
+            {include.signature && (
+              <div style={{ textAlign: "center", marginTop: "8mm" }}>
+                <div style={{ borderTop: "1px solid #000", width: "60%", margin: "0 auto" }} />
+                <div>{L("Received by")}</div>
+              </div>
+            )}
+            {include.qr !== false && (
+              <div style={{ display: "flex", justifyContent: "center", marginTop: "3mm" }}>
+                <QrSvg text={invoiceQrText(invoice, settings)} sizeMm={size === "t58" ? 26 : 30} />
+              </div>
+            )}
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+function InvoicePaperDoc({ invoice, settings, size, include, copies, urdu, recvProofs, rs, fit = true }) {
+  const L = (k) => printL(k, urdu);
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
+  const prevBal = (invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0);
+  const delivery = (Number(invoice.rickshawRent) || 0) + (Number(invoice.deliveryCharges) || 0);
+  const banner = invoiceStatusBanner(invoice);
+  const rows = rs && rs.status !== "Normal" ? rs.breakdown : invoice.items || [];
+  const showRet = rs && rs.status !== "Normal";
+  const th = { padding: "1.6mm 2mm", textAlign: "start", fontSize: "0.82em", textTransform: "uppercase", letterSpacing: ".04em" };
+  const td = { padding: "1.6mm 2mm", borderBottom: "1px solid #e5e7eb" };
+  const num = { textAlign: "end" };
+  return (
+    <div style={printDocStyle(size, urdu, fit)}>
+      <PrintCopyWrap copies={copies} thermal={!!fit}>
+        {(copyLabel) => (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "3px solid #0f172a", paddingBottom: "3mm", marginBottom: "3mm" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "3mm" }}>
+                {settings.logoUrl ? <img src={settings.logoUrl} alt="" style={{ width: "13mm", height: "13mm", objectFit: "contain" }} /> : (
+                  <div style={{ width: "13mm", height: "13mm", background: "#0f172a", color: "#fff", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.3em" }}>{uiInitials(settings.companyName)}</div>
+                )}
+                <div>
+                  <div style={{ fontWeight: 900, fontSize: "1.55em", textTransform: "uppercase", letterSpacing: "-.01em" }}>{settings.companyName}</div>
+                  <div style={{ fontSize: ".78em", fontWeight: 700, color: "#047857", textTransform: "uppercase", letterSpacing: ".06em" }}>Construction Materials Supplier</div>
+                </div>
+              </div>
+              <div style={{ textAlign: "end", color: "#4b5563", fontSize: ".9em" }}>
+                <div>{settings.companyAddress}</div>
+                {settings.companyPhone && <div>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "4mm", marginBottom: "3mm" }}>
+              <div>
+                <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Bill To")}</div>
+                <div style={{ fontWeight: 700, fontSize: "1.1em" }}>{invoice.customerName}</div>
+                {invoice.customerPhone && <div style={{ color: "#4b5563" }}>{invoice.customerPhone}</div>}
+                {invoice.customerAddress && <div style={{ color: "#4b5563" }}>{invoice.customerAddress}</div>}
+                {include.issuedTo && invoice.issuedTo?.name && (
+                  <div style={{ marginTop: "1.5mm", fontSize: ".9em" }}><b>{L("Material Issued To")}:</b> {invoice.issuedTo.name}{invoice.issuedTo.relation ? ` (${invoice.issuedTo.relation})` : ""}{invoice.issuedTo.phone ? ` · ${invoice.issuedTo.phone}` : ""}</div>
+                )}
+              </div>
+              <div style={{ textAlign: "end" }}>
+                <div style={{ display: "inline-block", background: "#0f172a", color: "#fff", fontWeight: 900, padding: "1mm 3mm" }}>{invoice.number}</div>
+                <div style={{ color: "#4b5563", marginTop: "1mm" }}>{L("Date")}: <b style={{ color: "#111" }}>{fmtDate(invoice.date)}</b></div>
+                {invoice.customerType === "Cash" && <div style={{ fontWeight: 700, color: "#b45309" }}>{L("CASH SALE")}</div>}
+                {invoice.bookingRef && <div style={{ fontSize: ".85em", color: "#b45309", fontWeight: 700 }}>{L("Booking")}: {invoice.bookingRef}</div>}
+                {invoice.docStatus === "Cancelled" && <div style={{ fontWeight: 900, color: "#b91c1c" }}>CANCELLED</div>}
+                {copyLabel && <div style={{ fontSize: ".85em", color: "#6b7280" }}>{L(copyLabel)}</div>}
+              </div>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", marginBottom: "3mm" }}>
+              <thead>
+                <tr style={{ background: "#0f172a", color: "#fff" }}>
+                  <th style={th}>{L("Item")}</th>
+                  <th style={{ ...th, ...num }}>{L("Qty")}</th>
+                  <th style={{ ...th, ...num }}>{L("Unit")}</th>
+                  <th style={{ ...th, ...num }}>{L("Rate")}</th>
+                  <th style={{ ...th, ...num }}>{L("Amount")}</th>
+                  {showRet && <th style={{ ...th, ...num }}>{L("Returned")}</th>}
+                  {showRet && <th style={{ ...th, ...num }}>{L("Remaining")}</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((it, i) => (
+                  <tr key={i}>
+                    <td style={td}>{it.name}</td>
+                    <td style={{ ...td, ...num }}>{fmtQty(it.qty)}</td>
+                    <td style={{ ...td, ...num, color: "#6b7280" }}>{it.unit || "-"}</td>
+                    <td style={{ ...td, ...num }}>{fmtMoney(it.price)}</td>
+                    <td style={{ ...td, ...num, fontWeight: 700 }}>{fmtMoney(it.total)}</td>
+                    {showRet && <td style={{ ...td, ...num }}>{(it.returnedQty || 0) + (it.exchangedQty || 0) > 0 ? fmtQty((it.returnedQty || 0) + (it.exchangedQty || 0)) : "-"}</td>}
+                    {showRet && <td style={{ ...td, ...num }}>{fmtQty(it.remainingQty)}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {include.delivery && (invoice.driverName || invoice.driverId || invoice.vehicleType || invoice.vehicleNumber || Number(invoice.rickshawRent) > 0 || Number(invoice.deliveryCharges) > 0 || invoice.receivedBy) && (
+              <div style={{ border: "1px solid #d1d5db", borderRadius: "2mm", padding: "2mm 3mm", fontSize: ".9em", color: "#111827", marginBottom: "3mm" }}>
+                <div style={{ fontWeight: 700, marginBottom: "1mm" }}>{L("Rickshaw & Delivery Details")}</div>
+                <div>{L("Driver")}: <PrintLtr>{invoice.driverName || "-"}{invoice.driverId ? ` (${invoice.driverId})` : ""}{invoice.vehicleType ? ` — ${invoice.vehicleType}` : ""}{invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}</PrintLtr></div>
+                <div style={{ display: "flex", flexWrap: "wrap", columnGap: "6mm" }}>
+                  <span>{L("Rickshaw Rent")}: <PrintLtr>{fmtMoney(invoice.rickshawRent || 0)}</PrintLtr></span>
+                  <span>{L("Delivery Charges")}: <PrintLtr>{fmtMoney(invoice.deliveryCharges || 0)}</PrintLtr></span>
+                  <span>{L("Payment Received By")}: <PrintLtr>{invoice.receivedBy || "-"}</PrintLtr></span>
+                </div>
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <div style={{ width: size === "a5" ? "62%" : "48%" }}>
+                {include.prevBalance && invoice.customerType !== "Cash" && <PrintRow l={L("Previous Balance")} v={fmtMoney(prevBal)} />}
+                <PrintRow l={L("Subtotal")} v={fmtMoney(invoice.subtotal)} />
+                {delivery > 0 && <PrintRow l={L("Rickshaw + Delivery")} v={fmtMoney(delivery)} />}
+                {Number(invoice.discount) > 0 && <PrintRow l={L("Discount")} v={"-" + fmtMoney(invoice.discount)} />}
+                <PrintRow l={L("Paid")} v={"-" + fmtMoney(invoice.paymentReceived)} />
+                {Number(invoice.advanceApplied) > 0 && <PrintRow l={`${L("Advance Applied")} (${invoice.bookingRef})`} v={"-" + fmtMoney(invoice.advanceApplied)} />}
+                <div style={{ borderTop: "2px solid #0f172a", marginTop: "1.5mm", paddingTop: "1.5mm" }}>
+                  {include.prevBalance && invoice.customerType !== "Cash"
+                    ? <PrintRow l={L("Net Balance")} v={fmtMoney(outstandingNow)} bold big color="#047857" />
+                    : <PrintRow l={L("This Invoice Due")} v={fmtMoney(invoice.balanceDue)} bold big color="#047857" />}
+                </div>
+              </div>
+            </div>
+            <div style={{ marginTop: "3mm", border: "1px solid #d1d5db", padding: "1.5mm 3mm", textAlign: "center", fontWeight: 700, fontSize: ".9em" }}>{banner.text}</div>
+            {include.recvProof && recvProofs.length > 0 && (
+              <div style={{ marginTop: "4mm" }}>
+                <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Receiving Proof")}</div>
+                <div style={{ display: "flex", gap: "3mm", flexWrap: "wrap", marginTop: "1.5mm" }}>
+                  {recvProofs.map((p) => <img key={p.receiving_id} src={recvSafeImageSrc(p.proof_image)} alt="" style={{ maxWidth: "48%", maxHeight: size === "a4" ? "95mm" : "60mm", objectFit: "contain", border: "1px solid #e5e7eb" }} />)}
+                </div>
+              </div>
+            )}
+            {include.signature && (
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10mm", color: "#4b5563" }}>
+                <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Received by")}</div>
+                <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Authorized")}</div>
+              </div>
+            )}
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+/* ---------------- Payment receipt documents ---------------- */
+
+function ReceiptDoc({ payment, customer, settings, balances, size, include, copies, urdu, proofUrl, proofRecord, fit = true }) {
+  const L = (k) => printL(k, urdu);
+  const s = PRINT_SIZES[size];
+  const receiptNo = paymentReceiptNo(payment);
+  const note = String(payment.note || "").trim();
+  const proofStatus = proofRecord?.verification_status;
+  const showProof = include.proof && proofUrl;
+  return (
+    <div style={printDocStyle(size, urdu, fit)}>
+      <PrintCopyWrap copies={copies} thermal={s.thermal || !!fit}>
+        {(copyLabel) => s.thermal ? (
+          <div>
+            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.3em" }}>{settings.companyName}</div>
+            {settings.companyAddress && <div style={{ textAlign: "center" }}>{settings.companyAddress}</div>}
+            {settings.companyPhone && <div style={{ textAlign: "center" }}>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+            <PrintRule />
+            <div style={{ textAlign: "center", fontWeight: 700 }}>{L("PAYMENT RECEIPT")}</div>
+            <div style={{ textAlign: "center" }}><PrintLtr>{receiptNo}</PrintLtr></div>
+            {copyLabel && <div style={{ textAlign: "center" }}>({L(copyLabel)})</div>}
+            {balances.reversed && <div style={{ textAlign: "center", fontWeight: 700 }}>*** REVERSED ***</div>}
+            <PrintRule />
+            <PrintRow l={L("Date")} v={fmtDate(payment.date)} />
+            <PrintRow l={L("Customer")} v={customer.name || "-"} />
+            {customer.phone && <PrintRow l={L("Ph")} v={customer.phone} />}
+            <PrintRow l={L("Method")} v={payment.method || "Cash"} />
+            {payment.reference && <PrintRow l={L("Ref")} v={payment.reference} />}
+            {payment.bookingCode && <PrintRow l={L("Booking")} v={payment.bookingCode} />}
+            <PrintRule />
+            {include.balance && <PrintRow l={L("Previous Balance")} v={fmtMoney(balances.previous).replace("Rs ", "")} />}
+            <PrintRow l={L("Received").toUpperCase()} v={fmtMoney(balances.received)} bold big />
+            {include.balance && <PrintRow l={L("Remaining Balance")} v={fmtMoney(balances.remaining).replace("Rs ", "") + (balances.remaining < 0 ? " (Adv)" : "")} bold />}
+            {note && (<><PrintRule /><div>{L("Note")}: {note}</div></>)}
+            {showProof && (
+              <>
+                <PrintRule />
+                <div style={{ textAlign: "center", fontWeight: 700 }}>{L("Payment Proof")}{proofStatus ? ` · ${L(proofStatus)}` : ""}</div>
+                <img src={proofUrl} alt="" style={PRINT_THERMAL_IMG} />
+              </>
+            )}
+            <PrintRule />
+            <div style={{ textAlign: "center" }}>{L("Thank you!")}</div>
+            {include.signature && (
+              <div style={{ textAlign: "center", marginTop: "8mm" }}>
+                <div style={{ borderTop: "1px solid #000", width: "60%", margin: "0 auto" }} />
+                <div>{L("Authorized")}</div>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "3px solid #0f172a", paddingBottom: "3mm" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "3mm" }}>
+                {settings.logoUrl ? <img src={settings.logoUrl} alt="" style={{ width: "12mm", height: "12mm", objectFit: "contain" }} /> : (
+                  <div style={{ width: "12mm", height: "12mm", background: "#0f172a", color: "#fff", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>{uiInitials(settings.companyName)}</div>
+                )}
+                <div>
+                  <div style={{ fontWeight: 900, fontSize: "1.45em", textTransform: "uppercase" }}>{settings.companyName}</div>
+                  <div style={{ fontSize: ".78em", fontWeight: 700, color: "#047857", textTransform: "uppercase", letterSpacing: ".06em" }}>Construction Materials Supplier</div>
+                </div>
+              </div>
+              <div style={{ textAlign: "end", color: "#4b5563", fontSize: ".9em" }}>
+                <div>{settings.companyAddress}</div>
+                {settings.companyPhone && <div>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+              </div>
+            </div>
+            <div style={{ background: "#0f172a", color: "#fff", textAlign: "center", fontWeight: 900, padding: "1.5mm", marginTop: "3mm", letterSpacing: ".06em" }}>
+              {L("PAYMENT RECEIPT")}{copyLabel ? ` — ${L(copyLabel)}` : ""}
+            </div>
+            {balances.reversed && <div style={{ marginTop: "2mm", border: "1px solid #fca5a5", color: "#b91c1c", padding: "1.5mm", fontWeight: 700, textAlign: "center" }}>REVERSED — invoice cancelled</div>}
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "4mm", marginTop: "3mm" }}>
+              <div>
+                <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Customer")}</div>
+                <div style={{ fontWeight: 700, fontSize: "1.1em" }}>{customer.name || "-"}</div>
+                {customer.phone && <div style={{ color: "#4b5563" }}>{customer.phone}</div>}
+                {customer.address && <div style={{ color: "#4b5563" }}>{customer.address}</div>}
+              </div>
+              <div style={{ textAlign: "end" }}>
+                <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Receipt #")}</div>
+                <div style={{ fontWeight: 700 }}>{receiptNo}</div>
+                <div style={{ color: "#4b5563" }}>{fmtDate(payment.date)} · {payment.method || "Cash"}</div>
+                {payment.reference && <div style={{ color: "#4b5563" }}>{L("Ref")}: {payment.reference}</div>}
+                {payment.bookingCode && <div style={{ color: "#4b5563" }}>{L("Booking")}: {payment.bookingCode}</div>}
+              </div>
+            </div>
+            <div style={{ marginTop: "4mm" }}>
+              {include.balance && <div style={{ padding: "1.5mm 2mm", background: "#f3f4f6" }}><PrintRow l={L("Previous Balance")} v={fmtMoney(balances.previous)} /></div>}
+              <div style={{ padding: "1.5mm 2mm" }}><PrintRow l={L("Received")} v={fmtMoney(balances.received)} bold color="#047857" /></div>
+              {include.balance && (
+                <div style={{ padding: "1.5mm 2mm", borderTop: "2px solid #0f172a" }}>
+                  <PrintRow l={L("Remaining Balance")} v={fmtMoney(balances.remaining) + (balances.remaining < 0 ? " (Advance)" : "")} bold big color="#0f172a" />
+                </div>
+              )}
+            </div>
+            {note && <div style={{ marginTop: "2mm", color: "#374151" }}><b>{L("Note")}:</b> {note}</div>}
+            {showProof && (
+              <div style={{ marginTop: "4mm" }}>
+                <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Payment Proof")}{proofStatus ? ` · ${L(proofStatus)}` : ""}</div>
+                <img src={proofUrl} alt="" style={{ marginTop: "1.5mm", maxWidth: size === "a4" ? "70%" : "60%", maxHeight: size === "a4" ? "120mm" : "58mm", objectFit: "contain", border: "1px solid #e5e7eb" }} />
+                {proofRecord?.uploaded_by && <div style={{ fontSize: ".8em", color: "#6b7280" }}>{proofRecord.uploaded_by} · {fmtDateTime(proofRecord.uploaded_at)}</div>}
+              </div>
+            )}
+            {include.signature && (
+              <div style={{ display: "flex", justifyContent: "space-between", marginTop: "10mm", color: "#4b5563" }}>
+                <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Customer")}</div>
+                <div style={{ width: "38%", borderTop: "1px solid #111", paddingTop: "1mm", textAlign: "center" }}>{L("Authorized")}</div>
+              </div>
+            )}
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+/* ---------------- The dialog ---------------- */
+
+function PrintSizeIcon({ id }) {
+  const s = PRINT_SIZES[id];
+  if (s.thermal) {
+    const w = id === "t58" ? 34 : 48;
+    return (
+      <div style={{ width: w }}>
+        <div className="h-1.5 rounded-t-md bg-slate-500/70" />
+        <div className="px-1.5 pt-1.5 space-y-1" style={{ background: "#fff", height: 44, WebkitMask: "conic-gradient(from -45deg at bottom,#0000,#000 1deg 90deg,#0000 91deg) 50%/6px 100%", mask: "conic-gradient(from -45deg at bottom,#0000,#000 1deg 90deg,#0000 91deg) 50%/6px 100%" }}>
+          {[1, 0.6, 0.85, 0.5, 0.9].map((x, i) => <div key={i} className="h-[3px] rounded" style={{ background: "#d1d5db", width: `${x * 100}%` }} />)}
+        </div>
+      </div>
+    );
+  }
+  const big = id === "a4" || id === "full";
+  return (
+    <div className="rounded-sm p-1.5" style={{ background: "#fff", width: big ? 40 : 34, height: big ? 54 : id === "v5" ? 38 : 46 }}>
+      <div className="h-[4px] w-1/2 rounded mb-1" style={{ background: "#9ca3af" }} />
+      {[1, 0.8, 1, 0.7, 1].map((x, i) => <div key={i} className="h-[3px] rounded mb-1" style={{ background: "#e5e7eb", width: `${x * 100}%` }} />)}
+    </div>
+  );
+}
+
+function PrintToggle({ on, onChange, label, sub, disabled }) {
+  return (
+    <button type="button" disabled={disabled} onClick={() => onChange(!on)}
+      className={`w-full flex items-center gap-3 rounded-xl ct-chip px-3.5 py-2.5 text-start transition ${disabled ? "opacity-45 cursor-not-allowed" : "hover:opacity-95"}`}>
+      <div className="flex-1 min-w-0">
+        <div className="text-[13px] font-semibold ct-h">{t(label)}</div>
+        {sub && <div className="text-[11px] ct-t3 truncate">{t(sub)}</div>}
+      </div>
+      <span className={`w-10 h-6 rounded-full p-0.5 transition-colors shrink-0 ${on && !disabled ? "bg-emerald-400" : "bg-slate-500/40"}`}>
+        <span className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${on && !disabled ? (document.documentElement.dir === "rtl" ? "-translate-x-4" : "translate-x-4") : ""}`} />
+      </span>
+    </button>
+  );
+}
+
+function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, renderDoc, onClose, sizeOrder, defaultSize, copyLabels }) {
+  useLanguage();
+  const order = sizeOrder || PRINT_SIZE_ORDER;
+  const copyOpts = copyLabels || [[1, "1 Copy"], [2, "2 Copies (Customer + Office)"]];
+  const [prefs, setPrefs] = useState(() => printLoadPrefs(kind, includeDefs, order, defaultSize));
+  const [busy, setBusy] = useState("");
+  const previewBoxRef = React.useRef(null);
+  const previewDocRef = React.useRef(null);
+  const printRef = React.useRef(null);
+  const [scale, setScale] = useState(1);
+  const [docH, setDocH] = useState(0);
+  const size = PRINT_SIZES[prefs.size];
+
+  useEffect(() => { printSavePrefs(kind, prefs); }, [kind, prefs]);
+
+  // Fit the preview into its column (the document keeps its real mm width).
+  useEffect(() => {
+    const measure = () => {
+      const box = previewBoxRef.current, doc = previewDocRef.current;
+      if (!box || !doc) return;
+      const docW = size.widthMm * PRINT_PX_PER_MM;
+      const s = Math.min(1, (box.clientWidth - 8) / docW);
+      setScale(s);
+      setDocH(doc.offsetHeight);
+    };
+    measure();
+    const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(measure) : null;
+    if (ro && previewBoxRef.current) ro.observe(previewBoxRef.current);
+    if (ro && previewDocRef.current) ro.observe(previewDocRef.current);
+    const imgs = previewDocRef.current ? Array.from(previewDocRef.current.querySelectorAll("img")) : [];
+    imgs.forEach((img) => img.addEventListener("load", measure));
+    return () => { if (ro) ro.disconnect(); imgs.forEach((img) => img.removeEventListener("load", measure)); };
+  }, [prefs, size.widthMm]);
+
+  const setSize = (id) => setPrefs((p) => ({ ...p, size: id }));
+  const setInc = (key, val) => setPrefs((p) => ({ ...p, include: { ...p.include, [key]: val } }));
+  const setCopies = (n) => setPrefs((p) => ({ ...p, copies: n }));
+  // A5 is always a real A5 sheet (148 × 210 mm); thermal rolls fit their content.
+  const docProps = { size: prefs.size, include: prefs.include, copies: prefs.copies, urdu: !!prefs.include.urdu, fit: !!(size.thermal || size.fitHeight) };
+
+  async function doPrint(asPdf) {
+    if (busy) return;
+    setBusy(asPdf ? "pdf" : "print");
+    const node = printRef.current;
+    await printWaitImages(node);
+    await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+    const measured = previewDocRef.current ? previewDocRef.current.offsetHeight : 0;
+    // Thermal rolls and "Fit to content" paper: the page is exactly as long as the document.
+    const fitPage = !!(size.thermal || size.fitHeight);
+    // Print layout can run a few px taller than the on-screen preview (tables), so leave a small margin.
+    const heightMm = Math.ceil(((measured || 600) / PRINT_PX_PER_MM) + (size.thermal ? 4 : size.fitHeight ? 6 : 2));
+    const pageSize = fitPage ? `${size.widthMm}mm ${heightMm}mm` : prefs.size === "a5" ? "A5 portrait" : "A4 portrait"; // "full" and "a4" print on A4
+    const style = document.createElement("style");
+    style.setAttribute("data-ct-print", "1");
+    style.textContent = `
+      @page { size: ${pageSize}; margin: 0; }
+      @media print {
+        html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+        body.ct-doc-printing .print-area:not(.ct-print-doc),
+        body.ct-doc-printing .recv-print-proof-pages { display: none !important; }
+        body.ct-doc-printing .ct-print-doc { display: block !important; position: absolute !important; left: 0 !important; top: 0 !important;
+          width: ${size.widthMm}mm !important; margin: 0 !important; padding: 0 !important; }
+      }`;
+    document.head.appendChild(style);
+    document.body.classList.add("ct-doc-printing");
+    const prevTitle = document.title;
+    document.title = fileName + (prefs.size ? `-${prefs.size.toUpperCase()}` : "");
+    let cleaned = false;
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
+      document.body.classList.remove("ct-doc-printing");
+      style.remove();
+      document.title = prevTitle;
+      window.removeEventListener("afterprint", cleanup);
+      setBusy("");
+    };
+    window.addEventListener("afterprint", cleanup);
+    try {
+      window.print();
+    } finally {
+      // Some mobile browsers return from print() before printing and never fire afterprint.
+      setTimeout(cleanup, 1500);
+    }
+  }
+
+  return (
+    <Modal title={title} onClose={onClose} wide>
+      <div className="text-[12.5px] ct-t2 -mt-2 mb-4">{subtitle}</div>
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5">
+        <div className="min-w-0">
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{t("Paper Size")}</div>
+          <div className="grid gap-2.5" style={{ gridTemplateColumns: `repeat(${order.length}, minmax(0, 1fr))` }}>
+            {order.map((id) => {
+              const s = PRINT_SIZES[id];
+              const active = prefs.size === id;
+              return (
+                <button key={id} type="button" onClick={() => setSize(id)}
+                  className={`relative rounded-2xl p-3 text-start transition-all ct-lift ${active ? "border-2 border-emerald-400 bg-emerald-400/10 shadow-[0_0_0_4px_rgba(52,211,153,.12)]" : "ct-chip border-2 border-transparent"}`}>
+                  {active && <span className="absolute top-2 end-2 w-5 h-5 rounded-full bg-emerald-400 text-[#022c22] flex items-center justify-center"><UiIcon name="check" className="w-3.5 h-3.5" /></span>}
+                  <div className="h-14 flex items-end justify-center mb-2"><PrintSizeIcon id={id} /></div>
+                  <div className="text-[13px] font-bold ct-h">{s.label}</div>
+                  <div className={`text-[11px] font-semibold ${active ? "text-emerald-400" : "text-[#d4a94f]"}`}>{t(s.sub)}</div>
+                  <div className="text-[10.5px] ct-t3">{t(s.desc)}</div>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Include")}</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {includeDefs.filter((d) => !d.sizes || d.sizes.includes(prefs.size)).map((d) => (
+              <PrintToggle key={d.key} on={!!prefs.include[d.key]} onChange={(v) => setInc(d.key, v)} label={d.label} sub={d.disabled ? d.disabledNote : d.sub} disabled={d.disabled} />
+            ))}
+          </div>
+
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Copies")}</div>
+          <div className="flex flex-wrap gap-2">
+            {copyOpts.map(([n, l]) => (
+              <button key={n} type="button" onClick={() => setCopies(n)}
+                className={`rounded-xl px-4 py-2.5 text-[13px] font-semibold transition ${prefs.copies === n ? "border-2 border-emerald-400 bg-emerald-400/10 ct-h" : "ct-chip border-2 border-transparent ct-t2"}`}>{t(l)}</button>
+            ))}
+          </div>
+
+          <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            <button type="button" onClick={() => doPrint(false)} disabled={!!busy}
+              className="ct-em-btn flex items-center justify-center gap-2 rounded-xl py-3 text-[14px] font-bold hover:brightness-110 active:scale-[.98] transition disabled:opacity-60">
+              <UiIcon name="printer" className="w-4 h-4" />{busy === "print" ? t("Preparing…") : t("Print")}
+            </button>
+            <button type="button" onClick={() => doPrint(true)} disabled={!!busy}
+              className="ct-chip flex items-center justify-center gap-2 rounded-xl py-3 text-[14px] font-bold ct-h hover:opacity-90 active:scale-[.98] transition disabled:opacity-60">
+              <UiIcon name="download" className="w-4 h-4" />{busy === "pdf" ? t("Preparing…") : t("Save PDF")}
+            </button>
+            {waHref ? (
+              <a href={waHref} target="_blank" rel="noreferrer"
+                className="ct-chip flex items-center justify-center gap-2 rounded-xl py-3 text-[14px] font-bold text-emerald-400 hover:opacity-90 active:scale-[.98] transition">
+                <UiIcon name="wa" className="w-4 h-4" />{t("WhatsApp")}
+              </a>
+            ) : <span />}
+          </div>
+          <div className="mt-3 text-[11.5px] ct-t3 space-y-0.5">
+            <div>• {t("PDF is saved in the selected size — a thermal slip stays a slip, A5 stays one invoice page.")}</div>
+            {prefs.size === "full" && <div>• {t("Full Page prints the invoice exactly like the old design.")}</div>}
+            <div>• {t("In the print window choose “Save as PDF” as the printer.")}</div>
+            <div>• {t("Your last choice is remembered for next time.")}</div>
+          </div>
+        </div>
+
+        <div className="min-w-0">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase">{t("Live Preview")}</span>
+            <span className="text-[11px] font-bold text-emerald-400 bg-emerald-400/10 rounded-full px-2 py-0.5">{size.label}{prefs.copies === 2 ? " · ×2" : ""}</span>
+          </div>
+          <div ref={previewBoxRef} className="rounded-2xl bg-slate-950/40 border border-slate-500/20 p-3 overflow-hidden max-h-[70vh] overflow-y-auto ct-scroll">
+            <div style={{ height: docH ? docH * scale : undefined, display: "flex", justifyContent: "center" }}>
+              <div style={{ transform: `scale(${scale})`, transformOrigin: "top center" }}>
+                <div ref={previewDocRef} className="ct-paper shadow-[0_20px_40px_-16px_rgba(0,0,0,.7)]">
+                  {renderDoc(docProps)}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {createPortal(
+        <div ref={printRef} className="print-area ct-print-doc ct-paper" style={{ display: "none" }}>
+          {renderDoc(docProps)}
+        </div>,
+        document.body
+      )}
+    </Modal>
+  );
+}
+
+/* ---------------- Invoice / Receipt dialogs ---------------- */
+
+function invoiceQrText(invoice) {
+  // A link: scanning opens the read-only invoice page of this app.
+  return docVerifyUrl("i", invoice.id);
+}
+
+/* Full Page — the original invoice design, exactly as the old print. */
+function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProofs, rs }) {
+  const banner = invoiceStatusBanner(invoice);
+  const bannerCls = {
+    emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
+    amber: "bg-blue-50 text-blue-700 border-blue-200",
+    red: "bg-red-50 text-red-700 border-red-200",
+    slate: "bg-slate-100 text-slate-600 border-slate-300",
+  }[banner.tone];
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
+  const hasDelivery = invoice.rickshawRent > 0 || invoice.deliveryCharges > 0 || invoice.driverName || invoice.receivedBy;
+  const showRs = rs && rs.status !== "Normal" ? rs : null;
+  return (
+    <div style={{ ...printDocStyle(size, false, false), fontFamily: "Inter, Arial, sans-serif", fontSize: "16px", lineHeight: 1.5, direction: "ltr" }}>
+      <PrintCopyWrap copies={copies} thermal={false}>
+        {(copyLabel) => (
+          <div className="bg-white text-slate-900">
+            {copyLabel && <div className="text-right text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1">{copyLabel}</div>}
+            <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
+              <div className="flex items-center gap-3">
+                {settings.logoUrl ? (
+                  <img src={settings.logoUrl} alt="Logo" className="w-14 h-14 object-contain" />
+                ) : (
+                  <div className="w-14 h-14 bg-slate-900 flex items-center justify-center font-black text-xl text-white">CT</div>
+                )}
+                <div>
+                  <div className="text-xl font-black uppercase tracking-tight text-slate-900">{settings.companyName}</div>
+                  <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">Construction Materials Supplier</div>
+                </div>
+              </div>
+              <div className="flex items-start gap-3">
+                <div className="text-right text-xs text-slate-500">
+                  <div>{settings.companyAddress}</div>
+                  {settings.companyPhone && <div>Ph: {settings.companyPhone}</div>}
+                </div>
+                {include.qr !== false && <QrSvg text={invoiceQrText(invoice, settings)} sizeMm={22} />}
+              </div>
+            </div>
+
+            <div className="flex justify-between items-start mb-4">
+              <div className="text-sm">
+                <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-0.5">Bill To</div>
+                <div className="font-bold text-slate-900">{invoice.customerName}</div>
+                {invoice.customerPhone && <div className="text-slate-500">{invoice.customerPhone}</div>}
+                {invoice.customerAddress && <div className="text-slate-500">{invoice.customerAddress}</div>}
+                {invoice.issuedTo?.name && (
+                  <div className="mt-2 text-xs bg-blue-50 border border-blue-200 px-2 py-1 inline-block">
+                    <span className="text-blue-700 font-bold uppercase">Material Issued To:</span>{" "}
+                    <span className="font-bold text-slate-900">{invoice.issuedTo.name}</span>
+                    {invoice.issuedTo.relation && <span className="text-slate-500"> ({invoice.issuedTo.relation})</span>}
+                    {invoice.issuedTo.phone && <span className="text-slate-500"> · {invoice.issuedTo.phone}</span>}
+                  </div>
+                )}
+              </div>
+              <div className="text-right">
+                <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{invoice.number}</div>
+                <div className="text-xs text-slate-500 mt-1">Date: <span className="font-bold text-slate-700">{fmtDate(invoice.date)}</span></div>
+                {invoice.bookingRef && (
+                  <div className="text-[10px] font-bold uppercase text-amber-700 mt-1">Booking: {invoice.bookingRef}{invoice.bookingQty != null ? ` · ${fmtQty(invoice.bookingQty)} delivered` : ""}</div>
+                )}
+                {invoice.customerType === "Cash" && (
+                  <div className="inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</div>
+                )}
+                {showRs && (
+                  <div className={`inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 ${RETURN_STATUS_TONE[showRs.status]}`}>{showRs.status}</div>
+                )}
+              </div>
+            </div>
+
+            <table className="w-full text-sm mb-4">
+              <thead>
+                <tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
+                  <th className="py-2 px-2 text-left">Item</th>
+                  <th className="py-2 px-2 text-right">Qty (Sold)</th>
+                  <th className="py-2 px-2 text-right">Unit</th>
+                  <th className="py-2 px-2 text-right">Rate / Unit</th>
+                  <th className="py-2 px-2 text-right">Amount</th>
+                  {showRs && <th className="py-2 px-2 text-right">Returned</th>}
+                  {showRs && <th className="py-2 px-2 text-right">Remaining</th>}
+                </tr>
+              </thead>
+              <tbody>
+                {(showRs ? showRs.breakdown : invoice.items || []).map((it, idx) => (
+                  <tr key={idx} className="border-b border-slate-100">
+                    <td className="py-2 px-2">{it.name}</td>
+                    <td className="py-2 px-2 text-right">{fmtQty(it.qty)}</td>
+                    <td className="py-2 px-2 text-right text-slate-500">{it.unit || "-"}</td>
+                    <td className="py-2 px-2 text-right">{fmtMoney(it.price)}</td>
+                    <td className="py-2 px-2 text-right font-bold">{fmtMoney(it.total)}</td>
+                    {showRs && <td className="py-2 px-2 text-right text-slate-500">{(it.returnedQty || 0) + (it.exchangedQty || 0) > 0 ? fmtQty((it.returnedQty || 0) + (it.exchangedQty || 0)) : "-"}</td>}
+                    {showRs && <td className="py-2 px-2 text-right text-slate-500">{fmtQty(it.remainingQty)}</td>}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            {hasDelivery && (
+              <div className="mb-4 text-sm">
+                <div className="font-bold text-slate-900 mb-1">Rickshaw &amp; Delivery Details</div>
+                <div className="text-xs text-slate-500 space-y-0.5">
+                  {invoice.driverName && (
+                    <div>
+                      Driver: {invoice.driverName}
+                      {invoice.driverId ? ` (${invoice.driverId})` : ""}
+                      {invoice.vehicleType ? ` — ${invoice.vehicleType}` : ""}
+                      {invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}
+                    </div>
+                  )}
+                  <div>Rickshaw Rent: {fmtMoney(invoice.rickshawRent)}</div>
+                  <div>Delivery Charges: {fmtMoney(invoice.deliveryCharges)}</div>
+                  <div>Payment Received By: {invoice.receivedBy || "-"}</div>
+                </div>
+              </div>
+            )}
+
+            <div className="flex justify-end">
+              <div className="w-72 text-sm space-y-1.5">
+                <div className="flex justify-between"><span className="text-slate-500">Previous Balance</span><span className="font-bold">{fmtMoney((invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0))}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">New Purchase</span><span className="font-bold">{fmtMoney(invoice.subtotal)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Rickshaw + Delivery</span><span className="font-bold">{fmtMoney((invoice.rickshawRent || 0) + (invoice.deliveryCharges || 0))}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Discount</span><span className="font-bold">-{fmtMoney(invoice.discount || 0)}</span></div>
+                <div className="flex justify-between"><span className="text-slate-500">Payment Received</span><span className="font-bold">-{fmtMoney(invoice.paymentReceived)}</span></div>
+                {Number(invoice.advanceApplied) > 0 && (
+                  <div className="flex justify-between"><span className="text-slate-500">Advance Applied ({invoice.bookingRef})</span><span className="font-bold">-{fmtMoney(invoice.advanceApplied)}</span></div>
+                )}
+                <div className="flex justify-between border-t-2 border-slate-900 pt-2 mt-1">
+                  <span className="font-black uppercase text-blue-700">Outstanding Balance</span>
+                  <span className="font-black text-lg text-blue-700">{fmtMoney(outstandingNow)}</span>
+                </div>
+              </div>
+            </div>
+
+            <div className={`mt-4 border px-3 py-2 text-xs font-bold text-center ${bannerCls}`}>
+              ⚠ {banner.text}
+            </div>
+
+            {include.recvProof && recvProofs.length > 0 && (
+              <div style={{ breakBefore: "page", pageBreakBefore: "always", paddingTop: "4mm" }}>
+                <div className="text-xs font-black uppercase tracking-wide mb-3">Receiving Proof — {invoice.number}</div>
+                {recvProofs.map((p) => <img key={p.receiving_id} src={recvSafeImageSrc(p.proof_image)} alt="" style={{ display: "block", maxWidth: "100%", maxHeight: "250mm", marginBottom: "4mm" }} />)}
+              </div>
+            )}
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+function InvoicePrintDialog({ invoice, settings, rs, onClose }) {
+  useLanguage();
+  const user = useRecvSessionUser();
+  const { proofs } = useRecvProofs(invoice.id, recvIsStaff(user));
+  const includeDefs = [
+    { key: "prevBalance", label: "Previous Balance", sub: "Old balance + net balance", default: true, disabled: invoice.customerType === "Cash", disabledNote: "Cash Customer / Walk-In", sizes: ["t58", "t80"] },
+    { key: "delivery", label: "Driver & Delivery", sub: "Driver, vehicle, rent", default: true, sizes: ["t58", "t80"] },
+    { key: "recvProof", label: "Receiving Proof", sub: "Signed slip photo", default: true, disabled: proofs.length === 0, disabledNote: "Not Uploaded" },
+    { key: "issuedTo", label: "Material Issued To", sub: "Who collected the material", default: true, sizes: ["t58", "t80"] },
+    { key: "signature", label: "Signature Line", sub: "Customer / authorized signature", default: true, sizes: ["t58", "t80"] },
+    { key: "qr", label: "QR Code", sub: "Scan to see invoice details", default: true },
+    { key: "urdu", label: "Urdu Print", sub: "Print the document in Urdu", default: false, sizes: ["t58", "t80"] },
+  ];
+  return (
+    <PrintDialog
+      kind="invoice"
+      title={`${t("Print / Save")} — ${t("Invoice")} ${invoice.number}`}
+      subtitle={`${invoice.customerName} · ${(invoice.items || []).length} ${t("Items")} · ${fmtMoney(invoice.total)}`}
+      includeDefs={includeDefs}
+      fileName={`Invoice-${invoice.number}`}
+      sizeOrder={["t58", "t80", "full"]}
+      waHref={invoice.customerPhone ? waLink(invoice.customerPhone, buildInvoiceWaMessage(invoice, settings)) : ""}
+      onClose={onClose}
+      renderDoc={(p) => {
+        const inc = { ...p.include, prevBalance: p.include.prevBalance && invoice.customerType !== "Cash", recvProof: p.include.recvProof && proofs.length > 0 };
+        if (p.size === "full") return <InvoiceClassicDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} rs={rs} />;
+        return PRINT_SIZES[p.size].thermal
+          ? <InvoiceThermalDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} />
+          : <InvoicePaperDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} rs={rs} />;
+      }}
+    />
+  );
+}
+
+function buildReceiptWaMessage(payment, customer, balances, settings) {
+  return [
+    `${settings.companyName} — ${t("Payment Receipt")} ${paymentReceiptNo(payment)}`,
+    `${fmtDate(payment.date)} · ${payment.method || "Cash"}`,
+    `${customer.name}`,
+    "",
+    `Received: ${fmtMoney(balances.received)}`,
+    `Previous Balance: ${fmtMoney(balances.previous)}`,
+    `Remaining Balance: ${fmtMoney(balances.remaining)}`,
+    "",
+    "Shukriya!",
+  ].join("\n");
+}
+
+function ReceiptPrintDialog({ payment, customer, settings, balances, proofRecord, onClose }) {
+  useLanguage();
+  const [proofUrl, setProofUrl] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setProofUrl("");
+    if (proofRecord && proofRecord.active) {
+      pproofImageUrl(proofRecord).then((u) => { if (!cancelled) setProofUrl(u); }).catch(() => {});
+    }
+    return () => { cancelled = true; };
+  }, [proofRecord && proofRecord.version, proofRecord && proofRecord.path]);
+  const hasProof = !!(proofRecord && proofRecord.active);
+  const includeDefs = [
+    { key: "proof", label: "Payment Screenshot / Proof", sub: "Image printed under the receipt", default: true, disabled: !hasProof, disabledNote: "No proof uploaded for this payment." },
+    { key: "balance", label: "Balance Summary", sub: "Previous · Received · Remaining", default: true },
+    { key: "signature", label: "Signature Line", sub: "Customer / authorized signature", default: true },
+    { key: "urdu", label: "Urdu Print", sub: "Print the document in Urdu", default: false },
+  ];
+  return (
+    <PrintDialog
+      kind="receipt"
+      title={`${t("Print / Save")} — ${t("Payment Receipt")}`}
+      subtitle={`${paymentReceiptNo(payment)} · ${customer.name || "-"} · ${fmtMoney(payment.amount)}`}
+      includeDefs={includeDefs}
+      fileName={`Payment-Receipt-${paymentReceiptNo(payment)}`}
+      waHref={customer.phone ? waLink(customer.phone, buildReceiptWaMessage(payment, customer, balances, settings)) : ""}
+      onClose={onClose}
+      renderDoc={(p) => (
+        <ReceiptDoc payment={payment} customer={customer} settings={settings} balances={balances} {...p}
+          include={{ ...p.include, proof: p.include.proof && hasProof }} proofUrl={proofUrl} proofRecord={proofRecord} />
+      )}
+    />
+  );
+}
+
+/* ============================================================
+   STARTUP SCREEN (built in — no separate StartupScreen.jsx file)
+   ------------------------------------------------------------
+   Shown while startup data loads. Same props as before:
+     ready, error, status, onRetry, onDone, logoUrl, labels
+   cacheLogo / readCachedLogo keep a copy of the company logo in
+   this browser so the next splash can show it immediately.
+   Presentation only — it never reads or writes ERP data.
+   ============================================================ */
+
+const STARTUP_LOGO_KEY = "ct-cached-logo";
+
+function cacheLogo(url) {
+  try {
+    if (url) window.localStorage.setItem(STARTUP_LOGO_KEY, url);
+    else window.localStorage.removeItem(STARTUP_LOGO_KEY);
+  } catch {}
+}
+
+function readCachedLogo() {
+  try { return window.localStorage.getItem(STARTUP_LOGO_KEY) || ""; } catch { return ""; }
+}
+
+function StartupScreen({ ready, error, status, onRetry, onDone, logoUrl, labels = {} }) {
+  const [leaving, setLeaving] = useState(false);
+
+  useEffect(() => {
+    if (!ready || error) return undefined;
+    setLeaving(true);
+    const timer = setTimeout(() => { if (onDone) onDone(); }, 350);
+    return () => clearTimeout(timer);
+  }, [ready, error]);
+
+  return (
+    <div
+      className="ct-mesh min-h-screen flex items-center justify-center p-6 text-slate-200"
+      style={{ background: "#060a13", opacity: leaving ? 0 : 1, transition: "opacity .35s ease" }}
+    >
+      <ThemeStyles />
+      <div className="w-full max-w-sm text-center ct-rise">
+        {logoUrl ? (
+          <img src={logoUrl} alt="Logo" className="w-16 h-16 mx-auto rounded-2xl object-contain bg-white p-1" />
+        ) : (
+          <div className="w-16 h-16 mx-auto rounded-2xl ct-gold-bg ct-display font-black text-2xl flex items-center justify-center shadow-[0_12px_30px_-10px_rgba(212,169,79,.7)]">CT</div>
+        )}
+
+        {!error ? (
+          <>
+            <div className="mt-6 ct-display text-[18px] font-bold text-white">{labels.loading || "Loading your workspace…"}</div>
+            {status && <div className="mt-1 text-[13px] text-slate-400">{status}</div>}
+            <div className="mt-6 h-1.5 rounded-full bg-white/10 overflow-hidden">
+              <div
+                className="h-full w-1/3 rounded-full bg-gradient-to-r from-emerald-400 to-emerald-600"
+                style={{ animation: "ctStartupBar 1.2s ease-in-out infinite" }}
+              />
+            </div>
+            <style>{`@keyframes ctStartupBar { 0% { transform: translateX(-110%); } 100% { transform: translateX(320%); } }`}</style>
+          </>
+        ) : (
+          <div className="mt-6 ct-card p-5 text-start">
+            <div className="text-[14px] font-semibold text-rose-300">{error}</div>
+            {labels.safe && <div className="mt-2 text-[12.5px] text-slate-400">{labels.safe}</div>}
+            <button
+              type="button"
+              onClick={onRetry}
+              className="ct-em-btn mt-4 w-full rounded-xl px-4 py-2.5 text-sm font-bold hover:brightness-110 active:scale-[.99] transition"
+            >
+              {labels.retry || "Retry"}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   QR CODE (built in — no extra package)
+   Byte mode, error correction level M, versions 1–20.
+   qrEncode(text) → { size, dark(x, y) }   ·   <QrSvg text="..." />
+   ============================================================ */
+
+const QR_ECC_M = [-1, 10, 16, 26, 18, 24, 16, 18, 22, 22, 26, 30, 22, 22, 24, 24, 28, 28, 26, 26, 26];
+const QR_BLOCKS_M = [-1, 1, 1, 1, 2, 2, 4, 4, 4, 5, 5, 5, 8, 9, 9, 10, 10, 11, 13, 14, 16];
+
+function qrRawModules(ver) {
+  let r = (16 * ver + 128) * ver + 64;
+  if (ver >= 2) {
+    const n = Math.floor(ver / 7) + 2;
+    r -= (25 * n - 10) * n - 55;
+    if (ver >= 7) r -= 36;
+  }
+  return r;
+}
+function qrDataCodewords(ver) {
+  return Math.floor(qrRawModules(ver) / 8) - QR_ECC_M[ver] * QR_BLOCKS_M[ver];
+}
+function qrMul(x, y) {
+  let z = 0;
+  for (let i = 7; i >= 0; i--) {
+    z = (z << 1) ^ ((z >>> 7) * 0x11d);
+    z ^= ((y >>> i) & 1) * x;
+  }
+  return z & 0xff;
+}
+function qrDivisor(degree) {
+  const r = new Array(degree).fill(0);
+  r[degree - 1] = 1;
+  let root = 1;
+  for (let i = 0; i < degree; i++) {
+    for (let j = 0; j < r.length; j++) {
+      r[j] = qrMul(r[j], root);
+      if (j + 1 < r.length) r[j] ^= r[j + 1];
+    }
+    root = qrMul(root, 0x02);
+  }
+  return r;
+}
+function qrRemainder(data, div) {
+  const r = div.map(() => 0);
+  data.forEach((b) => {
+    const f = b ^ r.shift();
+    r.push(0);
+    div.forEach((c, i) => { r[i] ^= qrMul(c, f); });
+  });
+  return r;
+}
+function qrAlignPositions(ver) {
+  if (ver === 1) return [];
+  const n = Math.floor(ver / 7) + 2;
+  const size = ver * 4 + 17;
+  const step = Math.ceil((ver * 4 + 4) / (n * 2 - 2)) * 2;
+  const res = [6];
+  for (let pos = size - 7; res.length < n; pos -= step) res.splice(1, 0, pos);
+  return res;
+}
+
+function qrEncode(text) {
+  const bytes = Array.from(new TextEncoder().encode(String(text || "")));
+  let ver = 1;
+  for (; ver <= 20; ver++) {
+    const cap = qrDataCodewords(ver) * 8;
+    const need = 4 + (ver < 10 ? 8 : 16) + bytes.length * 8;
+    if (need <= cap) break;
+  }
+  if (ver > 20) return qrEncode(String(text).slice(0, 300));
+  const size = ver * 4 + 17;
+
+  // Data bits
+  const bits = [];
+  const put = (val, len) => { for (let i = len - 1; i >= 0; i--) bits.push((val >>> i) & 1); };
+  put(4, 4);
+  put(bytes.length, ver < 10 ? 8 : 16);
+  bytes.forEach((b) => put(b, 8));
+  const capBits = qrDataCodewords(ver) * 8;
+  put(0, Math.min(4, capBits - bits.length));
+  put(0, (8 - (bits.length % 8)) % 8);
+  for (let pad = 0xec; bits.length < capBits; pad ^= 0xec ^ 0x11) put(pad, 8);
+  const data = [];
+  for (let i = 0; i < bits.length; i += 8) data.push(parseInt(bits.slice(i, i + 8).join(""), 2));
+
+  // Error correction + interleave
+  const numBlocks = QR_BLOCKS_M[ver];
+  const eccLen = QR_ECC_M[ver];
+  const rawCw = Math.floor(qrRawModules(ver) / 8);
+  const numShort = numBlocks - (rawCw % numBlocks);
+  const shortLen = Math.floor(rawCw / numBlocks);
+  const div = qrDivisor(eccLen);
+  const blocks = [];
+  for (let i = 0, k = 0; i < numBlocks; i++) {
+    const dat = data.slice(k, k + shortLen - eccLen + (i < numShort ? 0 : 1));
+    k += dat.length;
+    const ecc = qrRemainder(dat, div);
+    if (i < numShort) dat.push(0);
+    blocks.push(dat.concat(ecc));
+  }
+  const cw = [];
+  for (let i = 0; i < blocks[0].length; i++) {
+    blocks.forEach((b, j) => { if (i !== shortLen - eccLen || j >= numShort) cw.push(b[i]); });
+  }
+
+  // Function patterns
+  const mod = Array.from({ length: size }, () => new Array(size).fill(false));
+  const fn = Array.from({ length: size }, () => new Array(size).fill(false));
+  const setF = (x, y, d) => { mod[y][x] = d; fn[y][x] = true; };
+  for (let i = 0; i < size; i++) { setF(6, i, i % 2 === 0); setF(i, 6, i % 2 === 0); }
+  [[3, 3], [size - 4, 3], [3, size - 4]].forEach(([cx, cy]) => {
+    for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+      const x = cx + dx, y = cy + dy;
+      if (x < 0 || y < 0 || x >= size || y >= size) continue;
+      const dist = Math.max(Math.abs(dx), Math.abs(dy));
+      setF(x, y, dist !== 2 && dist !== 4);
+    }
+  });
+  const al = qrAlignPositions(ver);
+  al.forEach((ax, i) => al.forEach((ay, j) => {
+    const last = al.length - 1;
+    if ((i === 0 && j === 0) || (i === 0 && j === last) || (i === last && j === 0)) return;
+    for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) setF(ax + dx, ay + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
+  }));
+  const drawFormat = (mask) => {
+    const d = (0 << 3) | mask; // level M = 00
+    let rem = d;
+    for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
+    const b = ((d << 10) | rem) ^ 0x5412;
+    const bit = (i) => ((b >>> i) & 1) === 1;
+    for (let i = 0; i <= 5; i++) setF(8, i, bit(i));
+    setF(8, 7, bit(6)); setF(8, 8, bit(7)); setF(7, 8, bit(8));
+    for (let i = 9; i < 15; i++) setF(14 - i, 8, bit(i));
+    for (let i = 0; i < 8; i++) setF(size - 1 - i, 8, bit(i));
+    for (let i = 8; i < 15; i++) setF(8, size - 15 + i, bit(i));
+    setF(8, size - 8, true);
+  };
+  drawFormat(0);
+  if (ver >= 7) {
+    let rem = ver;
+    for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25);
+    const b = (ver << 12) | rem;
+    for (let i = 0; i < 18; i++) {
+      const v = ((b >>> i) & 1) === 1;
+      const a = size - 11 + (i % 3), c = Math.floor(i / 3);
+      setF(a, c, v); setF(c, a, v);
+    }
+  }
+
+  // Codewords
+  let bi = 0;
+  for (let right = size - 1; right >= 1; right -= 2) {
+    if (right === 6) right = 5;
+    for (let vert = 0; vert < size; vert++) {
+      for (let j = 0; j < 2; j++) {
+        const x = right - j;
+        const up = ((right + 1) & 2) === 0;
+        const y = up ? size - 1 - vert : vert;
+        if (!fn[y][x] && bi < cw.length * 8) {
+          mod[y][x] = ((cw[bi >>> 3] >>> (7 - (bi & 7))) & 1) === 1;
+          bi++;
+        }
+      }
+    }
+  }
+
+  const maskFn = [
+    (x, y) => (x + y) % 2 === 0, (x, y) => y % 2 === 0, (x) => x % 3 === 0, (x, y) => (x + y) % 3 === 0,
+    (x, y) => (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0, (x, y) => ((x * y) % 2) + ((x * y) % 3) === 0,
+    (x, y) => (((x * y) % 2) + ((x * y) % 3)) % 2 === 0, (x, y) => (((x + y) % 2) + ((x * y) % 3)) % 2 === 0,
+  ];
+  const applyMask = (m) => {
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) if (!fn[y][x] && maskFn[m](x, y)) mod[y][x] = !mod[y][x];
+  };
+  const penalty = () => {
+    let p = 0, dark = 0;
+    for (let y = 0; y < size; y++) {
+      let runR = 1, runC = 1;
+      for (let x = 0; x < size; x++) {
+        if (mod[y][x]) dark++;
+        if (x > 0) {
+          if (mod[y][x] === mod[y][x - 1]) { runR++; if (runR === 5) p += 3; else if (runR > 5) p++; } else runR = 1;
+          if (mod[x][y] === mod[x - 1][y]) { runC++; if (runC === 5) p += 3; else if (runC > 5) p++; } else runC = 1;
+        }
+        if (x < size - 1 && y < size - 1) {
+          const c = mod[y][x];
+          if (c === mod[y][x + 1] && c === mod[y + 1][x] && c === mod[y + 1][x + 1]) p += 3;
+        }
+      }
+    }
+    const total = size * size;
+    p += Math.floor(Math.abs(dark * 20 - total * 10) / total) * 10;
+    return p;
+  };
+  let best = 0, bestP = Infinity;
+  for (let m = 0; m < 8; m++) {
+    applyMask(m); drawFormat(m);
+    const p = penalty();
+    if (p < bestP) { bestP = p; best = m; }
+    applyMask(m);
+  }
+  applyMask(best); drawFormat(best);
+  return { size, dark: (x, y) => mod[y][x] };
+}
+
+function QrSvg({ text, sizeMm = 20, style }) {
+  const qr = useMemo(() => qrEncode(text), [text]);
+  const q = 2; // quiet zone
+  let d = "";
+  for (let y = 0; y < qr.size; y++) for (let x = 0; x < qr.size; x++) if (qr.dark(x, y)) d += `M${x + q},${y + q}h1v1h-1z`;
+  const n = qr.size + q * 2;
+  return (
+    <svg viewBox={`0 0 ${n} ${n}`} width={`${sizeMm}mm`} height={`${sizeMm}mm`} shapeRendering="crispEdges" style={{ display: "block", background: "#fff", ...style }}>
+      <path d={d} fill="#000" />
+    </svg>
+  );
+}
+
+/* ============================================================
+   FINANCE MODULE — Payment Vouchers · Cash Book · Insights
+   ------------------------------------------------------------
+   Own storage keys (never touches invoices / payments / customers):
+     ct-vouchers       payment vouchers
+     ct-fin-settings   categories, accounts, limits, approvers, signatures
+     ct-cash-closings  daily cash closings (cash count)
+     ct-cash-moves     transfers between accounts (cash → bank deposit …)
+     ct-vfile:<id>:<kind>  bill / paid-proof photos (one key per photo)
+   Writes re-read the latest copy first, so two people working at the
+   same time do not overwrite each other's vouchers.
+   ============================================================ */
+
+const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves" };
+
+const FIN_DEFAULT_SETTINGS = {
+  categories: [
+    { id: "cat_salary", name: "Salary", code: "5.1.01" },
+    { id: "cat_purchase", name: "Purchase", code: "5.1.02" },
+    { id: "cat_rent", name: "Rent", code: "5.1.03" },
+    { id: "cat_utility", name: "Electricity / Utility", code: "5.1.04" },
+    { id: "cat_fuel", name: "Diesel / Fuel", code: "5.1.05" },
+    { id: "cat_transport", name: "Rickshaw / Transport", code: "5.1.06" },
+    { id: "cat_tea", name: "Tea / Refreshment", code: "5.1.07" },
+    { id: "cat_repair", name: "Repair & Maintenance", code: "5.1.08" },
+    { id: "cat_other", name: "Other", code: "5.1.99" },
+  ],
+  accounts: [{ id: "acc_cash", name: "Cash In Hand", type: "cash", code: "1.1.01", opening: 0 }],
+  limits: { cashMax: 50000, bankMax: 200000 },
+  signMode: "manual",
+  requirePaperChecks: true,
+  approvers: {},
+  signatures: {},
+};
+
+const FIN_STATUS_TONE = {
+  Pending: "bg-amber-400/15 text-amber-500",
+  Approved: "bg-sky-400/15 text-sky-500",
+  Rejected: "bg-rose-400/15 text-rose-500",
+  Paid: "bg-emerald-400/15 text-emerald-500",
+  Cancelled: "bg-slate-400/20 text-slate-500",
+};
+const FIN_STATUS_LABEL = { Pending: "Pending", Approved: "Approved", Rejected: "Rejected", Paid: "Paid", Cancelled: "Cancelled" };
+const FIN_METHODS = ["Cash", "Bank", "Cheque"];
+const FIN_DENOMS = [5000, 1000, 500, 100, 50, 20, 10, 5, 2, 1];
+
+const FIN_URDU = {
+  "Payment Vouchers": "ادائیگی واؤچرز", "Cash Book": "کیش بک", "Business Insights": "کاروباری جائزہ",
+  "New Voucher": "نیا واؤچر", "Edit Voucher": "واؤچر میں ترمیم", "Voucher": "واؤچر", "Vouchers": "واؤچرز",
+  "Category": "کیٹیگری", "Payee": "وصول کنندہ", "Particulars": "تفصیل", "Amount": "رقم", "Cost Center": "کاسٹ سینٹر",
+  "Receipt No": "رسید نمبر", "Bill / Receipt photo": "بل / رسید کی تصویر", "Send for approval": "منظوری کے لیے بھیجیں",
+  "Approve": "منظور کریں", "Reject": "رد کریں", "Mark Paid": "ادا شدہ کریں", "Cancel Voucher": "واؤچر منسوخ کریں",
+  "Ready to pay": "ادائیگی کے لیے تیار", "Rejected": "رد شدہ", "Paid": "ادا شدہ", "Cancelled": "منسوخ", "Pending": "زیر التوا",
+  "Payment method": "ادائیگی کا طریقہ", "Cash": "نقد", "Bank": "بینک", "Cheque": "چیک", "Cross": "کراس", "Open": "اوپن",
+  "Cheque No": "چیک نمبر", "Cheque Date": "چیک کی تاریخ", "Approvers": "منظوری دینے والے", "Unlimited": "لامحدود",
+  "My Signature": "میرے دستخط", "Signature": "دستخط", "Cheque Register": "چیک رجسٹر", "Expenses": "اخراجات",
+  "Accounts": "اکاؤنٹس", "Categories": "کیٹیگریز", "Payment limits": "ادائیگی کی حد", "Voucher Settings": "واؤچر سیٹنگز",
+  "Opening": "ابتدائی", "Closing": "اختتامی", "Cash In": "آمد", "Cash Out": "خرچ", "Balance": "بیلنس",
+  "Daily Closing": "روزانہ اختتام", "Cash Count": "نقد گنتی", "Difference": "فرق", "Transfer": "منتقلی",
+  "Best Customers": "بہترین گاہک", "Udhaar Aging": "ادھار کی مدت", "Reminders": "یاد دہانیاں",
+  "On time": "وقت پر", "Bit late": "تھوڑا لیٹ", "Late payer": "دیر سے ادا کرنے والا", "Clear": "صاف",
+  "This month": "اس مہینے", "Last month": "پچھلے مہینے", "This year": "اس سال", "All time": "تمام",
+  "History": "تاریخچہ", "Reason": "وجہ", "Prepared By": "تیار کردہ", "Checked By": "چیک کردہ", "Approved By": "منظور کردہ", "Received By": "وصول کردہ",
+};
+Object.entries(FIN_URDU).forEach(([en, ur]) => {
+  if (!(en in translations.ur)) translations.ur[en] = ur;
+});
+
+/* ---------------- Store ---------------- */
+
+const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [] };
+const finListeners = new Set();
+let finLoadPromise = null;
+let finChannel = null;
+
+function finEmit() { finListeners.forEach((l) => l()); }
+
+function finNormalizeSettings(s) {
+  const src = s && typeof s === "object" ? s : {};
+  return {
+    ...FIN_DEFAULT_SETTINGS,
+    ...src,
+    categories: Array.isArray(src.categories) && src.categories.length ? src.categories : FIN_DEFAULT_SETTINGS.categories,
+    accounts: Array.isArray(src.accounts) && src.accounts.some((a) => a.type === "cash") ? src.accounts : [...FIN_DEFAULT_SETTINGS.accounts, ...(Array.isArray(src.accounts) ? src.accounts : [])],
+    limits: { ...FIN_DEFAULT_SETTINGS.limits, ...(src.limits || {}) },
+    approvers: src.approvers && typeof src.approvers === "object" ? src.approvers : {},
+    signatures: src.signatures && typeof src.signatures === "object" ? src.signatures : {},
+  };
+}
+function finNormalize(name, value) {
+  if (name === "settings") return finNormalizeSettings(value);
+  return Array.isArray(value) ? value : [];
+}
+
+function finLoad() {
+  if (finLoadPromise) return finLoadPromise;
+  finLoadPromise = (async () => {
+    const names = Object.keys(FIN_KEYS);
+    const values = await Promise.all(names.map((n) => storeGet(FIN_KEYS[n], null).catch(() => null)));
+    names.forEach((n, i) => { finState[n] = finNormalize(n, values[i]); });
+    finState.loaded = true;
+    finEmit();
+    if (supabase && !finChannel) {
+      const byKey = {};
+      names.forEach((n) => { byKey[FIN_KEYS[n]] = n; });
+      finChannel = supabase
+        .channel("ct_fin_changes")
+        .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, (payload) => {
+          const row = payload.new;
+          if (!row || !byKey[row.key]) return;
+          finState[byKey[row.key]] = finNormalize(byKey[row.key], row.value);
+          finEmit();
+        })
+        .subscribe();
+    }
+  })();
+  return finLoadPromise;
+}
+
+function useFin() {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const l = () => force((n) => n + 1);
+    finListeners.add(l);
+    finLoad();
+    return () => { finListeners.delete(l); };
+  }, []);
+  return finState;
+}
+
+// Read-modify-write against the latest saved copy.
+async function finMutate(name, fn) {
+  let latest = finState[name];
+  try {
+    const remote = await storeGet(FIN_KEYS[name], null);
+    if (remote != null) latest = finNormalize(name, remote);
+  } catch {}
+  const next = fn(latest);
+  finState[name] = next;
+  finEmit();
+  await storeSet(FIN_KEYS[name], next);
+  return next;
+}
+
+async function finFilePut(voucherId, kind, dataUrl) {
+  await storeSet(`ct-vfile:${voucherId}:${kind}`, dataUrl ? { dataUrl, at: new Date().toISOString() } : null);
+}
+async function finFileGet(voucherId, kind) {
+  const v = await storeGet(`ct-vfile:${voucherId}:${kind}`, null);
+  return v && v.dataUrl ? v.dataUrl : "";
+}
+
+/* ---------------- Helpers ---------------- */
+
+function finUserKey(u) { return u ? String(u.username || u.id || "") : ""; }
+function finActor(u) { return { key: finUserKey(u), name: (u && (u.name || u.username)) || "User", role: (u && u.role) || "" }; }
+function finIsStaff(u) { return !!u && (u.role === "admin" || u.role === "staff"); }
+
+function finApproverRule(settings, user) {
+  if (!user) return null;
+  if (user.role === "admin") return { mode: "unlimited", categoryIds: [], cashExempt: !!(settings.approvers[finUserKey(user)] || {}).cashExempt };
+  const r = settings.approvers[finUserKey(user)];
+  return r && (r.mode === "limit" || r.mode === "unlimited") ? r : null;
+}
+function finCanApprove(settings, user, v) {
+  const r = finApproverRule(settings, user);
+  if (!r || !v) return false;
+  if (r.mode === "limit" && Number(v.amount) > Number(r.limit || 0)) return false;
+  if (Array.isArray(r.categoryIds) && r.categoryIds.length && !r.categoryIds.includes(v.categoryId)) return false;
+  return true;
+}
+function finApproversFor(settings, users, v) {
+  return (users || []).filter((u) => finIsStaff(u) && finCanApprove(settings, u, v)).map((u) => u.name || u.username);
+}
+// Which payment methods an amount may use (limits set by admin; 0 = no limit).
+function finAllowedMethods(settings, amount, rule) {
+  const a = Number(amount) || 0;
+  const { cashMax, bankMax } = settings.limits || {};
+  const exempt = !!(rule && rule.cashExempt);
+  return {
+    Cash: exempt || !Number(cashMax) || a <= Number(cashMax),
+    Bank: exempt || !Number(bankMax) || a <= Number(bankMax),
+    Cheque: true,
+  };
+}
+function finLatestSignature(settings, userKey) {
+  const list = settings.signatures[userKey];
+  return Array.isArray(list) && list.length ? list[list.length - 1] : null;
+}
+function finSignatureById(settings, userKey, sigId) {
+  const list = settings.signatures[userKey];
+  if (!Array.isArray(list)) return null;
+  return list.find((s) => s.id === sigId) || list[list.length - 1] || null;
+}
+
+function finNextVoucherNumber(list, dateStr) {
+  const d = parseDateValue(dateStr) || new Date();
+  const prefix = `CPV-${String(d.getFullYear()).slice(2)}-${String(d.getMonth() + 1).padStart(2, "0")}-`;
+  let max = 0;
+  (list || []).forEach((v) => {
+    if (v.number && v.number.startsWith(prefix)) max = Math.max(max, Number(v.number.slice(prefix.length)) || 0);
+  });
+  return prefix + String(max + 1).padStart(4, "0");
+}
+
+const FIN_ONES = ["", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE", "TEN", "ELEVEN", "TWELVE", "THIRTEEN", "FOURTEEN", "FIFTEEN", "SIXTEEN", "SEVENTEEN", "EIGHTEEN", "NINETEEN"];
+const FIN_TENS = ["", "", "TWENTY", "THIRTY", "FORTY", "FIFTY", "SIXTY", "SEVENTY", "EIGHTY", "NINETY"];
+function finWords999(n) {
+  const out = [];
+  if (n >= 100) { out.push(FIN_ONES[Math.floor(n / 100)] + " HUNDRED"); n %= 100; }
+  if (n >= 20) out.push(FIN_TENS[Math.floor(n / 10)] + (n % 10 ? "-" + FIN_ONES[n % 10] : ""));
+  else if (n > 0) out.push(FIN_ONES[n]);
+  return out.join(" ");
+}
+function finAmountInWords(amount) {
+  const total = Math.round((Number(amount) || 0) * 100);
+  let rupees = Math.floor(total / 100);
+  const paisa = total % 100;
+  if (rupees === 0 && paisa === 0) return "ZERO ONLY";
+  const scales = [[1e9, "BILLION"], [1e6, "MILLION"], [1e3, "THOUSAND"]];
+  const parts = [];
+  scales.forEach(([v, name]) => {
+    if (rupees >= v) { parts.push(finWords999(Math.floor(rupees / v)) + " " + name); rupees %= v; }
+  });
+  if (rupees > 0) parts.push(finWords999(rupees));
+  let s = parts.join(" ");
+  if (paisa) s += (s ? " AND " : "") + finWords999(paisa) + " PAISA";
+  return s + " ONLY";
+}
+
+function finMoney2(n) {
+  return (Number(n) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function finDaysBetween(a, b) {
+  const da = parseDateValue(a), db = parseDateValue(b);
+  if (!da || !db) return 0;
+  return Math.round((db - da) / 86400000);
+}
+function finAccountFor(settings, id) {
+  return (settings.accounts || []).find((a) => a.id === id) || null;
+}
+function finCashAccount(settings) {
+  return (settings.accounts || []).find((a) => a.type === "cash") || FIN_DEFAULT_SETTINGS.accounts[0];
+}
+// Which account an incoming customer payment lands in.
+function finAccountForPaymentMethod(settings, method) {
+  const accs = settings.accounts || [];
+  const m = String(method || "Cash").toLowerCase();
+  const cash = finCashAccount(settings);
+  if (m === "cash") return cash.id;
+  const wallet = accs.find((a) => a.type === "wallet");
+  const bank = accs.find((a) => a.type === "bank" && a.receiveDefault) || accs.find((a) => a.type === "bank");
+  if (/easypaisa|jazz|wallet/.test(m)) return (wallet || bank || { id: "acc_unassigned" }).id;
+  if (/bank|cheque|online|transfer/.test(m)) return (bank || wallet || { id: "acc_unassigned" }).id;
+  return cash.id;
+}
+
+async function finResizeImage(file, maxSide = 1100, quality = 0.72) {
+  const url = await new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = reject;
+    r.onload = () => resolve(r.result);
+    r.readAsDataURL(file);
+  });
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = reject;
+    i.src = url;
+  });
+  const s = Math.min(1, maxSide / Math.max(img.width, img.height));
+  const c = document.createElement("canvas");
+  c.width = Math.round(img.width * s);
+  c.height = Math.round(img.height * s);
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#fff";
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", quality);
+}
+
+/* ---------------- Cash book computation ---------------- */
+
+// Every money movement with its account, sorted by date.
+function finMovements({ settings, vouchers, moves, payments, invoices }) {
+  const list = [];
+  const cancelledIds = new Set(), cancelledNums = new Set();
+  (invoices || []).forEach((i) => { if (isInvoiceCancelled(i)) { cancelledIds.add(i.id); cancelledNums.add(i.number); } });
+  (payments || []).forEach((p) => {
+    if (!(Number(p.amount) > 0)) return;
+    if (p.invoiceId ? cancelledIds.has(p.invoiceId) : p.note && p.note.startsWith("Against ") && cancelledNums.has(p.note.replace("Against ", "").trim())) return;
+    list.push({
+      id: "p_" + p.id, date: p.date, accountId: finAccountForPaymentMethod(settings, p.method), inAmt: Number(p.amount), outAmt: 0,
+      kind: "Payment", title: p.customerName || "Customer", sub: `${p.method || "Cash"}${p.note ? " · " + p.note : ""}`,
+    });
+  });
+  (vouchers || []).forEach((v) => {
+    if (v.status === "Cancelled") return;
+    const plan = finPlanOf(v);
+    plan.forEach((k, i) => {
+      if (k.status !== "Paid" || !k.paid) return;
+      list.push({
+        id: `v_${v.id}_${k.id}`, date: k.paid.date || v.date, accountId: k.accountId || finCashAccount(settings).id,
+        inAmt: 0, outAmt: Number(k.amount) || 0, kind: "Voucher", title: `${v.number}${plan.length > 1 ? ` (${i + 1}/${plan.length})` : ""} · ${v.payee}`,
+        sub: `${v.categoryName} · ${finKishtMethodText(k)}`, voucherId: v.id,
+      });
+    });
+  });
+  (moves || []).forEach((m) => {
+    if (m.cancelled) return;
+    const amt = Number(m.amount) || 0;
+    const from = finAccountFor(settings, m.fromId), to = finAccountFor(settings, m.toId);
+    list.push({ id: "mo_" + m.id, date: m.date, accountId: m.fromId, inAmt: 0, outAmt: amt, kind: "Transfer", title: `→ ${to ? to.name : "?"}`, sub: m.note || "" });
+    list.push({ id: "mi_" + m.id, date: m.date, accountId: m.toId, inAmt: amt, outAmt: 0, kind: "Transfer", title: `← ${from ? from.name : "?"}`, sub: m.note || "" });
+  });
+  list.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  return list;
+}
+function finAccountDay(settings, movements, accountId, date) {
+  const acc = finAccountFor(settings, accountId);
+  let opening = Number(acc && acc.opening) || 0;
+  let inAmt = 0, outAmt = 0;
+  const rows = [];
+  movements.forEach((m) => {
+    if (m.accountId !== accountId) return;
+    if (m.date < date) opening += m.inAmt - m.outAmt;
+    else if (m.date === date) { inAmt += m.inAmt; outAmt += m.outAmt; rows.push(m); }
+  });
+  return { opening, inAmt, outAmt, closing: opening + inAmt - outAmt, rows };
+}
+function finAccountBalance(settings, movements, accountId) {
+  const acc = finAccountFor(settings, accountId);
+  let bal = Number(acc && acc.opening) || 0;
+  movements.forEach((m) => { if (m.accountId === accountId) bal += m.inAmt - m.outAmt; });
+  return bal;
+}
+
+/* ---------------- Customer aging / best customers ---------------- */
+
+function finActiveInvoices(invoices) {
+  return (invoices || []).filter((i) => !isInvoiceCancelled(i));
+}
+// Outstanding split by age: newest invoices are treated as unpaid first.
+function finAgingFor(outstanding, custInvoices, today) {
+  const buckets = [0, 0, 0, 0];
+  let left = Math.max(0, Number(outstanding) || 0);
+  let oldest = 0;
+  const sorted = [...custInvoices].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  for (const inv of sorted) {
+    if (left <= 0.5) break;
+    const take = Math.min(left, Number(inv.total) || 0);
+    if (take <= 0) continue;
+    const age = Math.max(0, finDaysBetween(inv.date, today));
+    buckets[age <= 30 ? 0 : age <= 60 ? 1 : age <= 90 ? 2 : 3] += take;
+    oldest = Math.max(oldest, age);
+    left -= take;
+  }
+  if (left > 0.5) { buckets[3] += left; oldest = Math.max(oldest, 91); }
+  return { buckets, oldest };
+}
+function finPayTag(outstanding, oldest) {
+  if (!(outstanding > 0.5)) return { label: "Clear", tone: "bg-emerald-400/15 text-emerald-500", dot: "🟢" };
+  if (oldest <= 30) return { label: "On time", tone: "bg-emerald-400/15 text-emerald-500", dot: "🟢" };
+  if (oldest <= 60) return { label: "Bit late", tone: "bg-amber-400/15 text-amber-500", dot: "🟡" };
+  return { label: "Late payer", tone: "bg-rose-400/15 text-rose-500", dot: "🔴" };
+}
+function finPeriodRange(preset, from, to) {
+  const now = new Date();
+  const iso = (d) => dateToLocalISO(d);
+  if (preset === "month") return [iso(new Date(now.getFullYear(), now.getMonth(), 1)), iso(now)];
+  if (preset === "last") return [iso(new Date(now.getFullYear(), now.getMonth() - 1, 1)), iso(new Date(now.getFullYear(), now.getMonth(), 0))];
+  if (preset === "year") return [iso(new Date(now.getFullYear(), 0, 1)), iso(now)];
+  if (preset === "custom") return [from || "0000-01-01", to || "9999-12-31"];
+  return ["0000-01-01", "9999-12-31"];
+}
+
+/* ---------------- Small UI pieces ---------------- */
+
+function FinPill({ status }) {
+  return (
+    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11.5px] font-bold whitespace-nowrap ${FIN_STATUS_TONE[status] || FIN_STATUS_TONE.Cancelled}`}>
+      {t(FIN_STATUS_LABEL[status] || status)}
+    </span>
+  );
+}
+function FinTabs({ tabs, value, onChange }) {
+  return (
+    <div className="flex gap-1.5 overflow-x-auto ct-scroll pb-1 -mx-1 px-1">
+      {tabs.map((tb) => (
+        <button key={tb.id} type="button" onClick={() => onChange(tb.id)}
+          className={`shrink-0 rounded-xl px-3.5 py-2 text-[13px] font-bold transition ${value === tb.id ? "ct-em-btn" : "ct-chip ct-t2 hover:opacity-90"}`}>
+          {t(tb.label)}{tb.count ? <span className={`ms-1.5 rounded-full px-1.5 text-[11px] ${value === tb.id ? "bg-black/15" : "bg-amber-400/20 text-amber-500"}`}>{tb.count}</span> : null}
+        </button>
+      ))}
+    </div>
+  );
+}
+function FinPageHead({ title, sub, right }) {
+  return (
+    <div className="flex flex-col md:flex-row md:items-end justify-between gap-3 ct-rise mb-4">
+      <div>
+        <h2 className="ct-display text-[24px] sm:text-[28px] font-bold ct-h leading-tight">{t(title)}</h2>
+        {sub && <div className="text-[13px] ct-t2 mt-0.5">{sub}</div>}
+      </div>
+      {right && <div className="flex flex-wrap gap-2">{right}</div>}
+    </div>
+  );
+}
+function FinKpi({ label, value, tone = "ct-h", sub }) {
+  return (
+    <div className="ct-card p-4 min-w-0">
+      <div className="text-[11.5px] font-bold uppercase tracking-[.1em] ct-t3 truncate">{t(label)}</div>
+      <div className={`ct-display text-[22px] font-bold mt-1 tabular-nums truncate ${tone}`}>{value}</div>
+      {sub && <div className="text-[12px] ct-t2 mt-0.5 truncate">{sub}</div>}
+    </div>
+  );
+}
+function FinEmpty({ text }) {
+  return <div className="py-10 text-center text-[13.5px] ct-t3">{t(text)}</div>;
+}
+
+function FinSignaturePad({ onSave, onCancel }) {
+  const ref = React.useRef(null);
+  const drawing = React.useRef(false);
+  const [dirty, setDirty] = useState(false);
+  useEffect(() => {
+    const c = ref.current;
+    const ratio = window.devicePixelRatio || 1;
+    c.width = c.offsetWidth * ratio;
+    c.height = c.offsetHeight * ratio;
+    const ctx = c.getContext("2d");
+    ctx.scale(ratio, ratio);
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.strokeStyle = "#1d3fa8";
+  }, []);
+  const pos = (e) => {
+    const r = ref.current.getBoundingClientRect();
+    return [e.clientX - r.left, e.clientY - r.top];
+  };
+  const down = (e) => {
+    e.preventDefault();
+    ref.current.setPointerCapture && ref.current.setPointerCapture(e.pointerId);
+    drawing.current = true;
+    const ctx = ref.current.getContext("2d");
+    const [x, y] = pos(e);
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+  };
+  const move = (e) => {
+    if (!drawing.current) return;
+    const ctx = ref.current.getContext("2d");
+    const [x, y] = pos(e);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+    setDirty(true);
+  };
+  const up = () => { drawing.current = false; };
+  const clear = () => {
+    const c = ref.current;
+    c.getContext("2d").clearRect(0, 0, c.width, c.height);
+    setDirty(false);
+  };
+  const save = () => {
+    const c = ref.current;
+    // Trim empty space around the signature.
+    const ctx = c.getContext("2d");
+    const { width: w, height: h } = c;
+    const px = ctx.getImageData(0, 0, w, h).data;
+    let x0 = w, y0 = h, x1 = 0, y1 = 0;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      if (px[(y * w + x) * 4 + 3] > 10) { if (x < x0) x0 = x; if (y < y0) y0 = y; if (x > x1) x1 = x; if (y > y1) y1 = y; }
+    }
+    if (x1 <= x0) return;
+    const pad = 6;
+    x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad); x1 = Math.min(w, x1 + pad); y1 = Math.min(h, y1 + pad);
+    const out = document.createElement("canvas");
+    const scale = Math.min(1, 360 / (x1 - x0));
+    out.width = Math.round((x1 - x0) * scale);
+    out.height = Math.round((y1 - y0) * scale);
+    out.getContext("2d").drawImage(c, x0, y0, x1 - x0, y1 - y0, 0, 0, out.width, out.height);
+    onSave(out.toDataURL("image/png"));
+  };
+  async function upload(e) {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    try {
+      const img = await new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => { const i = new Image(); i.onload = () => resolve(i); i.onerror = reject; i.src = r.result; };
+        r.onerror = reject;
+        r.readAsDataURL(f);
+      });
+      const s = Math.min(1, 360 / img.width);
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * s);
+      c.height = Math.round(img.height * s);
+      const ctx = c.getContext("2d");
+      ctx.drawImage(img, 0, 0, c.width, c.height);
+      // White paper → transparent, so the sign sits cleanly on the voucher.
+      const d = ctx.getImageData(0, 0, c.width, c.height);
+      for (let i = 0; i < d.data.length; i += 4) {
+        const l = (d.data[i] + d.data[i + 1] + d.data[i + 2]) / 3;
+        if (l > 200) d.data[i + 3] = 0;
+      }
+      ctx.putImageData(d, 0, 0);
+      onSave(c.toDataURL("image/png"));
+    } catch {
+      alert(t("Could not read this image."));
+    }
+  }
+  return (
+    <div>
+      <div className="rounded-xl bg-white border-2 border-dashed border-slate-300 overflow-hidden" style={{ background: "#fff" }}>
+        <canvas ref={ref} className="block w-full h-[150px] touch-none cursor-crosshair"
+          onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerLeave={up} />
+      </div>
+      <div className="text-[11.5px] ct-t3 mt-1.5">{t("Sign with your finger or mouse inside the box.")}</div>
+      <div className="flex flex-wrap gap-2 mt-3">
+        <Btn onClick={save} disabled={!dirty}>Save signature</Btn>
+        <Btn variant="ghost" onClick={clear}>Clear</Btn>
+        <label className="inline-flex items-center justify-center rounded-xl px-4 py-2 text-sm font-semibold bg-white text-slate-700 border border-slate-300 cursor-pointer hover:bg-slate-50">
+          {t("Upload photo")}
+          <input type="file" accept="image/*" className="hidden" onChange={upload} />
+        </label>
+        {onCancel && <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>}
+      </div>
+    </div>
+  );
+}
+
+async function finSaveSignature(user, dataUrl) {
+  const key = finUserKey(user);
+  const sig = { id: uid("sig"), dataUrl, at: new Date().toISOString() };
+  await finMutate("settings", (s) => ({ ...s, signatures: { ...s.signatures, [key]: [...(s.signatures[key] || []), sig].slice(-10) } }));
+  return sig;
+}
+
+/* ============================================================
+   VOUCHER PAYMENT PLAN (kishtein)
+   ------------------------------------------------------------
+   Every voucher has a plan: one or more kisht (instalments), each
+   with its own date, amount and method (Cash / Bank / Cheque).
+     cashier proposes the plan → approver keeps or changes it →
+     cashier pays each kisht on (or after) its date.
+   Old vouchers (single payment) are read as a one-kisht plan.
+   ============================================================ */
+
+function finAddMonths(dateStr, n) {
+  const d = parseDateValue(dateStr) || new Date();
+  const day = d.getDate();
+  const t2 = new Date(d.getFullYear(), d.getMonth() + n, 1);
+  const last = new Date(t2.getFullYear(), t2.getMonth() + 1, 0).getDate();
+  t2.setDate(Math.min(day, last));
+  return dateToLocalISO(t2);
+}
+function finMonthLabel(dateStr) {
+  const d = parseDateValue(dateStr);
+  return d ? d.toLocaleString("en", { month: "short", year: "numeric" }) : "";
+}
+
+function finNewKisht(date, amount, method) {
+  return {
+    id: uid("k"), date: date || todayISO(), amount: roundMoney(Number(amount) || 0), method: method || "Cash",
+    accountId: "", accountName: "", accountCode: "", bankName: "",
+    chequeNo: "", chequeType: "Cross", chequeCleared: false,
+    toBank: "", toAccountNo: "", toTitle: "", earlyOk: false, status: "Due", paid: null,
+  };
+}
+
+// The plan of a voucher (old single-payment vouchers are converted on read).
+function finPlanOf(v) {
+  if (!v) return [];
+  if (Array.isArray(v.plan) && v.plan.length) return v.plan;
+  const ap = v.approval || {};
+  const k = finNewKisht(ap.chequeDate || v.date, v.amount, ap.method || "Cash");
+  return [{
+    ...k, id: "k1",
+    accountId: ap.accountId || "", accountName: ap.accountName || "", accountCode: ap.accountCode || "", bankName: ap.bankName || "",
+    chequeNo: ap.chequeNo || "", chequeType: ap.chequeType || "Cross", chequeCleared: !!ap.chequeCleared,
+    toBank: ap.toBank || "", toAccountNo: ap.toAccountNo || "", toTitle: ap.toTitle || "",
+    status: v.status === "Paid" ? "Paid" : "Due",
+    paid: v.status === "Paid" && v.payment ? { by: v.payment.by, at: v.payment.at, date: v.payment.date, txnId: ap.txnId || "", note: v.payment.note || "", hasProof: !!v.payment.hasProof } : null,
+  }];
+}
+function finPlanSum(plan) { return roundMoney((plan || []).reduce((s, k) => s + (Number(k.amount) || 0), 0)); }
+function finPaidSum(plan) { return roundMoney((plan || []).filter((k) => k.status === "Paid").reduce((s, k) => s + (Number(k.amount) || 0), 0)); }
+function finRev(v) { return Number(v && v.rev) || 1; }
+
+function finKishtMethodText(k) {
+  if (!k) return "";
+  if (k.method === "Cheque") {
+    return ["Cheque" + (k.chequeNo ? ` #${k.chequeNo}` : ""), k.bankName || k.accountName, (k.chequeType || "").toUpperCase()].filter(Boolean).join(" · ");
+  }
+  if (k.method === "Bank") {
+    return ["Account", k.accountName && `from ${k.accountName}`, k.toBank && `to ${k.toBank}`, k.toAccountNo, k.paid && k.paid.txnId && `Ref ${k.paid.txnId}`].filter(Boolean).join(" · ");
+  }
+  return "Cash" + (k.accountName && k.accountName !== "Cash In Hand" ? ` · ${k.accountName}` : "");
+}
+function finMethodSummary(v) {
+  const plan = finPlanOf(v);
+  const methods = Array.from(new Set(plan.map((k) => k.method)));
+  return methods.join(" / ");
+}
+function finMethodDetail(v) {
+  const plan = finPlanOf(v);
+  if (plan.length === 1) return finKishtMethodText(plan[0]);
+  return `${plan.length} kisht · ${finMethodSummary(v)}`;
+}
+
+// Limit check for one kisht (cash / bank limits set by admin; 0 = no limit).
+function finKishtLimitError(settings, k, rule) {
+  const exempt = !!(rule && rule.cashExempt);
+  const { cashMax, bankMax } = settings.limits || {};
+  const a = Number(k.amount) || 0;
+  if (exempt) return "";
+  if (k.method === "Cash" && Number(cashMax) && a > Number(cashMax)) return `${t("Cash limit")} ${fmtMoney(cashMax)}`;
+  if (k.method === "Bank" && Number(bankMax) && a > Number(bankMax)) return `${t("Bank limit")} ${fmtMoney(bankMax)}`;
+  return "";
+}
+function finValidatePlan(plan, amount, settings, rule) {
+  if (!plan.length) return t("Add at least one kisht.");
+  if (plan.some((k) => !(Number(k.amount) > 0))) return t("Every kisht needs an amount.");
+  if (plan.some((k) => !k.date)) return t("Every kisht needs a date.");
+  const sum = finPlanSum(plan);
+  if (Math.abs(sum - roundMoney(amount)) > 0.5) return `${t("Kisht total")} ${fmtMoney(sum)} ≠ ${t("voucher amount")} ${fmtMoney(amount)}`;
+  for (let i = 0; i < plan.length; i++) {
+    if (plan[i].status === "Paid") continue;
+    const e = finKishtLimitError(settings, plan[i], rule);
+    if (e) return `${t("Kisht")} ${i + 1}: ${e} — ${t("make it smaller or choose Bank / Cheque")}`;
+  }
+  return "";
+}
+
+// Quick plans for the cashier.
+function finQuickPlan(kind, amount, firstDate, opts, settings) {
+  const total = roundMoney(Number(amount) || 0);
+  const method = opts.method || "Cash";
+  if (!(total > 0)) return [];
+  if (kind === "once") return [finNewKisht(firstDate, total, method)];
+  if (kind === "monthly") {
+    const per = roundMoney(Number(opts.per) || 0);
+    if (!(per > 0)) return [finNewKisht(firstDate, total, method)];
+    const list = [];
+    let left = total;
+    for (let i = 0; left > 0.5 && i < 60; i++) {
+      const a = Math.min(per, left);
+      list.push(finNewKisht(finAddMonths(firstDate, i), a, method));
+      left = roundMoney(left - a);
+    }
+    return list;
+  }
+  if (kind === "equal") {
+    const n = Math.max(1, Math.min(60, Number(opts.count) || 1));
+    const base = Math.floor((total / n) * 100) / 100;
+    return Array.from({ length: n }, (_, i) => finNewKisht(finAddMonths(firstDate, i), i === n - 1 ? roundMoney(total - base * (n - 1)) : base, method));
+  }
+  return [finNewKisht(firstDate, total, method)];
+}
+
+// What the voucher is waiting for right now.
+function finVoucherState(v, today = todayISO()) {
+  const plan = finPlanOf(v);
+  const paidCount = plan.filter((k) => k.status === "Paid").length;
+  const base = { plan, paidCount, total: plan.length, paidSum: finPaidSum(plan) };
+  if (v.status === "Cancelled") return { ...base, key: "cancelled", label: "Cancelled", tone: "bad" };
+  if (v.status === "Rejected") return { ...base, key: "rejected", label: "Rejected", tone: "bad" };
+  if (v.status === "Pending") return { ...base, key: "pending", label: "Pending approval", tone: "warn" };
+  const nextIdx = plan.findIndex((k) => k.status !== "Paid");
+  if (nextIdx < 0) return { ...base, key: "paid", label: "Paid", tone: "done" };
+  const next = plan[nextIdx];
+  const due = next.date <= today || next.earlyOk;
+  return {
+    ...base, next, nextIdx, due, overdue: next.date < today,
+    key: due ? "due" : "scheduled",
+    label: next.date < today ? "Overdue" : next.date === today || next.earlyOk ? "Due" : "Scheduled",
+    tone: due ? "ok" : "warn",
+  };
+}
+
+// Every kisht of approved vouchers (for the due list, cheque register, expenses).
+function finAllKishts(vouchers) {
+  const out = [];
+  (vouchers || []).forEach((v) => {
+    if (v.status === "Cancelled" || v.status === "Rejected") return;
+    const plan = finPlanOf(v);
+    plan.forEach((k, i) => out.push({ v, k, idx: i, n: plan.length }));
+  });
+  return out;
+}
+
+function finVoucherQrText(v, k) {
+  return docVerifyUrl("v", v.id) + `&r=${finRev(v)}` + (k ? `&k=${k}` : "");
+}
+
+/* ---------------- Plan editor (cashier & approver) ---------------- */
+
+function FinPlanEditor({ plan, setPlan, amount, settings, rule, detailed, original }) {
+  const accounts = settings.accounts || [];
+  const nonCash = accounts.filter((a) => a.type !== "cash");
+  const sum = finPlanSum(plan);
+  const diff = roundMoney((Number(amount) || 0) - sum);
+  const upd = (id, patch) => setPlan(plan.map((k) => (k.id === id ? { ...k, ...patch } : k)));
+  const del = (id) => setPlan(plan.filter((k) => k.id !== id));
+  const add = () => {
+    const last = plan[plan.length - 1];
+    setPlan([...plan, finNewKisht(last ? finAddMonths(last.date, 1) : todayISO(), diff > 0 ? diff : 0, last ? last.method : "Cash")]);
+  };
+  const changed = (k, field) => {
+    if (!original) return false;
+    const o = original.find((x) => x.id === k.id);
+    return !o || String(o[field] ?? "") !== String(k[field] ?? "");
+  };
+  const hl = (k, f) => (changed(k, f) ? "!border-amber-400 !bg-amber-400/10" : "");
+  return (
+    <div>
+      <div className="space-y-2">
+        {plan.map((k, i) => {
+          const locked = k.status === "Paid";
+          const err = locked ? "" : finKishtLimitError(settings, k, rule);
+          return (
+            <div key={k.id} className={`rounded-xl p-2.5 ${locked ? "bg-emerald-400/10" : "ct-chip"} ${original && !original.find((x) => x.id === k.id) ? "ring-2 ring-amber-400/60" : ""}`}>
+              <div className="grid grid-cols-[28px_1fr_1fr] sm:grid-cols-[28px_120px_1fr_1fr_auto] gap-2 items-center">
+                <span className="w-7 h-7 rounded-lg ct-gold-bg text-[12px] font-black flex items-center justify-center">{i + 1}</span>
+                <div className="hidden sm:block text-[12.5px] font-semibold ct-t2">{finMonthLabel(k.date)}</div>
+                <input type="date" disabled={locked} className={`${inputCls} !py-1.5 ${hl(k, "date")}`} value={k.date} onChange={(e) => upd(k.id, { date: e.target.value })} />
+                <input type="number" disabled={locked} className={`${inputCls} !py-1.5 font-bold ${hl(k, "amount")} ${err ? "!border-rose-400" : ""}`} value={k.amount} onChange={(e) => upd(k.id, { amount: e.target.value })} placeholder="Rs" />
+                <div className="col-span-3 sm:col-span-1 flex items-center gap-1">
+                  {FIN_METHODS.map((m) => (
+                    <button key={m} type="button" disabled={locked} onClick={() => upd(k.id, { method: m })}
+                      className={`rounded-lg px-2.5 py-1.5 text-[12px] font-bold border-2 ${k.method === m ? `border-emerald-400 bg-emerald-400/10 ct-h ${hl(k, "method")}` : "border-transparent ct-t2"} ${locked ? "opacity-60" : ""}`}>
+                      {m === "Cash" ? "💵" : m === "Bank" ? "🏦" : "📝"} {t(m === "Bank" ? "Account" : m)}
+                    </button>
+                  ))}
+                  {locked ? <span className="ms-1 text-[11.5px] font-bold text-emerald-500">✓ {t("Paid")}</span> : plan.length > 1 && (
+                    <button type="button" onClick={() => del(k.id)} className="ms-1 text-rose-500 px-1.5" title={t("Remove")}>✕</button>
+                  )}
+                </div>
+              </div>
+              {err && <div className="text-[11.5px] text-rose-500 font-semibold mt-1 ms-9">⚠ {err}</div>}
+              {detailed && !locked && k.method !== "Cash" && (
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mt-2 ms-0 sm:ms-9">
+                  <select className={`${inputCls} !py-1.5`} value={k.accountId || (nonCash[0] ? nonCash[0].id : "other")}
+                    onChange={(e) => { const a = accounts.find((x) => x.id === e.target.value); upd(k.id, { accountId: e.target.value, accountName: a ? a.name : "", accountCode: a ? a.code || "" : "", bankName: a ? a.bankName || a.name : k.bankName }); }}>
+                    {nonCash.map((a) => <option key={a.id} value={a.id}>{t("From")}: {a.name}</option>)}
+                    <option value="other">{t("Other bank (type name)")}</option>
+                  </select>
+                  {(k.accountId === "other" || (!k.accountId && !nonCash.length)) && (
+                    <input className={`${inputCls} !py-1.5`} placeholder={t("Bank name")} value={k.bankName} onChange={(e) => upd(k.id, { bankName: e.target.value, accountName: e.target.value })} />
+                  )}
+                  {k.method === "Cheque" && (
+                    <>
+                      <input className={`${inputCls} !py-1.5`} placeholder={t("Cheque No (can add at payment)")} value={k.chequeNo} onChange={(e) => upd(k.id, { chequeNo: e.target.value })} />
+                      <div className="flex gap-1">
+                        {["Cross", "Open"].map((ct) => (
+                          <button key={ct} type="button" onClick={() => upd(k.id, { chequeType: ct })}
+                            className={`flex-1 rounded-lg py-1.5 text-[12px] font-bold border-2 ${k.chequeType === ct ? "border-emerald-400 bg-emerald-400/10 ct-h" : "border-transparent ct-chip ct-t2"}`}>{t(ct)}</button>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                  {k.method === "Bank" && (
+                    <>
+                      <input className={`${inputCls} !py-1.5`} placeholder={t("Receiver bank")} value={k.toBank} onChange={(e) => upd(k.id, { toBank: e.target.value })} />
+                      <input className={`${inputCls} !py-1.5`} placeholder={t("Receiver account number")} value={k.toAccountNo} onChange={(e) => upd(k.id, { toAccountNo: e.target.value })} />
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 mt-2.5">
+        <button type="button" onClick={add} className="rounded-xl ct-chip px-3 py-2 text-[12.5px] font-bold ct-h">+ {t("Add kisht")}</button>
+        <div className="text-[13px] ct-t2">
+          {t("Total")} <b className={Math.abs(diff) <= 0.5 ? "text-emerald-500" : "text-rose-500"}>{fmtMoney(sum)}</b>
+          {Math.abs(diff) > 0.5 && <span className="text-rose-500"> · {diff > 0 ? `${t("left")} ${fmtMoney(diff)}` : `${t("extra")} ${fmtMoney(-diff)}`}</span>}
+          {Math.abs(diff) <= 0.5 && " ✓"}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   VOUCHER SETTINGS (admin) + MY SIGNATURE
+   ============================================================ */
+
+/* ---------------- Settings (admin) ---------------- */
+
+function VoucherSettingsPanel({ fin, users, currentUser }) {
+  const s = fin.settings;
+  const staff = (users || []).filter(finIsStaff);
+  const save = (fn) => finMutate("settings", fn).catch((e) => { console.error(e); alert(t("Could not save. Check your internet connection and try again.")); });
+  const [limits, setLimits] = useState({ cashMax: String(s.limits.cashMax ?? ""), bankMax: String(s.limits.bankMax ?? "") });
+  const [cat, setCat] = useState({ name: "", code: "" });
+  const [acc, setAcc] = useState(null);
+  const card = "ct-card p-4 sm:p-5";
+  const h = "ct-display text-[16px] font-bold ct-h mb-3";
+
+  function setRule(key, patch) {
+    save((x) => {
+      const cur = x.approvers[key] || { mode: "none", limit: 0, categoryIds: [], cashExempt: false };
+      return { ...x, approvers: { ...x.approvers, [key]: { ...cur, ...patch } } };
+    });
+  }
+
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+      <section className={`${card} xl:col-span-2`}>
+        <div className={h}>{t("Approvers")}</div>
+        <div className="text-[12.5px] ct-t2 -mt-2 mb-3">{t("Give approval rights to anyone. A voucher above someone's limit goes to a person with a higher limit. Admin can always approve.")}</div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[13px] min-w-[760px]">
+            <thead><tr className="text-start text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              <th className="py-2 pe-3 text-start">{t("User")}</th><th className="py-2 pe-3 text-start">{t("Approval")}</th><th className="py-2 pe-3 text-start">{t("Limit (Rs)")}</th>
+              <th className="py-2 pe-3 text-start">{t("Categories")}</th><th className="py-2 pe-3 text-start">{t("Cash limit")}</th><th className="py-2 text-start">{t("Signature")}</th>
+            </tr></thead>
+            <tbody>
+              {staff.map((u) => {
+                const key = finUserKey(u);
+                const isAdmin = u.role === "admin";
+                const r = s.approvers[key] || { mode: "none", limit: 0, categoryIds: [], cashExempt: false };
+                const hasSig = !!finLatestSignature(s, key);
+                return (
+                  <tr key={key} className="border-b border-slate-100 align-top">
+                    <td className="py-2.5 pe-3"><div className="font-semibold ct-h">{u.name || u.username}</div><div className="text-[11.5px] ct-t3">{u.username} · {u.role}</div></td>
+                    <td className="py-2.5 pe-3">
+                      {isAdmin ? <span className="inline-flex rounded-full px-2.5 py-0.5 text-[11.5px] font-bold bg-violet-400/15 text-violet-500">{t("Admin")} · {t("Unlimited")}</span> : (
+                        <select className={`${inputCls} !py-1.5`} value={r.mode} onChange={(e) => setRule(key, { mode: e.target.value })}>
+                          <option value="none">{t("No approval")}</option>
+                          <option value="limit">{t("Up to a limit")}</option>
+                          <option value="unlimited">{t("Unlimited")}</option>
+                        </select>
+                      )}
+                    </td>
+                    <td className="py-2.5 pe-3">
+                      {!isAdmin && r.mode === "limit" ? (
+                        <input type="number" className={`${inputCls} !py-1.5 w-32`} defaultValue={r.limit || ""} onBlur={(e) => setRule(key, { limit: Number(e.target.value) || 0 })} />
+                      ) : <span className="ct-t3">{isAdmin || r.mode === "unlimited" ? "∞" : "—"}</span>}
+                    </td>
+                    <td className="py-2.5 pe-3">
+                      {!isAdmin && r.mode !== "none" ? (
+                        <div className="flex flex-wrap gap-1 max-w-[280px]">
+                          <button type="button" onClick={() => setRule(key, { categoryIds: [] })}
+                            className={`rounded-full px-2 py-0.5 text-[11.5px] font-semibold ${!r.categoryIds || !r.categoryIds.length ? "bg-emerald-400/20 text-emerald-600" : "ct-chip ct-t2"}`}>{t("All")}</button>
+                          {s.categories.map((c) => {
+                            const on = (r.categoryIds || []).includes(c.id);
+                            return (
+                              <button key={c.id} type="button" onClick={() => setRule(key, { categoryIds: on ? r.categoryIds.filter((x) => x !== c.id) : [...(r.categoryIds || []), c.id] })}
+                                className={`rounded-full px-2 py-0.5 text-[11.5px] font-semibold ${on ? "bg-emerald-400/20 text-emerald-600" : "ct-chip ct-t2"}`}>{c.name}</button>
+                            );
+                          })}
+                        </div>
+                      ) : <span className="ct-t3">{isAdmin ? t("All") : "—"}</span>}
+                    </td>
+                    <td className="py-2.5 pe-3">
+                      {r.mode !== "none" || isAdmin ? (
+                        <label className="inline-flex items-center gap-2 text-[12.5px] ct-t2">
+                          <input type="checkbox" checked={!!(isAdmin ? (s.approvers[key] || {}).cashExempt : r.cashExempt)} onChange={(e) => setRule(key, { cashExempt: e.target.checked, ...(isAdmin ? { mode: "unlimited" } : {}) })} />
+                          {t("Free from cash limit")}
+                        </label>
+                      ) : <span className="ct-t3">—</span>}
+                    </td>
+                    <td className="py-2.5">{hasSig ? <span className="text-emerald-500 font-semibold">✓</span> : <span className="ct-t3 text-[12px]">{t("Not added")}</span>}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="text-[12px] ct-t3 mt-2">{t("Each approver adds their own signature from “My Signature” on the Vouchers page.")}</div>
+      </section>
+
+      <section className={card}>
+        <div className={h}>{t("Payment limits")}</div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Cash allowed up to (Rs)"><input type="number" className={inputCls} value={limits.cashMax} onChange={(e) => setLimits({ ...limits, cashMax: e.target.value })} /></Field>
+          <Field label="Bank transfer up to (Rs)"><input type="number" className={inputCls} value={limits.bankMax} onChange={(e) => setLimits({ ...limits, bankMax: e.target.value })} /></Field>
+        </div>
+        <div className="text-[12.5px] ct-t2 space-y-1 mb-3">
+          <div>💵 {t("Cash")}: Rs 0 – {Number(limits.cashMax) ? fmtMoney(limits.cashMax) : "∞"}</div>
+          <div>🏦 {t("Bank")}: {t("up to")} {Number(limits.bankMax) ? fmtMoney(limits.bankMax) : "∞"}</div>
+          <div>📝 {t("Cheque")}: {t("any amount")}{Number(limits.bankMax) ? ` (${t("only option above")} ${fmtMoney(limits.bankMax)})` : ""}</div>
+          <div className="ct-t3">{t("0 = no limit")}</div>
+        </div>
+        <Btn onClick={() => save((x) => ({ ...x, limits: { cashMax: Number(limits.cashMax) || 0, bankMax: Number(limits.bankMax) || 0 } }))}>Save limits</Btn>
+      </section>
+
+      <section className={card}>
+        <div className={h}>{t("Approver signature")}</div>
+        <div className="text-[12.5px] ct-t2 -mt-2 mb-3">{t("How the approver signs the voucher.")}</div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+          {[["manual", "✍ By hand on paper", "Approver signs the printed voucher. The system saves who approved and when."], ["digital", "🖊 System signature too", "The approver's saved signature is also printed on reprints."]].map(([id, l, sub]) => (
+            <button key={id} type="button" onClick={() => save((x) => ({ ...x, signMode: id }))}
+              className={`text-start rounded-xl p-3 border-2 ${(s.signMode || "manual") === id ? "border-emerald-400 bg-emerald-400/10" : "border-transparent ct-chip"}`}>
+              <div className="font-bold ct-h text-[13.5px]">{t(l)}</div>
+              <div className="text-[12px] ct-t2 mt-0.5">{t(sub)}</div>
+            </button>
+          ))}
+        </div>
+        <label className="flex items-center gap-2 text-[13px] ct-t2 mt-3">
+          <input type="checkbox" checked={s.requirePaperChecks !== false} onChange={(e) => save((x) => ({ ...x, requirePaperChecks: e.target.checked }))} />
+          {t("Cashier must tick the paper signatures before paying")}
+        </label>
+      </section>
+
+      <section className={card}>
+        <div className={h}>{t("Categories")}</div>
+        <div className="space-y-1.5 max-h-[300px] overflow-y-auto ct-scroll pe-1">
+          {s.categories.map((c) => (
+            <div key={c.id} className="flex items-center gap-2">
+              <input className={`${inputCls} !py-1.5 w-24`} defaultValue={c.code} onBlur={(e) => save((x) => ({ ...x, categories: x.categories.map((y) => (y.id === c.id ? { ...y, code: e.target.value.trim() } : y)) }))} />
+              <input className={`${inputCls} !py-1.5`} defaultValue={c.name} onBlur={(e) => e.target.value.trim() && save((x) => ({ ...x, categories: x.categories.map((y) => (y.id === c.id ? { ...y, name: e.target.value.trim() } : y)) }))} />
+              <button type="button" className="text-rose-500 text-[13px] px-2" title={t("Remove")} onClick={() => { if (s.categories.length > 1 && confirm(`${t("Remove")} ${c.name}?`)) save((x) => ({ ...x, categories: x.categories.filter((y) => y.id !== c.id) })); }}>✕</button>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-2 mt-3">
+          <input className={`${inputCls} !py-1.5 w-24`} placeholder={t("Code")} value={cat.code} onChange={(e) => setCat({ ...cat, code: e.target.value })} />
+          <input className={`${inputCls} !py-1.5`} placeholder={t("New category")} value={cat.name} onChange={(e) => setCat({ ...cat, name: e.target.value })} />
+          <Btn onClick={() => { if (!cat.name.trim()) return; save((x) => ({ ...x, categories: [...x.categories, { id: uid("cat"), name: cat.name.trim(), code: cat.code.trim() }] })); setCat({ name: "", code: "" }); }}>Add</Btn>
+        </div>
+      </section>
+
+      <section className={`${card} xl:col-span-2`}>
+        <div className="flex items-center justify-between mb-3">
+          <div className={h.replace("mb-3", "")}>{t("Accounts")}</div>
+          <Btn small onClick={() => setAcc({ id: "", name: "", type: "bank", code: "", opening: "", bankName: "", accountNumber: "", accountTitle: "", receiveDefault: false })}>+ {t("Add account")}</Btn>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2.5">
+          {s.accounts.map((a) => (
+            <div key={a.id} className="rounded-xl ct-chip p-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-semibold ct-h">{a.type === "cash" ? "💵" : a.type === "wallet" ? "📱" : "🏦"} {a.name}</div>
+                <button type="button" className="text-[12px] font-semibold text-emerald-500" onClick={() => setAcc({ ...a, opening: String(a.opening || "") })}>{t("Edit")}</button>
+              </div>
+              <div className="text-[12px] ct-t2">{[a.code, a.accountNumber, a.receiveDefault ? t("receives customer bank payments") : ""].filter(Boolean).join(" · ")}</div>
+              <div className="text-[12px] ct-t3">{t("Opening")}: {fmtMoney(a.opening || 0)}</div>
+            </div>
+          ))}
+        </div>
+        <div className="text-[12px] ct-t3 mt-2">{t("Customer payments go to: Cash → cash account, Bank Transfer / Cheque → the bank marked to receive, Easypaisa / JazzCash → wallet.")}</div>
+      </section>
+
+      {acc && (
+        <Modal title={acc.id ? "Edit account" : "Add account"} onClose={() => setAcc(null)}>
+          <Field label="Account name"><input className={inputCls} value={acc.name} onChange={(e) => setAcc({ ...acc, name: e.target.value })} placeholder="HBL Current A/c" /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Type">
+              <select className={inputCls} value={acc.type} disabled={acc.id === "acc_cash"} onChange={(e) => setAcc({ ...acc, type: e.target.value })}>
+                <option value="cash">{t("Cash")}</option><option value="bank">{t("Bank")}</option><option value="wallet">JazzCash / Easypaisa</option>
+              </select>
+            </Field>
+            <Field label="Code"><input className={inputCls} value={acc.code} onChange={(e) => setAcc({ ...acc, code: e.target.value })} placeholder="1.2.01" /></Field>
+          </div>
+          {acc.type !== "cash" && (
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Bank name"><input className={inputCls} value={acc.bankName || ""} onChange={(e) => setAcc({ ...acc, bankName: e.target.value })} /></Field>
+              <Field label="Account number"><input className={inputCls} value={acc.accountNumber || ""} onChange={(e) => setAcc({ ...acc, accountNumber: e.target.value })} /></Field>
+            </div>
+          )}
+          <Field label="Opening balance (Rs)"><input type="number" className={inputCls} value={acc.opening} onChange={(e) => setAcc({ ...acc, opening: e.target.value })} /></Field>
+          {acc.type === "bank" && (
+            <label className="flex items-center gap-2 text-[13px] ct-t2 mb-4"><input type="checkbox" checked={!!acc.receiveDefault} onChange={(e) => setAcc({ ...acc, receiveDefault: e.target.checked })} />{t("Customer bank / cheque payments come into this account")}</label>
+          )}
+          <div className="flex gap-2 justify-between">
+            {acc.id && acc.id !== "acc_cash" ? <Btn variant="danger" onClick={() => { if (confirm(t("Remove this account?"))) { save((x) => ({ ...x, accounts: x.accounts.filter((y) => y.id !== acc.id) })); setAcc(null); } }}>Remove</Btn> : <span />}
+            <div className="flex gap-2">
+              <Btn variant="ghost" onClick={() => setAcc(null)}>Cancel</Btn>
+              <Btn onClick={() => {
+                if (!acc.name.trim()) { alert(t("Please enter a name.")); return; }
+                const rec = { ...acc, name: acc.name.trim(), opening: Number(acc.opening) || 0, id: acc.id || uid("acc") };
+                save((x) => {
+                  let accounts = x.accounts.some((y) => y.id === rec.id) ? x.accounts.map((y) => (y.id === rec.id ? rec : y)) : [...x.accounts, rec];
+                  if (rec.receiveDefault) accounts = accounts.map((y) => (y.id === rec.id ? y : { ...y, receiveDefault: false }));
+                  return { ...x, accounts };
+                });
+                setAcc(null);
+              }}>Save</Btn>
+            </div>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function MySignatureModal({ fin, currentUser, onClose }) {
+  const sig = finLatestSignature(fin.settings, finUserKey(currentUser));
+  const [editing, setEditing] = useState(!sig);
+  return (
+    <Modal title="My Signature" onClose={onClose}>
+      <div className="text-[12.5px] ct-t2 -mt-1 mb-3">{t("This signature is printed on every voucher you approve.")}</div>
+      {editing ? (
+        <FinSignaturePad onSave={async (d) => { await finSaveSignature(currentUser, d); setEditing(false); }} onCancel={sig ? () => setEditing(false) : null} />
+      ) : (
+        <div>
+          <div className="rounded-xl border border-slate-200 p-4 flex justify-center" style={{ background: "#fff" }}><img src={sig.dataUrl} alt="" className="h-16" /></div>
+          <div className="flex gap-2 mt-3"><Btn onClick={() => setEditing(true)}>Change signature</Btn><Btn variant="ghost" onClick={onClose}>Close</Btn></div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+
+/* ============================================================
+   PAYMENT VOUCHERS
+   cashier: voucher + kisht plan → print → payee takes paper to approver
+   approver: scan → approve as-is / change plan / reject → signs paper by hand
+   cashier: scan → due kisht → pays → own + payee signature → Pay
+   ============================================================ */
+
+let finPendingOpenId = null;
+let finPendingPrintId = null;
+
+function finVoucherTitle(v) {
+  const methods = Array.from(new Set(finPlanOf(v).map((k) => k.method)));
+  if (methods.length === 1 && methods[0] === "Cheque") return "Cheque Payment Voucher";
+  if (methods.length === 1 && methods[0] === "Bank") return "Bank Payment Voucher";
+  if (methods.length === 1) return "Cash Payment Voucher";
+  return "Payment Voucher";
+}
+function finCreditLine(v, settings) {
+  const plan = finPlanOf(v);
+  const accNames = Array.from(new Set(plan.map((k) => (k.method === "Cash" ? finCashAccount(settings).name : k.accountName || k.bankName || (k.method === "Bank" ? "Bank account" : "Bank (cheque)")))));
+  if (plan.length === 1 && plan[0].method === "Cash") {
+    const c = finCashAccount(settings);
+    return { code: c.code || "", name: c.name, sub: v.particulars };
+  }
+  if (plan.length === 1 && v.approval) {
+    const a = finAccountFor(settings, plan[0].accountId);
+    return { code: (a && a.code) || plan[0].accountCode || "", name: accNames[0], sub: v.particulars };
+  }
+  return { code: "", name: accNames.join(" / "), sub: plan.length > 1 ? "Schedule below" : v.particulars };
+}
+
+/* ---------------- Print: voucher ---------------- */
+
+const FIN_CELL = { border: "1px solid #333", padding: "1.3mm 1.6mm", verticalAlign: "top" };
+const FIN_HEAD = { ...FIN_CELL, background: "#f1f5f9", fontWeight: 700, fontSize: ".88em", textAlign: "center", verticalAlign: "middle" };
+const FIN_NUM = { textAlign: "right", whiteSpace: "nowrap" };
+
+function FinDocHeader({ company, qrText, title, sub }) {
+  return (
+    <>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "3mm" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "2.5mm", minWidth: 0 }}>
+          {company.logoUrl ? <img src={company.logoUrl} alt="" style={{ width: "11mm", height: "11mm", objectFit: "contain" }} /> : (
+            <div style={{ width: "11mm", height: "11mm", borderRadius: "1.6mm", background: "#0f172a", color: "#d4a94f", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "1.2em" }}>{uiInitials(company.companyName)}</div>
+          )}
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 900, fontSize: "1.32em", textTransform: "uppercase", lineHeight: 1.1 }}>{company.companyName}</div>
+            <div style={{ fontSize: ".72em", fontWeight: 700, color: "#047857", letterSpacing: ".08em", textTransform: "uppercase" }}>Construction Materials Supplier</div>
+            {(company.companyAddress || company.companyPhone) && <div style={{ fontSize: ".74em", color: "#4b5563" }}>{[company.companyAddress, company.companyPhone].filter(Boolean).join(" · ")}</div>}
+          </div>
+        </div>
+        {qrText && <QrSvg text={qrText} sizeMm={22} />}
+      </div>
+      <div style={{ textAlign: "center", margin: "2.5mm 0 2mm" }}>
+        <span style={{ fontSize: "1.3em", fontWeight: 800, borderBottom: "2px solid #111", paddingBottom: ".4mm" }}>{title}</span>
+        {sub && <div style={{ fontSize: ".74em", color: "#6b7280", marginTop: "1mm" }}>{sub}</div>}
+      </div>
+    </>
+  );
+}
+
+function FinSignRow({ items }) {
+  return (
+    <div style={{ display: "flex", gap: "3mm", marginTop: "9mm", alignItems: "flex-end" }}>
+      {items.map((it) => (
+        <div key={it.label} style={{ flex: 1, textAlign: "center", fontSize: ".84em" }}>
+          {it.img ? <img src={it.img} alt="" style={{ height: "8mm", maxWidth: "100%", objectFit: "contain", display: "block", margin: "0 auto" }} /> : null}
+          {it.top ? <div style={{ fontWeight: it.bold ? 700 : 400, color: it.bold ? "#111" : "#475569", fontSize: it.bold ? "1em" : ".86em" }}>{it.top}</div> : (!it.img && <div style={{ height: "4mm" }} />)}
+          <div style={{ borderTop: "1px solid #111", paddingTop: "1mm", marginTop: "1mm" }}>{it.label}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function VoucherPaperDoc({ voucher: v, fin, company, size, copies, include, fit }) {
+  const settings = fin.settings;
+  const plan = finPlanOf(v);
+  const credit = finCreditLine(v, settings);
+  const ap = v.approval;
+  const sig = ap && ap.sigId ? finSignatureById(settings, ap.by.key, ap.sigId) : null;
+  const showPlan = include.plan !== false && (plan.length > 1 || plan[0].date !== v.date || plan[0].method !== "Cash" || !!ap);
+  const stamp = v.status === "Cancelled" ? "CANCELLED" : v.status === "Rejected" ? "REJECTED" : "";
+  return (
+    <div style={{ ...printDocStyle(size, false, fit), fontFamily: "Inter, Arial, sans-serif" }}>
+      <PrintCopyWrap copies={copies} thermal={false}>
+        {(copyLabel) => (
+          <div style={{ position: "relative" }}>
+            {stamp && <div style={{ position: "absolute", top: "38%", left: 0, right: 0, textAlign: "center", transform: "rotate(-18deg)", fontSize: "3.6em", fontWeight: 900, color: "rgba(225,29,72,.18)", zIndex: 1, pointerEvents: "none" }}>{stamp}</div>}
+            <FinDocHeader company={company} qrText={include.qr !== false ? finVoucherQrText(v) : ""} title={finVoucherTitle(v)}
+              sub={copyLabel ? (copyLabel === "Customer Copy" ? "Payee Copy" : copyLabel) : ""} />
+            <div style={{ display: "flex", justifyContent: "space-between", gap: "2mm", fontSize: ".95em", marginBottom: "2mm" }}>
+              <div><b>Voucher No:</b> {v.number}</div>
+              {v.costCenter && <div><b>Branch:</b> {v.costCenter}</div>}
+              <div><b>Date:</b> {fmtDate(v.date)}</div>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: ".9em", position: "relative", zIndex: 2 }}>
+              <thead><tr>
+                <th style={{ ...FIN_HEAD, width: "14%" }}>Code</th><th style={FIN_HEAD}>Particulars</th><th style={{ ...FIN_HEAD, width: "13%" }}>Cost Center</th>
+                <th style={{ ...FIN_HEAD, width: "11%" }}>Receipt No</th><th style={{ ...FIN_HEAD, width: "15%" }}>Debit</th><th style={{ ...FIN_HEAD, width: "15%" }}>Credit</th>
+              </tr></thead>
+              <tbody>
+                <tr>
+                  <td style={FIN_CELL}>{v.categoryCode || ""}</td>
+                  <td style={FIN_CELL}><b>{v.payee}</b><div style={{ fontSize: ".9em" }}>{v.particulars}</div><div style={{ fontSize: ".82em", color: "#6b7280" }}>{v.categoryName}</div></td>
+                  <td style={FIN_CELL}>{v.costCenter || ""}</td><td style={FIN_CELL}>{v.receiptNo || ""}</td>
+                  <td style={{ ...FIN_CELL, ...FIN_NUM }}>{finMoney2(v.amount)}</td><td style={{ ...FIN_CELL, ...FIN_NUM }}>0.00</td>
+                </tr>
+                <tr>
+                  <td style={FIN_CELL}>{credit.code}</td>
+                  <td style={FIN_CELL}><b>{credit.name}</b>{credit.sub && <div style={{ fontSize: ".9em" }}>{credit.sub}</div>}</td>
+                  <td style={FIN_CELL}>{v.costCenter || ""}</td><td style={FIN_CELL}></td>
+                  <td style={{ ...FIN_CELL, ...FIN_NUM }}>0.00</td><td style={{ ...FIN_CELL, ...FIN_NUM }}>{finMoney2(v.amount)}</td>
+                </tr>
+                <tr>
+                  <td style={{ ...FIN_CELL, textAlign: "right" }} colSpan={4}><b>Total Rs</b></td>
+                  <td style={{ ...FIN_CELL, ...FIN_NUM }}><b>{finMoney2(v.amount)}</b></td><td style={{ ...FIN_CELL, ...FIN_NUM }}><b>{finMoney2(v.amount)}</b></td>
+                </tr>
+              </tbody>
+            </table>
+            <div style={{ marginTop: "2mm", fontSize: ".95em" }}><b>Rupees:</b> <u>{finAmountInWords(v.amount)}</u></div>
+
+            {showPlan && (
+              <div style={{ marginTop: "2.5mm" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1mm" }}>
+                  <b style={{ fontSize: ".95em" }}>{ap ? `Payment Schedule (${plan.length} ${plan.length > 1 ? "kisht" : "payment"})` : "Kishtein — cashier ki tajweez (admin approval baqi)"}</b>
+                  {ap && v.status !== "Cancelled" && <span style={{ border: "2px solid #059669", color: "#059669", fontWeight: 900, letterSpacing: ".08em", padding: ".4mm 2.5mm", borderRadius: "1.2mm", transform: "rotate(-5deg)", fontSize: ".95em" }}>APPROVED</span>}
+                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: ".86em" }}>
+                  <thead><tr>
+                    <th style={{ ...FIN_HEAD, width: "6%" }}>#</th><th style={{ ...FIN_HEAD, width: "15%" }}>Mahina</th><th style={{ ...FIN_HEAD, width: "15%" }}>Date</th>
+                    <th style={{ ...FIN_HEAD, width: "17%" }}>Raqam</th><th style={FIN_HEAD}>Kaise</th><th style={{ ...FIN_HEAD, width: "17%" }}>{ap ? "Status / Sign" : "Payee sign"}</th>
+                  </tr></thead>
+                  <tbody>
+                    {plan.map((k, i) => (
+                      <tr key={k.id}>
+                        <td style={FIN_CELL}>{i + 1}</td><td style={FIN_CELL}>{finMonthLabel(k.date)}</td><td style={FIN_CELL}>{fmtDate(k.date)}</td>
+                        <td style={{ ...FIN_CELL, ...FIN_NUM }}>{finMoney2(k.amount)}</td><td style={FIN_CELL}>{finKishtMethodText(k)}</td>
+                        <td style={FIN_CELL}>{k.status === "Paid" && k.paid ? `Paid ✓ ${fmtDate(k.paid.date)}` : ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {v.status === "Cancelled" && v.cancellation && (
+              <div style={{ marginTop: "2mm", color: "#be123c", fontSize: ".86em" }}><b>Cancelled:</b> {v.cancellation.reason}</div>
+            )}
+
+            <FinSignRow items={[
+              { label: "Prepared By", top: v.createdBy ? v.createdBy.name : "", bold: true },
+              { label: "Approved By", img: sig ? sig.dataUrl : "", top: ap ? `${ap.by.name} · ${fmtDateTime(ap.at)}` : "" },
+              { label: "Paid By (Cashier)" },
+              { label: "Received By (Payee)" },
+            ]} />
+            <div style={{ marginTop: "3mm", paddingTop: "1mm", borderTop: "1px dashed #cbd5e1", display: "flex", justifyContent: "space-between", gap: "3mm", fontSize: ".7em", color: "#64748b" }}>
+              <span>Approval aur payment sirf QR scan se check hogi — kagaz ka sign kafi nahi.</span>
+              <span style={{ whiteSpace: "nowrap" }}>Printed {fmtDateTime(new Date().toISOString())} · v{finRev(v)}</span>
+            </div>
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+function VoucherThermalDoc({ voucher: v, company, size, copies, include }) {
+  const plan = finPlanOf(v);
+  const ap = v.approval;
+  return (
+    <div style={printDocStyle(size, false, true)}>
+      <PrintCopyWrap copies={copies} thermal>
+        {(copyLabel) => (
+          <div>
+            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.15em" }}>{company.companyName}</div>
+            {company.companyPhone && <div style={{ textAlign: "center" }}>Ph: {company.companyPhone}</div>}
+            <PrintRule />
+            <div style={{ textAlign: "center", fontWeight: 700 }}>{finVoucherTitle(v).toUpperCase()}</div>
+            {copyLabel && <div style={{ textAlign: "center" }}>{copyLabel === "Customer Copy" ? "Payee Copy" : copyLabel}</div>}
+            {v.status === "Cancelled" && <div style={{ textAlign: "center", fontWeight: 700 }}>*** CANCELLED ***</div>}
+            <PrintRow l="Voucher" v={v.number} />
+            <PrintRow l="Date" v={fmtDate(v.date)} />
+            <PrintRule />
+            <div><b>{v.payee}</b>{v.payeePhone ? ` · ${v.payeePhone}` : ""}</div>
+            <div>{v.categoryName}</div>
+            {v.particulars && <div>{v.particulars}</div>}
+            <PrintRule />
+            <PrintRow l="AMOUNT" v={`Rs ${finMoney2(v.amount)}`} bold big />
+            <div style={{ fontSize: ".9em" }}>{finAmountInWords(v.amount)}</div>
+            {include.plan !== false && (
+              <>
+                <PrintRule />
+                <div style={{ fontWeight: 700 }}>{ap ? "SCHEDULE (APPROVED)" : "KISHTEIN (approval baqi)"}</div>
+                {plan.map((k, i) => (
+                  <div key={k.id}>
+                    <PrintRow l={`${i + 1}. ${fmtDate(k.date)}`} v={finMoney2(k.amount)} />
+                    <div style={{ fontSize: ".88em" }}>{finKishtMethodText(k)}{k.status === "Paid" ? " · PAID" : ""}</div>
+                  </div>
+                ))}
+              </>
+            )}
+            <PrintRule />
+            <div>Prepared: {v.createdBy ? v.createdBy.name : ""}</div>
+            {ap && <div>Approved: {ap.by.name} · {fmtDateTime(ap.at)}</div>}
+            {["Approved By", "Paid By (Cashier)", "Received By (Payee)"].map((l) => (
+              <div key={l} style={{ marginTop: "7mm", borderTop: "1px solid #000", width: "75%", marginInline: "auto", textAlign: "center", paddingTop: "1mm" }}>{l}</div>
+            ))}
+            {include.qr !== false && <div style={{ display: "flex", justifyContent: "center", marginTop: "3mm" }}><QrSvg text={finVoucherQrText(v)} sizeMm={size === "t58" ? 26 : 30} /></div>}
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+function VoucherPrintDialog({ voucher, fin, company, onClose }) {
+  const phone = String(voucher.payeePhone || "").trim();
+  const wa = phone ? waLink(phone, [`${company.companyName}`, `${finVoucherTitle(voucher)} ${voucher.number}`, `Amount: Rs ${finMoney2(voucher.amount)}`, `${voucher.particulars || voucher.categoryName}`].join("\n")) : "";
+  return (
+    <PrintDialog
+      kind="voucher2"
+      title="Print Voucher"
+      subtitle={`${voucher.number} · ${voucher.payee} · Rs ${finMoney2(voucher.amount)}`}
+      includeDefs={[
+        { key: "qr", label: "QR code", sub: "Scan to check approval / payment", default: true },
+        { key: "plan", label: "Kisht schedule", sub: "Dates, amounts, method", default: true },
+      ]}
+      sizeOrder={["v5", "t80", "t58"]}
+      defaultSize="v5"
+      copyLabels={[[1, "1 Copy"], [2, "2 Copies (Office + Payee)"]]}
+      fileName={`Voucher-${voucher.number}`}
+      waHref={wa}
+      onClose={onClose}
+      renderDoc={(p) => (PRINT_SIZES[p.size].thermal
+        ? <VoucherThermalDoc voucher={voucher} company={company} {...p} />
+        : <VoucherPaperDoc voucher={voucher} fin={fin} company={company} {...p} />)}
+    />
+  );
+}
+
+/* ---------------- Print: kisht payment slip ---------------- */
+
+function finSlipData(v, kishtId) {
+  const plan = finPlanOf(v);
+  const idx = Math.max(0, plan.findIndex((k) => k.id === kishtId));
+  const k = plan[idx];
+  const paidBefore = roundMoney(plan.filter((x, i) => i < idx && x.status === "Paid").reduce((s, x) => s + Number(x.amount), 0));
+  const left = roundMoney(Number(v.amount) - finPaidSum(plan));
+  const next = plan.find((x) => x.status !== "Paid" && x.id !== k.id);
+  return { plan, idx, k, paidBefore, left, next };
+}
+
+function KishtSlipPaperDoc({ voucher: v, kishtId, company, size, copies, fit }) {
+  const { plan, idx, k, paidBefore, left, next } = finSlipData(v, kishtId);
+  const box = { flex: 1, border: "1px solid #cbd5e1", borderRadius: "1.2mm", padding: "1.2mm 2mm" };
+  return (
+    <div style={{ ...printDocStyle(size, false, fit), fontFamily: "Inter, Arial, sans-serif" }}>
+      <PrintCopyWrap copies={copies} thermal={false}>
+        {() => (
+          <div>
+            <FinDocHeader company={company} qrText={finVoucherQrText(v, idx + 1)} title={`Payment Slip — Kisht ${idx + 1} of ${plan.length}`} />
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: ".95em", marginBottom: "2mm" }}>
+              <div><b>Voucher:</b> {v.number}</div>
+              <div><b>Date:</b> {fmtDate(k.paid ? k.paid.date : todayISO())}</div>
+            </div>
+            <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: ".9em" }}>
+              <thead><tr><th style={FIN_HEAD}>Payee</th><th style={{ ...FIN_HEAD, width: "36%" }}>Kaise</th><th style={{ ...FIN_HEAD, width: "22%" }}>Raqam</th></tr></thead>
+              <tbody><tr>
+                <td style={FIN_CELL}><b>{v.payee}</b><div style={{ fontSize: ".9em" }}>{v.particulars || v.categoryName}</div></td>
+                <td style={FIN_CELL}>{finKishtMethodText(k)}{k.method === "Cheque" ? <div>Cheque date {fmtDate(k.date)}</div> : null}</td>
+                <td style={{ ...FIN_CELL, ...FIN_NUM }}><b>{finMoney2(k.amount)}</b></td>
+              </tr></tbody>
+            </table>
+            <div style={{ marginTop: "2mm", fontSize: ".95em" }}><b>Rupees:</b> <u>{finAmountInWords(k.amount)}</u></div>
+            <div style={{ display: "flex", gap: "2mm", marginTop: "2mm", fontSize: ".86em" }}>
+              <div style={box}><b>Voucher kul:</b> {finMoney2(v.amount)}</div>
+              <div style={box}><b>Pehle diya:</b> {finMoney2(paidBefore)}</div>
+              <div style={box}><b>Baqi:</b> {finMoney2(left)}{next ? ` (${fmtDate(next.date)})` : ""}</div>
+            </div>
+            <FinSignRow items={[
+              { label: "Approved By", top: v.approval ? `${v.approval.by.name} · ${fmtDate(v.approval.at)}` : "" },
+              { label: "Paid By (Cashier)", top: k.paid ? k.paid.by.name : "", bold: true },
+              { label: "Received By (Payee)" },
+            ]} />
+            <div style={{ marginTop: "3mm", paddingTop: "1mm", borderTop: "1px dashed #cbd5e1", display: "flex", justifyContent: "space-between", fontSize: ".7em", color: "#64748b" }}>
+              <span>Is slip ko voucher ke saath staple karein · QR scan se check karein</span>
+              <span>Printed {fmtDateTime(new Date().toISOString())}</span>
+            </div>
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+function KishtSlipThermalDoc({ voucher: v, kishtId, company, size, copies }) {
+  const { plan, idx, k, left, next } = finSlipData(v, kishtId);
+  return (
+    <div style={printDocStyle(size, false, true)}>
+      <PrintCopyWrap copies={copies} thermal>
+        {() => (
+          <div>
+            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.15em" }}>{company.companyName}</div>
+            {company.companyPhone && <div style={{ textAlign: "center" }}>Ph: {company.companyPhone}</div>}
+            <PrintRule />
+            <div style={{ textAlign: "center", fontWeight: 700 }}>PAYMENT SLIP · KISHT {idx + 1}/{plan.length}</div>
+            <PrintRow l="Voucher" v={v.number} />
+            <PrintRow l="Date" v={fmtDate(k.paid ? k.paid.date : todayISO())} />
+            <PrintRule />
+            <div><b>{v.payee}</b></div>
+            {v.particulars && <div>{v.particulars}</div>}
+            <PrintRule />
+            <PrintRow l={k.method === "Bank" ? "ACCOUNT" : k.method.toUpperCase()} v={`Rs ${finMoney2(k.amount)}`} bold big />
+            <div style={{ fontSize: ".88em" }}>{finAmountInWords(k.amount)}</div>
+            {k.method !== "Cash" && <div style={{ fontSize: ".9em" }}>{finKishtMethodText(k)}</div>}
+            <PrintRule />
+            <PrintRow l="Voucher kul" v={finMoney2(v.amount)} />
+            <PrintRow l="Baqi" v={finMoney2(left)} />
+            {next && <PrintRow l="Agli kisht" v={fmtDate(next.date)} />}
+            <PrintRule />
+            {v.approval && <div>Approved: {v.approval.by.name} {fmtDate(v.approval.at)}</div>}
+            {k.paid && <div>Paid by: {k.paid.by.name}</div>}
+            <div style={{ marginTop: "8mm", borderTop: "1px solid #000", width: "70%", marginInline: "auto", textAlign: "center", paddingTop: "1mm" }}>Received By</div>
+            <div style={{ display: "flex", justifyContent: "center", marginTop: "3mm" }}><QrSvg text={finVoucherQrText(v, idx + 1)} sizeMm={size === "t58" ? 26 : 30} /></div>
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+function KishtSlipPrintDialog({ voucher, kishtId, company, onClose }) {
+  const { plan, idx, k } = finSlipData(voucher, kishtId);
+  return (
+    <PrintDialog
+      kind="kishtslip"
+      title="Print Payment Slip"
+      subtitle={`${voucher.number} · ${t("Kisht")} ${idx + 1}/${plan.length} · ${fmtMoney(k.amount)}`}
+      includeDefs={[]}
+      sizeOrder={["t80", "t58", "v5"]}
+      defaultSize="t80"
+      copyLabels={[[1, "1 Copy"], [2, "2 Copies (Office + Payee)"]]}
+      fileName={`Slip-${voucher.number}-K${idx + 1}`}
+      onClose={onClose}
+      renderDoc={(p) => (PRINT_SIZES[p.size].thermal
+        ? <KishtSlipThermalDoc voucher={voucher} kishtId={kishtId} company={company} {...p} />
+        : <KishtSlipPaperDoc voucher={voucher} kishtId={kishtId} company={company} {...p} />)}
+    />
+  );
+}
+
+/* ---------------- Form (cashier: new / edit + kisht plan) ---------------- */
+
+function finCleanPlan(plan) {
+  return plan
+    .map((k) => ({ ...k, amount: roundMoney(Number(k.amount) || 0) }))
+    .sort((a, b) => ((a.status === "Paid") === (b.status === "Paid") ? String(a.date).localeCompare(String(b.date)) : a.status === "Paid" ? -1 : 1));
+}
+
+function VoucherForm({ fin, currentUser, branches, initial, onClose, onSaved }) {
+  const settings = fin.settings;
+  const editing = !!initial;
+  const rule = finApproverRule(settings, currentUser);
+  const defaultBranch = (branches || []).find((b) => b.id === currentUser.branchId) || (branches || [])[0];
+  const [f, setF] = useState(() => initial ? {
+    date: initial.date, categoryId: initial.categoryId, payee: initial.payee, payeePhone: initial.payeePhone || "",
+    particulars: initial.particulars || "", amount: String(initial.amount), costCenter: initial.costCenter || "", receiptNo: initial.receiptNo || "",
+  } : {
+    date: todayISO(), categoryId: settings.categories[0] ? settings.categories[0].id : "", payee: "", payeePhone: "",
+    particulars: "", amount: "", costCenter: defaultBranch ? defaultBranch.name : "", receiptNo: "",
+  });
+  const [plan, setPlan] = useState(() => (initial ? finPlanOf(initial).map((k) => ({ ...k })) : []));
+  const [planTouched, setPlanTouched] = useState(editing);
+  const [quick, setQuick] = useState({ kind: "once", first: todayISO(), per: String(settings.limits.cashMax || ""), count: "3", method: "Cash" });
+  const [bill, setBill] = useState({ changed: false, dataUrl: "" });
+  const [newCat, setNewCat] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const amt = roundMoney(Number(f.amount) || 0);
+  const paidPart = plan.filter((k) => k.status === "Paid");
+  const paidSum = finPlanSum(paidPart);
+  const cashMax = Number(settings.limits.cashMax) || 0;
+  const overLimit = cashMax > 0 && amt > cashMax && !(rule && rule.cashExempt);
+
+  useEffect(() => {
+    if (editing && initial.hasBill) finFileGet(initial.id, "bill").then((d) => setBill((b) => (b.changed ? b : { changed: false, dataUrl: d }))).catch(() => {});
+  }, []);
+
+  // Until the cashier touches the plan, it is one cash payment today for the full amount.
+  useEffect(() => {
+    if (planTouched) return;
+    setPlan(amt > 0 ? [finNewKisht(todayISO(), amt, "Cash")] : []);
+  }, [amt, planTouched]);
+
+  const payees = useMemo(() => {
+    const m = new Map();
+    fin.vouchers.forEach((v) => { if (v.payee && !m.has(v.payee)) m.set(v.payee, v.payeePhone || ""); });
+    return Array.from(m.entries());
+  }, [fin.vouchers]);
+
+  function pickPayee(e) {
+    const name = e.target.value;
+    const hit = payees.find(([n]) => n === name);
+    setF({ ...f, payee: name, payeePhone: hit && !f.payeePhone ? hit[1] : f.payeePhone });
+  }
+  async function addCategory() {
+    const name = String(newCat.name || "").trim();
+    if (!name) return;
+    const id = uid("cat");
+    await finMutate("settings", (s) => {
+      const codes = s.categories.map((c) => Number(String(c.code || "").split(".").pop()) || 0);
+      const code = `5.1.${String(Math.max(0, ...codes.filter((n) => n < 99)) + 1).padStart(2, "0")}`;
+      return { ...s, categories: [...s.categories, { id, name, code }] };
+    });
+    setF((x) => ({ ...x, categoryId: id }));
+    setNewCat(null);
+  }
+  async function onBill(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try { setBill({ changed: true, dataUrl: await finResizeImage(file) }); } catch { alert(t("Could not read this image.")); }
+  }
+  function applyQuick(kind, q = quick) {
+    const rest = roundMoney(amt - paidSum);
+    setQuick({ ...q, kind });
+    if (!(rest > 0)) return;
+    setPlanTouched(true);
+    setPlan([...paidPart, ...finQuickPlan(kind, rest, q.first, { per: q.per, count: q.count, method: q.method }, settings)]);
+  }
+  function setQ(patch) {
+    const q = { ...quick, ...patch };
+    if (quick.kind !== "custom" && planTouched) applyQuick(quick.kind, q);
+    else setQuick(q);
+  }
+
+  async function save() {
+    const cat = settings.categories.find((c) => c.id === f.categoryId);
+    if (!cat) { alert(t("Please choose a category.")); return; }
+    if (!String(f.payee).trim()) { alert(t("Please enter who is being paid.")); return; }
+    if (!(amt > 0)) { alert(t("Please enter a valid amount.")); return; }
+    if (amt < paidSum) { alert(`${t("Amount cannot be less than what is already paid")}: ${fmtMoney(paidSum)}`); return; }
+    const clean = finCleanPlan(plan);
+    const err = finValidatePlan(clean, amt, settings, null);
+    if (err) { alert(err); return; }
+    setBusy(true);
+    const actor = finActor(currentUser);
+    const now = new Date().toISOString();
+    const base = {
+      date: f.date || todayISO(), categoryId: cat.id, categoryName: cat.name, categoryCode: cat.code || "",
+      payee: String(f.payee).trim(), payeePhone: String(f.payeePhone).trim(), particulars: String(f.particulars).trim(),
+      amount: amt, costCenter: f.costCenter, receiptNo: String(f.receiptNo).trim(), plan: clean,
+    };
+    const savedId = editing ? initial.id : uid("vch");
+    try {
+      await finMutate("vouchers", (list) => {
+        if (!editing) {
+          return [...list, {
+            id: savedId, number: finNextVoucherNumber(list, base.date), ...base, rev: 1, hasBill: !!bill.dataUrl, status: "Pending",
+            createdBy: actor, createdAt: now, updatedAt: now, approval: null, rejection: null, payment: null, cancellation: null,
+            history: [{ at: now, by: actor.name, action: "Created", note: `Rs ${finMoney2(amt)} · ${clean.length} ${clean.length > 1 ? "kisht" : "payment"}` }],
+          }];
+        }
+        return list.map((v) => {
+          if (v.id !== savedId) return v;
+          const changes = [];
+          if (Number(v.amount) !== amt) changes.push(`Amount ${finMoney2(v.amount)} → ${finMoney2(amt)}`);
+          if (v.payee !== base.payee) changes.push(`Payee ${v.payee} → ${base.payee}`);
+          if (v.categoryId !== base.categoryId) changes.push(`Category ${v.categoryName} → ${base.categoryName}`);
+          if (JSON.stringify(finPlanOf(v).map((k) => [k.date, Number(k.amount), k.method])) !== JSON.stringify(clean.map((k) => [k.date, k.amount, k.method]))) changes.push("Kisht plan changed");
+          const allPaid = clean.every((k) => k.status === "Paid");
+          return {
+            ...v, ...base, rev: finRev(v) + 1, hasBill: bill.changed ? !!bill.dataUrl : v.hasBill, updatedAt: now,
+            status: allPaid ? "Paid" : "Pending", approval: allPaid ? v.approval : null, rejection: null,
+            history: [...(v.history || []), { at: now, by: actor.name, action: "Edited", note: [changes.join(" · "), v.status !== "Pending" && !allPaid ? `was ${FIN_STATUS_LABEL[v.status]} → back to approval` : ""].filter(Boolean).join(" · ") }],
+          };
+        });
+      });
+      if (bill.changed) await finFilePut(savedId, "bill", bill.dataUrl);
+      onSaved && onSaved(savedId, !editing);
+      onClose();
+    } catch (e) {
+      console.error(e);
+      alert(t("Could not save. Check your internet connection and try again."));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const planErr = amt > 0 ? finValidatePlan(finCleanPlan(plan), amt, settings, null) : "";
+  return (
+    <Modal title={editing ? "Edit Voucher" : "New Voucher"} onClose={onClose} wide>
+      {editing && initial.status !== "Pending" && (
+        <div className="mb-4 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3.5 py-2.5 text-[13px] text-amber-600">
+          {t("After saving, this voucher goes back for approval. Paid kishts stay as they are. Print it again — the old paper shows as outdated when scanned.")}
+        </div>
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4">
+        <Field label="Category">
+          {newCat ? (
+            <div className="flex gap-2">
+              <input className={inputCls} autoFocus placeholder={t("New category name")} value={newCat.name} onChange={(e) => setNewCat({ ...newCat, name: e.target.value })} />
+              <Btn onClick={addCategory}>Add</Btn>
+              <Btn variant="ghost" onClick={() => setNewCat(null)}>✕</Btn>
+            </div>
+          ) : (
+            <div className="flex gap-2">
+              <select className={inputCls} value={f.categoryId} onChange={set("categoryId")}>
+                {settings.categories.map((c) => <option key={c.id} value={c.id}>{c.name}{c.code ? ` (${c.code})` : ""}</option>)}
+              </select>
+              <Btn variant="ghost" onClick={() => setNewCat({ name: "" })}>+ {t("New")}</Btn>
+            </div>
+          )}
+        </Field>
+        <Field label="Date"><input type="date" className={inputCls} value={f.date} onChange={set("date")} /></Field>
+        <Field label="Payee (who is paid)">
+          <input className={inputCls} list="fin-payees" value={f.payee} onChange={pickPayee} placeholder={t("Name — employee, supplier, anyone")} />
+          <datalist id="fin-payees">{payees.map(([n]) => <option key={n} value={n} />)}</datalist>
+        </Field>
+        <Field label="Phone"><input className={inputCls} value={f.payeePhone} onChange={set("payeePhone")} placeholder="03xx-xxxxxxx" /></Field>
+        <div className="md:col-span-2">
+          <Field label="Particulars"><input className={inputCls} value={f.particulars} onChange={set("particulars")} placeholder={t("e.g. October salary / 20 bags cement bill")} /></Field>
+        </div>
+        <Field label="Amount">
+          <input type="number" inputMode="decimal" className={`${inputCls} text-[18px] font-bold`} value={f.amount} onChange={set("amount")} placeholder="0" />
+        </Field>
+        <Field label="Cost Center">
+          <select className={inputCls} value={f.costCenter} onChange={set("costCenter")}>
+            <option value="">—</option>
+            {(branches || []).map((b) => <option key={b.id} value={b.name}>{b.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Receipt No"><input className={inputCls} value={f.receiptNo} onChange={set("receiptNo")} placeholder={t("Bill / receipt number (optional)")} /></Field>
+        <Field label="Bill / Receipt photo">
+          <div className="flex items-center gap-2">
+            <label className="inline-flex items-center gap-2 rounded-xl px-3.5 py-2.5 text-[13px] font-semibold ct-chip ct-h cursor-pointer">
+              <UiIcon name="image" className="w-4 h-4" />{bill.dataUrl ? t("Change photo") : t("Upload photo")}
+              <input type="file" accept="image/*" className="hidden" onChange={onBill} />
+            </label>
+            {bill.dataUrl && <img src={bill.dataUrl} alt="" className="h-11 w-11 rounded-lg object-cover border border-slate-200" />}
+            {bill.dataUrl && <button type="button" className="text-[12px] font-semibold text-rose-500" onClick={() => setBill({ changed: true, dataUrl: "" })}>{t("Remove")}</button>}
+          </div>
+        </Field>
+      </div>
+      {amt > 0 && (
+        <div className="rounded-xl border border-emerald-400/25 bg-emerald-400/10 px-3.5 py-2.5 text-[13px] text-emerald-600 font-semibold mb-4">
+          {t("Rupees")}: {finAmountInWords(amt)}
+        </div>
+      )}
+
+      {amt > 0 && (
+        <div className="rounded-2xl border border-slate-200 p-3.5 sm:p-4 mb-4">
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+            <div className="ct-display text-[15px] font-bold ct-h">🗓 {t("Payment plan — when and how")}</div>
+            <span className="rounded-full px-2.5 py-0.5 text-[11.5px] font-bold bg-amber-400/15 text-amber-600">{t("Admin will approve")}</span>
+          </div>
+          {overLimit && (
+            <div className="mb-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3.5 py-2.5 text-[13px] text-amber-600">
+              ⚠ {t("Limit")} {fmtMoney(cashMax)} — {t("more than this cannot be paid in cash at once. Split it into monthly kishts, or choose Account / Cheque.")}
+            </div>
+          )}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">
+            {[["once", t("One payment")], ["monthly", `${t("Every month")} ${quick.per ? fmtMoney(quick.per) : ""}`], ["equal", `${quick.count || 3} ${t("equal kishts")}`], ["custom", t("Write my own")]].map(([id, l]) => (
+              <button key={id} type="button" onClick={() => (id === "custom" ? (setPlanTouched(true), setQuick({ ...quick, kind: "custom" })) : applyQuick(id))}
+                className={`rounded-xl px-2 py-2.5 text-[12.5px] font-bold border-2 ${quick.kind === id ? "border-emerald-400 bg-emerald-400/10 ct-h" : "border-transparent ct-chip ct-t2"}`}>{l}</button>
+            ))}
+          </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+            <label className="text-[11.5px] ct-t3">{t("First / payment date")}<input type="date" className={`${inputCls} !py-1.5 mt-0.5`} value={quick.first} onChange={(e) => setQ({ first: e.target.value })} /></label>
+            <label className="text-[11.5px] ct-t3">{t("Per month (Rs)")}<input type="number" className={`${inputCls} !py-1.5 mt-0.5`} value={quick.per} onChange={(e) => setQ({ per: e.target.value })} /></label>
+            <label className="text-[11.5px] ct-t3">{t("How many kishts")}<input type="number" className={`${inputCls} !py-1.5 mt-0.5`} value={quick.count} onChange={(e) => setQ({ count: e.target.value })} /></label>
+            <label className="text-[11.5px] ct-t3">{t("Method")}
+              <select className={`${inputCls} !py-1.5 mt-0.5`} value={quick.method} onChange={(e) => setQ({ method: e.target.value })}>
+                {FIN_METHODS.map((m) => <option key={m} value={m}>{t(m === "Bank" ? "Account" : m)}</option>)}
+              </select>
+            </label>
+          </div>
+          <FinPlanEditor plan={plan} setPlan={(p) => { setPlanTouched(true); setQuick((q) => ({ ...q, kind: "custom" })); setPlan(p); }} amount={amt} settings={settings} rule={null} detailed={false} />
+          {planErr && <div className="mt-2 text-[12.5px] text-rose-500 font-semibold">⚠ {planErr}</div>}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 justify-end">
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={save} disabled={busy || !!planErr}>{busy ? t("Saving…") : editing ? t("Save & send for approval") : t("Send for approval + Print")}</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------- Approver decision ---------------- */
+
+function VoucherApproveModal({ fin, voucher: v, currentUser, onClose }) {
+  const settings = fin.settings;
+  const rule = finApproverRule(settings, currentUser);
+  const signMode = settings.signMode || "manual";
+  const original = useMemo(() => finPlanOf(v).map((k) => ({ ...k })), [v.id]);
+  const [plan, setPlan] = useState(() => original.map((k) => {
+    if (k.method === "Cash" || k.accountId) return { ...k };
+    const a = settings.accounts.find((x) => x.type !== "cash");
+    return { ...k, accountId: a ? a.id : "other", accountName: a ? a.name : "", accountCode: a ? a.code || "" : "", bankName: a ? a.bankName || a.name : "" };
+  }));
+  const [note, setNote] = useState("");
+  const mySig = finLatestSignature(settings, finUserKey(currentUser));
+  const [signing, setSigning] = useState(signMode === "digital" && !mySig);
+  const [busy, setBusy] = useState(false);
+  const clean = finCleanPlan(plan);
+  const err = finValidatePlan(clean, v.amount, settings, rule);
+  const sameAsCashier = clean.length === original.length && JSON.stringify(finCleanPlan(original).map((k) => [k.date, k.amount, k.method])) === JSON.stringify(clean.map((k) => [k.date, k.amount, k.method]));
+
+  async function approve() {
+    if (err) { alert(err); return; }
+    if (signMode === "digital" && !finLatestSignature(finState.settings, finUserKey(currentUser))) { alert(t("Please add your signature first.")); return; }
+    if (clean.some((k) => k.method !== "Cash" && (k.accountId === "other" || !k.accountId) && !String(k.bankName || "").trim())) { alert(t("Please enter the bank name.")); return; }
+    setBusy(true);
+    const actor = finActor(currentUser);
+    const at = new Date().toISOString();
+    const sig = signMode === "digital" ? finLatestSignature(finState.settings, actor.key) : null;
+    const cashAcc = finCashAccount(settings);
+    const finalPlan = clean.map((k) => (k.method === "Cash"
+      ? { ...k, accountId: cashAcc.id, accountName: cashAcc.name, accountCode: cashAcc.code || "", bankName: "" }
+      : { ...k, accountId: k.accountId === "other" ? "acc_unassigned" : k.accountId }));
+    try {
+      let blocked = "";
+      await finMutate("vouchers", (list) => list.map((x) => {
+        if (x.id !== v.id) return x;
+        if (x.status !== "Pending") { blocked = x.status; return x; }
+        return {
+          ...x, status: "Approved", plan: finalPlan, rev: sameAsCashier ? finRev(x) : finRev(x) + 1,
+          approval: { by: actor, at, sigId: sig ? sig.id : "", signMode, changed: !sameAsCashier, note: note.trim() },
+          rejection: null,
+          history: [...(x.history || []), { at, by: actor.name, action: sameAsCashier ? "Approved" : "Approved with changes", note: [`${finalPlan.length} ${finalPlan.length > 1 ? "kisht" : "payment"} · ${finMethodSummary({ plan: finalPlan })}`, note.trim()].filter(Boolean).join(" · ") }],
+        };
+      }));
+      if (blocked) alert(`${t("This voucher was already updated by someone else")}: ${t(FIN_STATUS_LABEL[blocked])}`);
+      onClose();
+    } catch (e) {
+      console.error(e);
+      alert(t("Could not save. Check your internet connection and try again."));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title="Approve Voucher" onClose={onClose} wide>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 -mt-1 mb-4 text-[13.5px] ct-t2">
+        <span className="font-bold ct-h">{v.number}</span><span>{v.categoryName}</span><span>{v.payee}</span>
+        <span className="font-bold ct-h text-[16px]">{fmtMoney(v.amount)}</span><span>· {t("plan by")} {v.createdBy ? v.createdBy.name : ""}</span>
+      </div>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase">{t("Cashier's plan — keep it or change it")}</div>
+        <span className={`rounded-full px-2.5 py-0.5 text-[11.5px] font-bold ${sameAsCashier ? "bg-emerald-400/15 text-emerald-600" : "bg-amber-400/15 text-amber-600"}`}>{sameAsCashier ? `✓ ${t("Same as cashier")}` : `✎ ${t("Changed")}`}</span>
+      </div>
+      <FinPlanEditor plan={plan} setPlan={setPlan} amount={v.amount} settings={settings} rule={rule} detailed original={original} />
+      {err && <div className="mt-2 text-[12.5px] text-rose-500 font-semibold">⚠ {err}</div>}
+      <div className="mt-4"><Field label="Note (optional)"><input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} /></Field></div>
+
+      {signMode === "digital" ? (
+        <>
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{t("Your signature")}</div>
+          {signing ? (
+            <FinSignaturePad onSave={async (d) => { await finSaveSignature(currentUser, d); setSigning(false); }} onCancel={mySig ? () => setSigning(false) : null} />
+          ) : (
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl border border-slate-200 px-3 py-1.5" style={{ background: "#fff" }}><img src={finLatestSignature(finState.settings, finUserKey(currentUser))?.dataUrl} alt="" className="h-12" /></div>
+              <button type="button" className="text-[12.5px] font-semibold text-emerald-500" onClick={() => setSigning(true)}>{t("Change")}</button>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="rounded-xl border border-sky-400/30 bg-sky-400/10 px-3.5 py-2.5 text-[13px] text-sky-600">
+          ✍ {t("After approving, sign the paper voucher by hand in “Approved By”. The system saves your name and the time.")}
+        </div>
+      )}
+
+      <div className="flex flex-wrap gap-2 justify-end mt-5">
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={approve} disabled={busy || signing || !!err}>{busy ? t("Saving…") : sameAsCashier ? `✓ ${t("Approve as is")}` : `✓ ${t("Approve with changes")}`}</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+/* ---------------- Cashier: pay one kisht ---------------- */
+
+function VoucherPayModal({ fin, voucher: v, kishtId, currentUser, onClose, onPaid }) {
+  const settings = fin.settings;
+  const plan = finPlanOf(v);
+  const idx = plan.findIndex((k) => k.id === kishtId);
+  const k = plan[idx];
+  const manual = (settings.signMode || "manual") === "manual";
+  const needChecks = settings.requirePaperChecks !== false;
+  const checks = [
+    ...(manual ? [["approver", "The approver's signature is on the paper"]] : []),
+    ["cashier", "I signed “Paid By (Cashier)”"],
+    ["payee", "The payee signed “Received By”"],
+  ];
+  const [tick, setTick] = useState({});
+  const [date, setDate] = useState(todayISO());
+  const [txnId, setTxnId] = useState("");
+  const [chequeNo, setChequeNo] = useState(k ? k.chequeNo || "" : "");
+  const [note, setNote] = useState("");
+  const [proof, setProof] = useState("");
+  const [busy, setBusy] = useState(false);
+  if (!k) return null;
+  const allTicked = !needChecks || checks.every(([id]) => tick[id]);
+  const chequeMissing = k.method === "Cheque" && !String(chequeNo).trim();
+
+  async function pay() {
+    if (!allTicked || chequeMissing) return;
+    setBusy(true);
+    const actor = finActor(currentUser);
+    const at = new Date().toISOString();
+    try {
+      let blocked = "";
+      await finMutate("vouchers", (list) => list.map((x) => {
+        if (x.id !== v.id) return x;
+        if (x.status !== "Approved") { blocked = x.status; return x; }
+        const p = finPlanOf(x);
+        const target = p.find((y) => y.id === kishtId);
+        if (!target || target.status === "Paid") { blocked = "Paid"; return x; }
+        const nextPlan = p.map((y) => (y.id === kishtId ? {
+          ...y, chequeNo: y.method === "Cheque" ? String(chequeNo).trim() : y.chequeNo, status: "Paid",
+          paid: { by: actor, at, date, txnId: txnId.trim(), note: note.trim(), hasProof: !!proof },
+        } : y));
+        const allPaid = nextPlan.every((y) => y.status === "Paid");
+        return {
+          ...x, plan: nextPlan, status: allPaid ? "Paid" : "Approved",
+          payment: allPaid ? { by: actor, at, date, note: note.trim(), hasProof: !!proof } : x.payment,
+          history: [...(x.history || []), { at, by: actor.name, action: p.length > 1 ? `Kisht ${idx + 1}/${p.length} paid` : "Paid", note: [fmtMoney(target.amount), finKishtMethodText({ ...target, chequeNo }), txnId.trim() && `Ref ${txnId.trim()}`, note.trim()].filter(Boolean).join(" · ") }],
+        };
+      }));
+      if (blocked) { alert(`${t("This voucher was already updated by someone else")}: ${t(FIN_STATUS_LABEL[blocked] || blocked)}`); setBusy(false); return; }
+      if (proof) await finFilePut(v.id, `paid-${kishtId}`, proof);
+      onPaid && onPaid(kishtId, plan.length > 1);
+      onClose();
+    } catch (e) {
+      console.error(e);
+      alert(t("Could not save. Check your internet connection and try again."));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal title={plan.length > 1 ? `${t("Pay kisht")} ${idx + 1} / ${plan.length}` : "Pay"} onClose={onClose}>
+      <div className="rounded-2xl border border-emerald-400/30 bg-emerald-400/10 px-4 py-3 mb-4">
+        <div className="text-[12.5px] ct-t2">{v.number} · {v.payee}</div>
+        <div className="ct-display text-[26px] font-bold ct-h">{fmtMoney(k.amount)}</div>
+        <div className="text-[13px] ct-t2">{finKishtMethodText(k)} · {t("due")} {fmtDate(k.date)}</div>
+      </div>
+      {k.method === "Cheque" && <Field label="Cheque No"><input className={inputCls} value={chequeNo} onChange={(e) => setChequeNo(e.target.value)} /></Field>}
+      {k.method === "Bank" && <Field label="Transaction / reference ID"><input className={inputCls} value={txnId} onChange={(e) => setTxnId(e.target.value)} /></Field>}
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Paid on"><input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} /></Field>
+        <Field label="Note (optional)"><input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      </div>
+      {needChecks && (
+        <div className="mb-3">
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{t("Before paying")}</div>
+          {checks.map(([id, l]) => (
+            <label key={id} className={`flex items-center gap-3 rounded-xl px-3.5 py-2.5 mb-2 cursor-pointer ${tick[id] ? "bg-emerald-400/10" : "ct-chip"}`}>
+              <input type="checkbox" className="w-5 h-5 accent-emerald-500" checked={!!tick[id]} onChange={(e) => setTick({ ...tick, [id]: e.target.checked })} />
+              <span className="text-[13.5px] ct-h">{t(l)}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      <Field label="Photo of signed paper (optional)">
+        <div className="flex items-center gap-2">
+          <label className="inline-flex items-center gap-2 rounded-xl px-3.5 py-2.5 text-[13px] font-semibold ct-chip ct-h cursor-pointer">
+            <UiIcon name="image" className="w-4 h-4" />{proof ? t("Change photo") : t("Take photo")}
+            <input type="file" accept="image/*" capture="environment" className="hidden" onChange={async (e) => {
+              const file = e.target.files && e.target.files[0];
+              if (file) { try { setProof(await finResizeImage(file)); } catch { alert(t("Could not read this image.")); } }
+            }} />
+          </label>
+          {proof && <img src={proof} alt="" className="h-11 w-11 rounded-lg object-cover" />}
+        </div>
+      </Field>
+      <button type="button" onClick={pay} disabled={busy || !allTicked || chequeMissing}
+        className="w-full ct-em-btn rounded-xl py-3.5 text-[16px] font-bold disabled:opacity-40 disabled:cursor-not-allowed">
+        {busy ? t("Saving…") : `${k.method === "Cash" ? "💵" : k.method === "Bank" ? "🏦" : "📝"} ${t("Pay")} ${fmtMoney(k.amount)}`}
+      </button>
+      {needChecks && !allTicked && <div className="text-center text-[12px] ct-t3 mt-2">{t("Tick all boxes to enable Pay")}</div>}
+      {chequeMissing && <div className="text-center text-[12px] text-rose-500 mt-2">{t("Enter the cheque number")}</div>}
+    </Modal>
+  );
+}
+
+function VoucherReasonModal({ title, label, confirmText, danger, onSubmit, onClose, children }) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  return (
+    <Modal title={title} onClose={onClose}>
+      {children}
+      <Field label={label}>
+        <textarea className={`${inputCls} min-h-[90px]`} value={reason} onChange={(e) => setReason(e.target.value)} autoFocus />
+      </Field>
+      <div className="flex gap-2 justify-end">
+        <Btn variant="ghost" onClick={onClose}>Close</Btn>
+        <Btn variant={danger ? "danger" : "primary"} disabled={busy || !reason.trim()} onClick={async () => {
+          setBusy(true);
+          try { await onSubmit(reason.trim()); onClose(); } catch (e) { console.error(e); alert(t("Could not save. Check your internet connection and try again.")); setBusy(false); }
+        }}>{confirmText}</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+async function finRejectVoucher(v, currentUser, reason) {
+  const actor = finActor(currentUser);
+  const at = new Date().toISOString();
+  await finMutate("vouchers", (list) => list.map((x) => (x.id === v.id && x.status === "Pending"
+    ? { ...x, status: "Rejected", rejection: { by: actor, at, reason }, history: [...(x.history || []), { at, by: actor.name, action: "Rejected", note: reason }] }
+    : x)));
+}
+async function finCancelVoucher(v, currentUser, reason) {
+  const actor = finActor(currentUser);
+  const at = new Date().toISOString();
+  await finMutate("vouchers", (list) => list.map((x) => (x.id === v.id && x.status !== "Cancelled"
+    ? { ...x, status: "Cancelled", rev: finRev(x) + 1, cancellation: { by: actor, at, reason, wasStatus: x.status }, history: [...(x.history || []), { at, by: actor.name, action: "Cancelled", note: `${reason}${finPaidSum(finPlanOf(x)) > 0 ? " · paid kishts reversed in Cash Book" : ""}` }] }
+    : x)));
+}
+async function finKishtPatch(v, kishtId, currentUser, patch, action) {
+  const actor = finActor(currentUser);
+  const at = new Date().toISOString();
+  await finMutate("vouchers", (list) => list.map((x) => {
+    if (x.id !== v.id) return x;
+    const p = finPlanOf(x);
+    const i = p.findIndex((k) => k.id === kishtId);
+    return { ...x, plan: p.map((k) => (k.id === kishtId ? { ...k, ...patch } : k)), history: [...(x.history || []), { at, by: actor.name, action, note: `Kisht ${i + 1}` }] };
+  }));
+}
+
+/* ---------------- Detail / scan result ---------------- */
+
+function FinStatusBanner({ v, fin, users, currentUser, focusK, rev }) {
+  const st = finVoucherState(v);
+  const settings = fin.settings;
+  const focus = focusK ? st.plan[focusK - 1] : null;
+  const cards = [];
+  const big = (tone, icon, title, sub) => {
+    const cls = { ok: "border-emerald-400/40 bg-emerald-400/10", bad: "border-rose-400/40 bg-rose-400/10", warn: "border-amber-400/40 bg-amber-400/10", done: "border-sky-400/40 bg-sky-400/10" }[tone];
+    const ic = { ok: "bg-emerald-500", bad: "bg-rose-500", warn: "bg-amber-500", done: "bg-sky-500" }[tone];
+    cards.push(
+      <div key={title} className={`rounded-2xl border px-4 py-3.5 flex items-center gap-3.5 ${cls}`}>
+        <span className={`w-11 h-11 rounded-full ${ic} text-white text-[20px] font-black flex items-center justify-center shrink-0`}>{icon}</span>
+        <div className="min-w-0"><div className="ct-display text-[18px] font-bold ct-h leading-tight">{title}</div>{sub && <div className="text-[13px] ct-t2 mt-0.5">{sub}</div>}</div>
+      </div>
+    );
+  };
+  if (rev && rev < finRev(v)) big("warn", "!", t("This paper is outdated"), t("The voucher was changed after this paper was printed. Print a new one."));
+  if (st.key === "cancelled") big("bad", "⊘", t("CANCELLED"), `${v.cancellation ? v.cancellation.reason : ""} — ${v.cancellation ? v.cancellation.by.name : ""}`);
+  else if (st.key === "rejected") big("bad", "✕", t("REJECTED"), `${v.rejection ? v.rejection.reason : ""} — ${v.rejection ? v.rejection.by.name : ""}`);
+  else if (st.key === "pending") {
+    const can = finCanApprove(settings, currentUser, v);
+    const who = finApproversFor(settings, users, v);
+    big(can ? "warn" : "bad", can ? "?" : "✕", can ? t("Waiting for your approval") : t("NOT APPROVED — send it to the admin"), can ? t("Check the plan, then approve or reject.") : `${t("Can approve")}: ${who.join(", ") || "—"} · ${t("Pay is locked")}`);
+  } else if (focus && focus.status === "Paid") {
+    big("bad", "!", t("ALREADY PAID"), `${t("Kisht")} ${focusK}: ${fmtMoney(focus.amount)} — ${fmtDate(focus.paid.date)} · ${focus.paid.by.name}`);
+  } else if (st.key === "paid") {
+    big("done", "✓", t("FULLY PAID"), `${fmtMoney(v.amount)} · ${st.total} ${st.total > 1 ? "kisht" : "payment"} · ${t("nothing more to pay")}`);
+  } else if (st.key === "due") {
+    big("ok", "✓", `${t("APPROVED")} — ${st.total > 1 ? `${t("Kisht")} ${st.nextIdx + 1} of ${st.total} ` : ""}${st.overdue ? t("overdue") : t("due now")}`, `${v.approval.by.name} · ${fmtDateTime(v.approval.at)} · ${fmtMoney(st.next.amount)} ${finKishtMethodText(st.next)}`);
+  } else if (st.key === "scheduled") {
+    big("warn", "📅", t("SCHEDULED — not yet"), `${t("Kisht")} ${st.nextIdx + 1}: ${fmtDate(st.next.date)} · ${fmtMoney(st.next.amount)} ${finKishtMethodText(st.next)} · ${t("Pay is locked until then")}`);
+  }
+  return <div className="space-y-2.5">{cards}</div>;
+}
+
+function VoucherDetail({ fin, voucher: v, users, currentUser, focusK, rev, onClose, onEdit, onAction }) {
+  const settings = fin.settings;
+  const [bill, setBill] = useState("");
+  const [zoom, setZoom] = useState("");
+  useEffect(() => { if (v.hasBill) finFileGet(v.id, "bill").then(setBill).catch(() => {}); }, [v.id, v.hasBill]);
+  const st = finVoucherState(v);
+  const canApprove = v.status === "Pending" && finCanApprove(settings, currentUser, v);
+  const isApprover = finCanApprove(settings, currentUser, v);
+  const staff = finIsStaff(currentUser);
+  const sig = v.approval && v.approval.sigId ? finSignatureById(settings, v.approval.by.key, v.approval.sigId) : null;
+  const today = todayISO();
+  const row = (l, val) => (val ? <div className="flex justify-between gap-4 py-1.5 border-b border-slate-200/60 text-[13.5px]"><span className="ct-t2">{t(l)}</span><span className="ct-h font-semibold text-end">{val}</span></div> : null);
+  return (
+    <Modal title={`${t("Voucher")} ${v.number}`} onClose={onClose} wide>
+      <FinStatusBanner v={v} fin={fin} users={users} currentUser={currentUser} focusK={focusK} rev={rev} />
+      <div className="flex flex-wrap items-center gap-2 mt-4 mb-3">
+        <FinPill status={v.status} />
+        <span className="ct-display text-[24px] font-bold ct-h">{fmtMoney(v.amount)}</span>
+        <span className="text-[12.5px] ct-t2">{finAmountInWords(v.amount)}</span>
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_270px] gap-5">
+        <div className="min-w-0">
+          {row("Payee", `${v.payee}${v.payeePhone ? ` · ${v.payeePhone}` : ""}`)}
+          {row("Category", `${v.categoryName}${v.categoryCode ? ` (${v.categoryCode})` : ""}`)}
+          {row("Particulars", v.particulars)}
+          {row("Date", fmtDate(v.date))}
+          {row("Prepared By", v.createdBy && `${v.createdBy.name} · ${fmtDateTime(v.createdAt)}`)}
+          {v.approval && row(v.approval.changed ? "Approved (plan changed)" : "Approved By", `${v.approval.by.name} · ${fmtDateTime(v.approval.at)}`)}
+          {v.approval && v.approval.note && row("Approver note", v.approval.note)}
+
+          <div className="mt-4 text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{st.total > 1 ? `${t("Kishtein")} · ${st.paidCount}/${st.total} ${t("paid")}` : t("Payment")}</div>
+          <div className="space-y-2">
+            {st.plan.map((k, i) => {
+              const isFocus = focusK === i + 1 || (!focusK && st.next && st.next.id === k.id);
+              const dueNow = k.date <= today || k.earlyOk;
+              const canPay = v.status === "Approved" && k.status !== "Paid" && staff && dueNow;
+              return (
+                <div key={k.id} className={`rounded-xl px-3 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 ${k.status === "Paid" ? "bg-emerald-400/10" : isFocus ? "ring-2 ring-emerald-400/60 ct-chip" : "ct-chip"}`}>
+                  <span className="w-7 h-7 rounded-lg ct-gold-bg text-[12px] font-black flex items-center justify-center">{i + 1}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13.5px] font-bold ct-h">{fmtMoney(k.amount)} <span className="font-normal ct-t2">· {fmtDate(k.date)} · {finKishtMethodText(k)}</span></div>
+                    <div className="text-[12px] ct-t3">
+                      {k.status === "Paid" ? `✓ ${t("Paid")} ${fmtDate(k.paid.date)} · ${k.paid.by.name}${k.paid.txnId ? ` · Ref ${k.paid.txnId}` : ""}` : v.status !== "Approved" ? t("Waiting for approval") : k.date < today ? `🔴 ${t("Overdue")}` : dueNow ? `🟢 ${t("Due")}${k.earlyOk && k.date > today ? ` (${t("early allowed")})` : ""}` : `📅 ${t("Scheduled")}`}
+                      {k.method === "Cheque" && k.status === "Paid" ? ` · ${k.chequeCleared ? `✅ ${t("Cleared")}` : `⏳ ${t("Not cleared")}`}` : ""}
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {canPay && <Btn small onClick={() => onAction("pay", k.id)}>💵 {t("Pay")}</Btn>}
+                    {v.status === "Approved" && k.status !== "Paid" && !dueNow && isApprover && <Btn small variant="ghost" onClick={() => finKishtPatch(v, k.id, currentUser, { earlyOk: true }, "Early payment allowed")}>{t("Allow early")}</Btn>}
+                    {k.status === "Paid" && <Btn small variant="ghost" onClick={() => onAction("slip", k.id)}><UiIcon name="printer" className="w-3.5 h-3.5" />{t("Slip")}</Btn>}
+                    {k.status === "Paid" && k.method === "Cheque" && <Btn small variant="ghost" onClick={() => finKishtPatch(v, k.id, currentUser, { chequeCleared: !k.chequeCleared }, k.chequeCleared ? "Cheque marked not cleared" : "Cheque cleared")}>{k.chequeCleared ? t("Not cleared") : `✅ ${t("Cleared")}`}</Btn>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="flex flex-wrap gap-2 mt-5">
+            {canApprove && <Btn onClick={() => onAction("approve")}>✓ {t("Approve")}</Btn>}
+            {canApprove && <Btn variant="danger" onClick={() => onAction("reject")}>✕ {t("Reject")}</Btn>}
+            <Btn variant="dark" onClick={() => onAction("print")}><UiIcon name="printer" className="w-4 h-4" />{t("Print voucher")}</Btn>
+            {v.status !== "Cancelled" && st.key !== "paid" && <Btn variant="ghost" onClick={onEdit}>✎ {t("Edit")}</Btn>}
+            {v.status !== "Cancelled" && <Btn variant="ghost" onClick={() => onAction("cancel")}>⊘ {t("Cancel Voucher")}</Btn>}
+          </div>
+        </div>
+
+        <div className="min-w-0 space-y-4">
+          {v.approval && (
+            <div className="rounded-2xl ct-chip p-3">
+              <div className="text-[11px] font-bold tracking-[.12em] ct-t3 uppercase mb-1.5">{t("Approved By")}</div>
+              {sig && <div className="rounded-lg px-2 py-1" style={{ background: "#fff" }}><img src={sig.dataUrl} alt="" className="h-12 mx-auto" /></div>}
+              <div className="text-[13px] ct-h font-semibold mt-1.5">{v.approval.by.name}</div>
+              <div className="text-[12px] ct-t2">{fmtDateTime(v.approval.at)} · {v.approval.signMode === "digital" ? t("system sign") : t("signs the paper by hand")}</div>
+            </div>
+          )}
+          {bill && <button type="button" onClick={() => setZoom(bill)} className="text-start w-full"><img src={bill} alt="" className="w-full h-28 object-cover rounded-xl" /><div className="text-[11.5px] ct-t2 mt-1">{t("Bill photo")}</div></button>}
+          <div>
+            <div className="text-[11px] font-bold tracking-[.12em] ct-t3 uppercase mb-2">{t("History")}</div>
+            <ol className="space-y-2.5 border-s-2 border-slate-300/40 ps-3 max-h-[300px] overflow-y-auto ct-scroll">
+              {[...(v.history || [])].reverse().map((h, i) => (
+                <li key={i} className="text-[12.5px]">
+                  <div className="ct-h font-semibold">{t(h.action)} <span className="ct-t3 font-normal">· {h.by}</span></div>
+                  <div className="ct-t3">{fmtDateTime(h.at)}</div>
+                  {h.note && <div className="ct-t2">{h.note}</div>}
+                </li>
+              ))}
+            </ol>
+          </div>
+        </div>
+      </div>
+      {zoom && (
+        <div className="fixed inset-0 z-[70] bg-black/85 flex items-center justify-center p-4" onClick={() => setZoom("")}>
+          <img src={zoom} alt="" className="max-w-full max-h-full rounded-xl" />
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// One voucher with all its actions (Vouchers page, Payments Due and the scanner use this).
+function VoucherWorkspace({ voucherId, focusK, rev, currentUser, users, branches, company, onClose }) {
+  const fin = useFin();
+  const [action, setAction] = useState(() => {
+    if (finPendingPrintId && finPendingPrintId === voucherId) { finPendingPrintId = null; return { name: "print" }; }
+    return null;
+  });
+  const [edit, setEdit] = useState(false);
+  const v = fin.vouchers.find((x) => x.id === voucherId);
+  if (!fin.loaded) return null;
+  if (!v) {
+    return (
+      <Modal title="Voucher" onClose={onClose}>
+        <div className="rounded-2xl border border-rose-400/40 bg-rose-400/10 px-4 py-4 ct-h font-semibold">✕ {t("Voucher not found — the QR is not from this shop, or the voucher was deleted.")}</div>
+      </Modal>
+    );
+  }
+  const close = () => setAction(null);
+  const act = (name, arg) => setAction({ name, arg });
+  return (
+    <>
+      {!action && !edit && (
+        <VoucherDetail fin={fin} voucher={v} users={users} currentUser={currentUser} focusK={focusK} rev={rev}
+          onClose={onClose} onEdit={() => setEdit(true)} onAction={act} />
+      )}
+      {edit && <VoucherForm fin={fin} currentUser={currentUser} branches={branches} initial={v} onClose={() => setEdit(false)} onSaved={() => setAction({ name: "print" })} />}
+      {action && action.name === "approve" && <VoucherApproveModal fin={fin} voucher={v} currentUser={currentUser} onClose={close} />}
+      {action && action.name === "pay" && (
+        <VoucherPayModal fin={fin} voucher={v} kishtId={action.arg} currentUser={currentUser} onClose={close}
+          onPaid={(kid, multi) => { if (multi) setTimeout(() => setAction({ name: "slip", arg: kid }), 0); }} />
+      )}
+      {action && action.name === "slip" && <KishtSlipPrintDialog voucher={v} kishtId={action.arg} company={company} onClose={close} />}
+      {action && action.name === "print" && <VoucherPrintDialog voucher={v} fin={fin} company={company} onClose={close} />}
+      {action && action.name === "reject" && (
+        <VoucherReasonModal title="Reject Voucher" label="Reason" confirmText={t("Reject")} danger onClose={close} onSubmit={(r) => finRejectVoucher(v, currentUser, r)} />
+      )}
+      {action && action.name === "cancel" && (
+        <VoucherReasonModal title="Cancel Voucher" label="Reason" confirmText={t("Cancel Voucher")} danger onClose={close} onSubmit={(r) => finCancelVoucher(v, currentUser, r)}>
+          {finPaidSum(finPlanOf(v)) > 0 && <div className="mb-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3.5 py-2.5 text-[13px] text-amber-600">{t("Some kishts are already paid. Cancelling reverses them in the Cash Book.")}</div>}
+        </VoucherReasonModal>
+      )}
+    </>
+  );
+}
+
+/* ---------------- Scanner (USB / Bluetooth QR scanner + camera) ---------------- */
+
+// What a scanner typed: a voucher / invoice QR link, or a plain voucher / invoice number.
+function finParseScan(text) {
+  const s = String(text || "").trim();
+  const m = s.match(/verify=([iv])\.([^&\s]+)/);
+  if (m) {
+    const k = s.match(/[&?]k=(\d+)/);
+    const r = s.match(/[&?]r=(\d+)/);
+    return { kind: m[1], id: decodeURIComponent(m[2]), k: k ? Number(k[1]) : 0, r: r ? Number(r[1]) : 0 };
+  }
+  if (/^CPV-\d{2}-\d{2}-\d{3,}$/i.test(s)) return { kind: "vn", number: s.toUpperCase() };
+  if (/^[A-Z]{1,5}-\d{2,}$/i.test(s)) return { kind: "in", number: s.toUpperCase() };
+  return null;
+}
+
+// A scanner types very fast and ends with Enter. Catch that anywhere in the app.
+function FinScanListener({ enabled, onScan }) {
+  const ref = React.useRef({ buf: "", last: 0, start: 0, el: null });
+  const cb = React.useRef(onScan);
+  cb.current = onScan;
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const onKey = (e) => {
+      const st = ref.current;
+      const now = performance.now();
+      if (now - st.last > 80) { st.buf = ""; st.start = now; st.el = document.activeElement; }
+      st.last = now;
+      if (e.key === "Enter") {
+        const text = st.buf;
+        st.buf = "";
+        const fast = text.length >= 6 && (now - st.start) / Math.max(1, text.length) < 40;
+        if (!fast) return;
+        const parsed = finParseScan(text);
+        if (!parsed) return;
+        e.preventDefault();
+        e.stopPropagation();
+        const el = st.el;
+        if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA") && typeof el.value === "string" && el.value.includes(text)) {
+          const proto = el.tagName === "INPUT" ? window.HTMLInputElement.prototype : window.HTMLTextAreaElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, "value").set;
+          setter.call(el, el.value.replace(text, ""));
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+        }
+        cb.current(parsed, text);
+        return;
+      }
+      if (e.key && e.key.length === 1) st.buf += e.key;
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [enabled]);
+  return null;
+}
+
+function FinCameraScan({ onResult, onClose }) {
+  const videoRef = React.useRef(null);
+  const [msg, setMsg] = useState("");
+  useEffect(() => {
+    let stream = null, timer = null, stopped = false;
+    (async () => {
+      if (typeof window.BarcodeDetector === "undefined" || !navigator.mediaDevices) {
+        setMsg(t("This browser cannot scan with the camera. Use the scanner, or open the phone's camera app and scan the QR."));
+        return;
+      }
+      try {
+        const det = new window.BarcodeDetector({ formats: ["qr_code"] });
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        if (stopped) return;
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+        timer = setInterval(async () => {
+          try {
+            const codes = await det.detect(videoRef.current);
+            const raw = codes && codes[0] && codes[0].rawValue;
+            const parsed = raw ? finParseScan(raw) : null;
+            if (parsed) { clearInterval(timer); onResult(parsed, raw); }
+          } catch {}
+        }, 350);
+      } catch {
+        setMsg(t("Camera permission was not given."));
+      }
+    })();
+    return () => { stopped = true; if (timer) clearInterval(timer); if (stream) stream.getTracks().forEach((tr) => tr.stop()); };
+  }, []);
+  return (
+    <Modal title="Scan QR with camera" onClose={onClose}>
+      {msg ? <div className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3.5 py-3 text-[13.5px] text-amber-600">{msg}</div> : (
+        <div className="rounded-2xl overflow-hidden bg-black aspect-square relative">
+          <video ref={videoRef} playsInline muted className="w-full h-full object-cover" />
+          <div className="absolute inset-[18%] border-4 border-emerald-400/80 rounded-2xl" />
+        </div>
+      )}
+      <div className="text-[12.5px] ct-t3 mt-3">{t("Hold the voucher or invoice QR inside the green box.")}</div>
+    </Modal>
+  );
+}
+
+/* ---------------- Payments Due ---------------- */
+
+function finAddDays(dateStr, n) {
+  const d = parseDateValue(dateStr) || new Date();
+  d.setDate(d.getDate() + n);
+  return dateToLocalISO(d);
+}
+
+function finDueCounts(vouchers, today = todayISO()) {
+  let due = 0, overdue = 0;
+  finAllKishts(vouchers).forEach(({ v, k }) => {
+    if (v.status !== "Approved" || k.status === "Paid") return;
+    if (k.date < today) overdue++;
+    else if (k.date === today) due++;
+  });
+  return { due, overdue };
+}
+
+function PaymentsDuePage({ currentUser, users, branches, payments, invoices, settings: company }) {
+  useLanguage();
+  const fin = useFin();
+  const [open, setOpen] = useState(null);
+  const today = todayISO();
+  const weekEnd = finAddDays(today, 7);
+  const items = useMemo(() => finAllKishts(fin.vouchers).filter(({ v, k }) => v.status === "Approved" && k.status !== "Paid")
+    .sort((a, b) => String(a.k.date).localeCompare(String(b.k.date))), [fin.vouchers]);
+  const movements = useMemo(() => finMovements({ settings: fin.settings, vouchers: fin.vouchers, moves: fin.moves, payments, invoices }), [fin.settings, fin.vouchers, fin.moves, payments, invoices]);
+  if (!fin.loaded) return <div className="ct-card p-10 text-center ct-t2">{t("Loading…")}</div>;
+  const groups = [
+    { id: "over", label: "Overdue", tone: "bg-rose-400/15 text-rose-500", list: items.filter(({ k }) => k.date < today) },
+    { id: "today", label: "Today", tone: "bg-amber-400/15 text-amber-500", list: items.filter(({ k }) => k.date === today) },
+    { id: "week", label: "This week", tone: "bg-sky-400/15 text-sky-500", list: items.filter(({ k }) => k.date > today && k.date <= weekEnd) },
+    { id: "later", label: "Later", tone: "bg-violet-400/15 text-violet-500", list: items.filter(({ k }) => k.date > weekEnd) },
+  ];
+  const needToday = { Cash: 0, Bank: 0, Cheque: 0 };
+  [...groups[0].list, ...groups[1].list].forEach(({ k }) => { needToday[k.method] = (needToday[k.method] || 0) + Number(k.amount); });
+  const cashAcc = finCashAccount(fin.settings);
+  const drawer = finAccountBalance(fin.settings, movements, cashAcc.id);
+  const sum = (l) => l.reduce((s, x) => s + Number(x.k.amount), 0);
+  return (
+    <div>
+      <FinPageHead title="Payments Due" sub={t("Approved vouchers — which kisht to pay, when, and how")} />
+      <div className="grid grid-cols-2 xl:grid-cols-4 gap-3 mb-4">
+        {groups.map((g) => (
+          <div key={g.id} className="ct-card p-4">
+            <div className="flex items-center justify-between"><span className={`rounded-full px-2.5 py-0.5 text-[11.5px] font-bold ${g.tone}`}>{t(g.label)}</span><span className="text-[12px] ct-t3">{g.list.length}</span></div>
+            <div className="ct-display text-[21px] font-bold ct-h tabular-nums mt-2">{fmtMoney(sum(g.list))}</div>
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-1 xl:grid-cols-[1fr_320px] gap-4">
+        <div className="space-y-4">
+          {groups.map((g) => g.list.length > 0 && (
+            <section key={g.id} className="ct-card p-4">
+              <div className="flex items-center gap-2 mb-2"><span className={`rounded-full px-2.5 py-0.5 text-[12px] font-bold ${g.tone}`}>{t(g.label)}</span><span className="text-[12.5px] ct-t2">{fmtMoney(sum(g.list))}</span></div>
+              <div className="divide-y divide-slate-200/60">
+                {g.list.map(({ v, k, idx, n }) => (
+                  <button key={v.id + k.id} type="button" onClick={() => setOpen({ id: v.id, k: idx + 1 })} className="w-full text-start py-2.5 flex items-center gap-3">
+                    <span className="text-[18px]">{k.method === "Cash" ? "💵" : k.method === "Bank" ? "🏦" : "📝"}</span>
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[13.5px] font-semibold ct-h truncate">{v.payee} <span className="ct-t3 font-normal">· {v.number}{n > 1 ? ` · ${t("Kisht")} ${idx + 1}/${n}` : ""}</span></div>
+                      <div className="text-[12px] ct-t3">{fmtDate(k.date)} · {finKishtMethodText(k)}{k.earlyOk && k.date > today ? ` · ${t("early allowed")}` : ""}</div>
+                    </div>
+                    <div className="font-bold ct-h tabular-nums">{fmtMoney(k.amount)}</div>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ))}
+          {items.length === 0 && <div className="ct-card"><FinEmpty text="Nothing to pay — all approved vouchers are paid." /></div>}
+        </div>
+        <section className="ct-card p-5 h-fit">
+          <div className="ct-display text-[16px] font-bold ct-h mb-3">{t("Needed today (incl. overdue)")}</div>
+          {[["💵", "Cash", needToday.Cash], ["🏦", "Account", needToday.Bank], ["📝", "Cheque", needToday.Cheque]].map(([ic, l, a]) => (
+            <div key={l} className="flex justify-between py-2 border-b border-slate-200/50 text-[13.5px]"><span className="ct-t2">{ic} {t(l)}</span><b className="ct-h tabular-nums">{fmtMoney(a)}</b></div>
+          ))}
+          <div className="flex justify-between pt-3 text-[13.5px]"><span className="ct-t2">{t("Cash in drawer now")}</span><b className={`tabular-nums ${drawer >= needToday.Cash ? "text-emerald-500" : "text-rose-400"}`}>{fmtMoney(drawer)} {drawer >= needToday.Cash ? "✓" : "⚠"}</b></div>
+        </section>
+      </div>
+      {open && <VoucherWorkspace key={open.id + "-" + open.k} voucherId={open.id} focusK={open.k} currentUser={currentUser} users={users} branches={branches} company={company} onClose={() => setOpen(null)} />}
+    </div>
+  );
+}
+
+/* ---------------- Vouchers page ---------------- */
+
+function VouchersPage({ currentUser, users, branches, settings: company }) {
+  useLanguage();
+  const fin = useFin();
+  const [tab, setTab] = useState("all");
+  const [q, setQ] = useState("");
+  const [form, setForm] = useState(false);
+  const [open, setOpen] = useState(() => { const x = finPendingOpenId; finPendingOpenId = null; return x ? { id: x } : null; });
+  const [sigOpen, setSigOpen] = useState(false);
+  const isAdmin = currentUser.role === "admin";
+  const settings = fin.settings;
+  const myRule = finApproverRule(settings, currentUser);
+  const today = todayISO();
+
+  const vouchers = useMemo(() => [...fin.vouchers].sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.createdAt).localeCompare(String(a.createdAt))), [fin.vouchers]);
+  const states = useMemo(() => { const m = new Map(); vouchers.forEach((v) => m.set(v.id, finVoucherState(v, today))); return m; }, [vouchers, today]);
+  if (!fin.loaded) return <div className="ct-card p-10 text-center ct-t2">{t("Loading…")}</div>;
+  const forMe = vouchers.filter((v) => v.status === "Pending" && finCanApprove(settings, currentUser, v));
+  const monthStart = today.slice(0, 8) + "01";
+  const allK = finAllKishts(vouchers);
+  const dueNow = allK.filter(({ v, k }) => v.status === "Approved" && k.status !== "Paid" && k.date <= today);
+  const paidMonth = allK.filter(({ k }) => k.status === "Paid" && k.paid && k.paid.date >= monthStart);
+  const pending = vouchers.filter((v) => v.status === "Pending");
+  const sumV = (l) => l.reduce((s, v) => s + (Number(v.amount) || 0), 0);
+  const sumK = (l) => l.reduce((s, x) => s + (Number(x.k.amount) || 0), 0);
+  const ql = q.trim().toLowerCase();
+  const list = vouchers.filter((v) => {
+    const st = states.get(v.id);
+    if (tab === "mine" && !(v.status === "Pending" && finCanApprove(settings, currentUser, v))) return false;
+    if (tab === "pending" && v.status !== "Pending") return false;
+    if (tab === "approved" && !(st.key === "due" || st.key === "scheduled")) return false;
+    if (tab === "paid" && st.key !== "paid") return false;
+    if (tab === "rejected" && v.status !== "Rejected") return false;
+    if (tab === "cancelled" && v.status !== "Cancelled") return false;
+    if (!ql) return true;
+    return [v.number, v.payee, v.categoryName, v.particulars, ...finPlanOf(v).map((k) => k.chequeNo)].some((x) => String(x || "").toLowerCase().includes(ql));
+  });
+  const cheques = allK.filter(({ k }) => k.method === "Cheque");
+
+  const tabs = [
+    { id: "all", label: "All" },
+    ...(myRule ? [{ id: "mine", label: "For my approval", count: forMe.length }] : []),
+    { id: "pending", label: "Pending", count: pending.length },
+    { id: "approved", label: "Approved / Scheduled" },
+    { id: "paid", label: "Paid" },
+    { id: "rejected", label: "Rejected" },
+    { id: "cancelled", label: "Cancelled" },
+    { id: "cheques", label: "Cheque Register" },
+    ...(isAdmin ? [{ id: "settings", label: "Voucher Settings" }] : []),
+  ];
+  const stLabel = (v) => {
+    const st = states.get(v.id);
+    if (st.key === "due" || st.key === "scheduled") {
+      return <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[11.5px] font-bold whitespace-nowrap ${st.overdue ? "bg-rose-400/15 text-rose-500" : st.key === "due" ? "bg-emerald-400/15 text-emerald-500" : "bg-sky-400/15 text-sky-500"}`}>{t(st.label)}{st.total > 1 ? ` · ${st.paidCount}/${st.total}` : ""}</span>;
+    }
+    return <FinPill status={v.status} />;
+  };
+
+  return (
+    <div>
+      <FinPageHead
+        title="Payment Vouchers"
+        sub={t("Cashier → approver (scan + approve + sign) → cashier (scan + pay)")}
+        right={(
+          <>
+            {myRule && settings.signMode === "digital" && <Btn variant="ghost" onClick={() => setSigOpen(true)}>✍ {t("My Signature")}</Btn>}
+            <Btn onClick={() => setForm(true)}><UiIcon name="plus" className="w-4 h-4" />{t("New Voucher")}</Btn>
+          </>
+        )}
+      />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <FinKpi label="Pending approval" value={fmtMoney(sumV(pending))} tone="text-amber-500" sub={`${pending.length} ${t("vouchers")}`} />
+        <FinKpi label="Due now" value={fmtMoney(sumK(dueNow))} tone="text-emerald-500" sub={`${dueNow.length} ${t("kisht")}`} />
+        <FinKpi label="Paid this month" value={fmtMoney(sumK(paidMonth))} tone="text-sky-500" sub={`${paidMonth.length} ${t("payments")}`} />
+        <FinKpi label="For my approval" value={String(forMe.length)} tone={forMe.length ? "text-rose-400" : "ct-h"} sub={myRule ? (myRule.mode === "unlimited" ? t("Unlimited") : `${t("up to")} ${fmtMoney(myRule.limit)}`) : t("No approval rights")} />
+      </div>
+
+      <FinTabs tabs={tabs} value={tab} onChange={setTab} />
+
+      {tab === "settings" && isAdmin ? (
+        <div className="mt-4"><VoucherSettingsPanel fin={fin} users={users} currentUser={currentUser} /></div>
+      ) : tab === "cheques" ? (
+        <div className="ct-card mt-4 overflow-x-auto">
+          <table className="w-full text-[13px] min-w-[860px]">
+            <thead><tr className="text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              {["Cheque No", "Cheque Date", "Bank", "Payee", "Amount", "Type", "Voucher", "Status", "Cleared"].map((h) => <th key={h} className="px-3 py-2.5 text-start">{t(h)}</th>)}
+            </tr></thead>
+            <tbody>
+              {cheques.length === 0 && <tr><td colSpan={9}><FinEmpty text="No cheques yet." /></td></tr>}
+              {cheques.map(({ v, k, idx, n }) => (
+                <tr key={v.id + k.id} className="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" onClick={() => setOpen({ id: v.id, k: idx + 1 })}>
+                  <td className="px-3 py-2.5 font-bold ct-h">{k.chequeNo || "—"}</td>
+                  <td className="px-3 py-2.5">{fmtDate(k.date)}</td>
+                  <td className="px-3 py-2.5">{k.bankName || k.accountName}</td>
+                  <td className="px-3 py-2.5">{v.payee}</td>
+                  <td className="px-3 py-2.5 font-semibold tabular-nums">{fmtMoney(k.amount)}</td>
+                  <td className="px-3 py-2.5">{t(k.chequeType)}</td>
+                  <td className="px-3 py-2.5">{v.number}{n > 1 ? ` (${idx + 1}/${n})` : ""}</td>
+                  <td className="px-3 py-2.5">{k.status === "Paid" ? <FinPill status="Paid" /> : v.status === "Pending" ? <FinPill status="Pending" /> : <span className="text-[12px] ct-t2">{t("Due")} {fmtDate(k.date)}</span>}</td>
+                  <td className="px-3 py-2.5">{k.status !== "Paid" ? "—" : k.chequeCleared ? "✅" : "⏳"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <>
+          <div className="mt-3 mb-3 relative max-w-md">
+            <UiIcon name="search" className="w-4 h-4 absolute start-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input className={`${inputCls} !ps-9`} value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("Search voucher, payee, cheque…")} />
+          </div>
+          <div className="ct-card overflow-hidden">
+            <div className="hidden md:block overflow-x-auto">
+              <table className="w-full text-[13px]">
+                <thead><tr className="text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+                  {["Voucher", "Date", "Category", "Payee", "Amount", "Plan", "Status"].map((h) => <th key={h} className={`px-3 py-2.5 ${h === "Amount" ? "text-end" : "text-start"}`}>{t(h)}</th>)}
+                </tr></thead>
+                <tbody>
+                  {list.length === 0 && <tr><td colSpan={7}><FinEmpty text="No vouchers here." /></td></tr>}
+                  {list.map((v) => {
+                    const st = states.get(v.id);
+                    return (
+                      <tr key={v.id} className="border-b border-slate-100 hover:bg-slate-50 cursor-pointer" onClick={() => setOpen({ id: v.id })}>
+                        <td className="px-3 py-2.5 font-bold ct-h whitespace-nowrap">{v.number}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap">{fmtDate(v.date)}</td>
+                        <td className="px-3 py-2.5">{v.categoryName}</td>
+                        <td className="px-3 py-2.5"><div className="font-semibold ct-h">{v.payee}</div>{v.particulars && <div className="text-[11.5px] ct-t3 truncate max-w-[240px]">{v.particulars}</div>}</td>
+                        <td className="px-3 py-2.5 text-end font-bold tabular-nums ct-h whitespace-nowrap">{fmtMoney(v.amount)}</td>
+                        <td className="px-3 py-2.5 whitespace-nowrap text-[12.5px]">{st.total > 1 ? `${st.total} kisht · ` : ""}{finMethodSummary(v)}{st.next && v.status === "Approved" ? <div className="text-[11.5px] ct-t3">{t("next")} {fmtDate(st.next.date)}</div> : null}</td>
+                        <td className="px-3 py-2.5">{stLabel(v)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div className="md:hidden divide-y divide-slate-200/60">
+              {list.length === 0 && <FinEmpty text="No vouchers here." />}
+              {list.map((v) => (
+                <button key={v.id} type="button" onClick={() => setOpen({ id: v.id })} className="w-full text-start px-4 py-3 flex items-center gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap"><span className="font-bold ct-h text-[13.5px]">{v.payee}</span>{stLabel(v)}</div>
+                    <div className="text-[12px] ct-t2 truncate">{v.number} · {v.categoryName} · {fmtDate(v.date)}</div>
+                  </div>
+                  <div className="font-bold ct-h tabular-nums">{fmtMoney(v.amount)}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      {form && <VoucherForm fin={fin} currentUser={currentUser} branches={branches} initial={null} onClose={() => setForm(false)} onSaved={(id) => { finPendingPrintId = id; setOpen({ id }); }} />}
+      {open && !form && (
+        <VoucherWorkspace key={open.id + "-" + (open.k || 0)} voucherId={open.id} focusK={open.k} currentUser={currentUser} users={users} branches={branches} company={company} onClose={() => setOpen(null)} />
+      )}
+      {sigOpen && <MySignatureModal fin={fin} currentUser={currentUser} onClose={() => setSigOpen(false)} />}
+    </div>
+  );
+}
+
+/* ============================================================
+   CASH BOOK · DAILY CLOSING · TRANSFERS · EXPENSES
+   ============================================================ */
+
+// Every paid kisht (money that really went out), with its payment date.
+function finPaidKishts(vouchers) {
+  const out = [];
+  (vouchers || []).forEach((v) => {
+    if (v.status === "Cancelled") return;
+    finPlanOf(v).forEach((k) => { if (k.status === "Paid" && k.paid) out.push({ v, k, date: k.paid.date || v.date, amount: Number(k.amount) || 0 }); });
+  });
+  return out;
+}
+
+function finDaySummary({ date, invoices, payments, vouchers }) {
+  const inv = finActiveInvoices(invoices).filter((i) => i.date === date);
+  const sales = inv.reduce((s, i) => s + (Number(i.total) || 0), 0);
+  const newUdhaar = inv.reduce((s, i) => s + Math.max(0, Number(i.balanceDue) || 0), 0);
+  const byMethod = {};
+  const cancelledIds = new Set(), cancelledNums = new Set();
+  (invoices || []).forEach((i) => { if (isInvoiceCancelled(i)) { cancelledIds.add(i.id); cancelledNums.add(i.number); } });
+  (payments || []).forEach((p) => {
+    if (p.date !== date || !(Number(p.amount) > 0)) return;
+    if (p.invoiceId ? cancelledIds.has(p.invoiceId) : p.note && p.note.startsWith("Against ") && cancelledNums.has(p.note.replace("Against ", "").trim())) return;
+    const m = p.method || "Cash";
+    byMethod[m] = (byMethod[m] || 0) + Number(p.amount);
+  });
+  const paidV = finPaidKishts(vouchers).filter((x) => x.date === date);
+  const expenses = paidV.reduce((s, x) => s + x.amount, 0);
+  const expByMethod = {};
+  paidV.forEach((x) => { const m = x.k.method === "Bank" ? "Account" : x.k.method; expByMethod[m] = (expByMethod[m] || 0) + x.amount; });
+  return { invoiceCount: inv.length, sales, newUdhaar, byMethod, received: Object.values(byMethod).reduce((a, b) => a + b, 0), expenses, expByMethod, paidVouchers: paidV };
+}
+
+function ClosingDoc({ data, company, size, fit }) {
+  const s = PRINT_SIZES[size];
+  const R = ({ l, v, b }) => <PrintRow l={l} v={v} bold={b} />;
+  return (
+    <div style={{ ...printDocStyle(size, false, true), fontFamily: s.thermal ? undefined : "Inter, Arial, sans-serif" }}>
+      <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.15em" }}>{company.companyName}</div>
+      <div style={{ textAlign: "center", fontWeight: 700 }}>DAILY CLOSING</div>
+      <div style={{ textAlign: "center" }}>{fmtDate(data.date)}{data.by ? ` · ${data.by}` : ""}</div>
+      <PrintRule />
+      <R l="Invoices" v={String(data.sum.invoiceCount)} />
+      <R l="Sale" v={fmtMoney(data.sum.sales)} b />
+      <R l="New udhaar" v={fmtMoney(data.sum.newUdhaar)} />
+      <PrintRule />
+      <div style={{ fontWeight: 700 }}>Received</div>
+      {Object.entries(data.sum.byMethod).map(([m, v]) => <R key={m} l={m} v={fmtMoney(v)} />)}
+      <R l="Total received" v={fmtMoney(data.sum.received)} b />
+      <PrintRule />
+      <div style={{ fontWeight: 700 }}>Expenses (vouchers)</div>
+      {Object.entries(data.sum.expByMethod).map(([m, v]) => <R key={m} l={m} v={"-" + fmtMoney(v)} />)}
+      <R l="Total expenses" v={"-" + fmtMoney(data.sum.expenses)} b />
+      <PrintRule />
+      <div style={{ fontWeight: 700 }}>Cash drawer</div>
+      <R l="Opening cash" v={fmtMoney(data.cash.opening)} />
+      <R l="Cash in" v={fmtMoney(data.cash.inAmt)} />
+      <R l="Cash out" v={"-" + fmtMoney(data.cash.outAmt)} />
+      <R l="Should be" v={fmtMoney(data.cash.closing)} b />
+      {data.counted != null && <R l="Counted" v={fmtMoney(data.counted)} b />}
+      {data.counted != null && <R l="Difference" v={(data.counted - data.cash.closing >= 0 ? "+" : "") + fmtMoney(data.counted - data.cash.closing)} b />}
+      {data.note && <div style={{ marginTop: "1mm" }}>Note: {data.note}</div>}
+      <div style={{ marginTop: "8mm", display: "flex", justifyContent: "space-between", gap: "4mm" }}>
+        <div style={{ flex: 1, borderTop: "1px solid #000", textAlign: "center", paddingTop: "1mm" }}>Cashier</div>
+        <div style={{ flex: 1, borderTop: "1px solid #000", textAlign: "center", paddingTop: "1mm" }}>Checked</div>
+      </div>
+    </div>
+  );
+}
+
+function finClosingText(data, company) {
+  const lines = [
+    `*${company.companyName} — Daily Closing*`,
+    `${fmtDate(data.date)}${data.by ? " · " + data.by : ""}`,
+    "",
+    `Sale: ${fmtMoney(data.sum.sales)} (${data.sum.invoiceCount} invoices)`,
+    `Received: ${fmtMoney(data.sum.received)}`,
+    ...Object.entries(data.sum.byMethod).map(([m, v]) => `  • ${m}: ${fmtMoney(v)}`),
+    `Expenses: ${fmtMoney(data.sum.expenses)}`,
+    `New udhaar: ${fmtMoney(data.sum.newUdhaar)}`,
+    "",
+    `Cash should be: ${fmtMoney(data.cash.closing)}`,
+  ];
+  if (data.counted != null) {
+    lines.push(`Cash counted: ${fmtMoney(data.counted)}`);
+    lines.push(`Difference: ${data.counted - data.cash.closing >= 0 ? "+" : ""}${fmtMoney(data.counted - data.cash.closing)}`);
+  }
+  return lines.join("\n");
+}
+
+function DailyClosingPanel({ fin, movements, invoices, payments, currentUser, company }) {
+  const [date, setDate] = useState(todayISO());
+  const [counts, setCounts] = useState({});
+  const [note, setNote] = useState("");
+  const [printData, setPrintData] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const cashAcc = finCashAccount(fin.settings);
+  const sum = finDaySummary({ date, invoices, payments, vouchers: fin.vouchers });
+  const cash = finAccountDay(fin.settings, movements, cashAcc.id, date);
+  const counted = FIN_DENOMS.reduce((s, d) => s + d * (Number(counts[d]) || 0), 0);
+  const hasCount = Object.values(counts).some((v) => Number(v) > 0);
+  const diff = counted - cash.closing;
+  const saved = fin.closings.filter((c) => c.date === date).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const data = { date, sum, cash, counted: hasCount ? counted : null, note, by: currentUser.name || currentUser.username };
+
+  async function saveClosing() {
+    if (!hasCount) { alert(t("Please count the cash first.")); return; }
+    setBusy(true);
+    try {
+      await finMutate("closings", (list) => [...list, {
+        id: uid("cls"), date, accountId: cashAcc.id, expected: roundMoney(cash.closing), counted: roundMoney(counted), diff: roundMoney(diff),
+        denoms: counts, note: note.trim(), sales: sum.sales, received: sum.received, expenses: sum.expenses, by: finActor(currentUser), at: new Date().toISOString(),
+      }]);
+    } catch (e) { console.error(e); alert(t("Could not save. Check your internet connection and try again.")); }
+    setBusy(false);
+  }
+
+  const line = (l, v, tone = "ct-h", b) => (
+    <div className="flex justify-between py-1.5 border-b border-slate-200/50 text-[13.5px]"><span className="ct-t2">{t(l)}</span><span className={`tabular-nums ${b ? "font-bold" : "font-semibold"} ${tone}`}>{v}</span></div>
+  );
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+      <section className="ct-card p-5">
+        <div className="flex items-center justify-between gap-2 mb-3">
+          <div className="ct-display text-[16px] font-bold ct-h">📋 {t("Daily Closing")}</div>
+          <input type="date" className={`${inputCls} !w-auto !py-1.5`} value={date} onChange={(e) => setDate(e.target.value)} />
+        </div>
+        {line("Invoices", String(sum.invoiceCount))}
+        {line("Sale", fmtMoney(sum.sales), "ct-h", true)}
+        {Object.entries(sum.byMethod).map(([m, v]) => <React.Fragment key={m}>{line(`${t("Received")} · ${m}`, fmtMoney(v), "text-emerald-500")}</React.Fragment>)}
+        {line("Expenses (vouchers)", "-" + fmtMoney(sum.expenses), "text-rose-400")}
+        {line("New udhaar", fmtMoney(sum.newUdhaar), "text-amber-500")}
+        <div className="mt-3 rounded-xl ct-chip p-3">
+          {line("Opening cash", fmtMoney(cash.opening))}
+          {line("Cash in", "+" + fmtMoney(cash.inAmt), "text-emerald-500")}
+          {line("Cash out", "-" + fmtMoney(cash.outAmt), "text-rose-400")}
+          <div className="flex justify-between pt-2 text-[14px]"><span className="font-bold ct-h">{t("Drawer should have")}</span><span className="font-bold text-[#d4a94f] tabular-nums">{fmtMoney(cash.closing)}</span></div>
+        </div>
+      </section>
+
+      <section className="ct-card p-5">
+        <div className="ct-display text-[16px] font-bold ct-h mb-1">💵 {t("Cash Count")}</div>
+        <div className="text-[12px] ct-t3 mb-3">{t("Count the notes in the drawer.")}</div>
+        <div className="grid grid-cols-2 gap-x-3 gap-y-2">
+          {FIN_DENOMS.map((d) => (
+            <label key={d} className="flex items-center gap-2">
+              <span className="w-14 text-end text-[13px] font-bold ct-h tabular-nums">{d.toLocaleString()}</span>
+              <span className="ct-t3 text-[12px]">×</span>
+              <input type="number" min="0" inputMode="numeric" className={`${inputCls} !py-1.5 !px-2 w-full`} value={counts[d] || ""} onChange={(e) => setCounts({ ...counts, [d]: e.target.value })} />
+            </label>
+          ))}
+        </div>
+        <div className="mt-4 rounded-xl ct-chip p-3">
+          {line("Counted", fmtMoney(counted), "ct-h", true)}
+          {line("Should be", fmtMoney(cash.closing))}
+          <div className="flex justify-between pt-2 text-[14px]">
+            <span className="font-bold ct-h">{t("Difference")}</span>
+            <span className={`font-bold tabular-nums ${!hasCount ? "ct-t3" : Math.abs(diff) < 1 ? "text-emerald-500" : diff < 0 ? "text-rose-400" : "text-amber-500"}`}>
+              {!hasCount ? "—" : Math.abs(diff) < 1 ? `✓ ${t("Matched")}` : `${diff > 0 ? "+" : ""}${fmtMoney(diff)} ${diff < 0 ? t("short") : t("extra")}`}
+            </span>
+          </div>
+        </div>
+        <div className="mt-3"><input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} placeholder={t("Note (optional)")} /></div>
+        <div className="flex flex-wrap gap-2 mt-3">
+          <Btn onClick={saveClosing} disabled={busy}>{t("Save closing")}</Btn>
+          <Btn variant="dark" onClick={() => setPrintData(data)}><UiIcon name="printer" className="w-4 h-4" />{t("Print")}</Btn>
+          <a className="inline-flex items-center gap-1.5 rounded-xl px-4 py-2 text-sm font-semibold ct-chip text-emerald-500" target="_blank" rel="noreferrer"
+            href={`https://wa.me/?text=${encodeURIComponent(finClosingText(data, company))}`}><UiIcon name="wa" className="w-4 h-4" />WhatsApp</a>
+        </div>
+      </section>
+
+      <section className="ct-card p-5">
+        <div className="ct-display text-[16px] font-bold ct-h mb-3">{t("Saved closings")}</div>
+        {saved.length === 0 && fin.closings.length === 0 && <FinEmpty text="No closing saved yet." />}
+        <div className="space-y-2">
+          {(saved.length ? saved : [...fin.closings].sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 8)).map((c) => (
+            <div key={c.id} className="rounded-xl ct-chip px-3 py-2.5 text-[12.5px]">
+              <div className="flex justify-between"><span className="font-bold ct-h">{fmtDate(c.date)}</span><span className="ct-t3">{c.by && c.by.name} · {fmtDateTime(c.at).split(",").pop()}</span></div>
+              <div className="flex justify-between mt-0.5"><span className="ct-t2">{t("Counted")} {fmtMoney(c.counted)} / {fmtMoney(c.expected)}</span>
+                <span className={`font-bold ${Math.abs(c.diff) < 1 ? "text-emerald-500" : c.diff < 0 ? "text-rose-400" : "text-amber-500"}`}>{Math.abs(c.diff) < 1 ? "✓" : `${c.diff > 0 ? "+" : ""}${fmtMoney(c.diff)}`}</span></div>
+              {c.note && <div className="ct-t3">{c.note}</div>}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      {printData && (
+        <PrintDialog kind="closing" title="Print Daily Closing" subtitle={fmtDate(printData.date)} includeDefs={[]}
+          sizeOrder={["t80", "t58", "v5"]} defaultSize="t80" fileName={`Closing-${printData.date}`}
+          waHref={`https://wa.me/?text=${encodeURIComponent(finClosingText(printData, company))}`}
+          onClose={() => setPrintData(null)} renderDoc={(p) => <ClosingDoc data={printData} company={company} {...p} />} />
+      )}
+    </div>
+  );
+}
+
+function TransfersPanel({ fin, currentUser }) {
+  const accs = fin.settings.accounts;
+  const [f, setF] = useState({ date: todayISO(), fromId: accs[0] ? accs[0].id : "", toId: accs[1] ? accs[1].id : "", amount: "", note: "" });
+  const list = [...fin.moves].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  async function add() {
+    const amount = roundMoney(Number(f.amount));
+    if (!(amount > 0) || !f.fromId || !f.toId || f.fromId === f.toId) { alert(t("Choose two different accounts and an amount.")); return; }
+    try {
+      await finMutate("moves", (l) => [...l, { id: uid("mv"), ...f, amount, note: f.note.trim(), by: finActor(currentUser), at: new Date().toISOString() }]);
+      setF({ ...f, amount: "", note: "" });
+    } catch (e) { console.error(e); alert(t("Could not save. Check your internet connection and try again.")); }
+  }
+  const name = (id) => (finAccountFor(fin.settings, id) || { name: "?" }).name;
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-[380px_1fr] gap-4">
+      <section className="ct-card p-5">
+        <div className="ct-display text-[16px] font-bold ct-h mb-1">🔁 {t("Transfer between accounts")}</div>
+        <div className="text-[12px] ct-t3 mb-3">{t("e.g. cash deposited in bank, or cash taken out of bank.")}</div>
+        {accs.length < 2 && <div className="mb-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3 py-2 text-[12.5px] text-amber-600">{t("Add a bank account in Vouchers → Voucher Settings first.")}</div>}
+        <Field label="From"><select className={inputCls} value={f.fromId} onChange={(e) => setF({ ...f, fromId: e.target.value })}>{accs.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
+        <Field label="To"><select className={inputCls} value={f.toId} onChange={(e) => setF({ ...f, toId: e.target.value })}>{accs.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}</select></Field>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Amount"><input type="number" className={inputCls} value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} /></Field>
+          <Field label="Date"><input type="date" className={inputCls} value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} /></Field>
+        </div>
+        <Field label="Note"><input className={inputCls} value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} /></Field>
+        <Btn onClick={add}>Save transfer</Btn>
+      </section>
+      <section className="ct-card overflow-x-auto">
+        <table className="w-full text-[13px] min-w-[600px]">
+          <thead><tr className="text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            {["Date", "From", "To", "Amount", "Note", "By", ""].map((h, i) => <th key={i} className="px-3 py-2.5 text-start">{t(h)}</th>)}
+          </tr></thead>
+          <tbody>
+            {list.length === 0 && <tr><td colSpan={7}><FinEmpty text="No transfers yet." /></td></tr>}
+            {list.map((m) => (
+              <tr key={m.id} className={`border-b border-slate-100 ${m.cancelled ? "opacity-50 line-through" : ""}`}>
+                <td className="px-3 py-2.5">{fmtDate(m.date)}</td><td className="px-3 py-2.5">{name(m.fromId)}</td><td className="px-3 py-2.5">{name(m.toId)}</td>
+                <td className="px-3 py-2.5 font-bold ct-h tabular-nums">{fmtMoney(m.amount)}</td><td className="px-3 py-2.5">{m.note}</td><td className="px-3 py-2.5 ct-t2">{m.by && m.by.name}</td>
+                <td className="px-3 py-2.5">{!m.cancelled && <button type="button" className="text-[12px] font-semibold text-rose-500" onClick={() => { if (confirm(t("Cancel this transfer?"))) finMutate("moves", (l) => l.map((x) => (x.id === m.id ? { ...x, cancelled: true, cancelledBy: finActor(currentUser), cancelledAt: new Date().toISOString() } : x))); }}>{t("Cancel")}</button>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </div>
+  );
+}
+
+function ExpensesPanel({ fin }) {
+  const [preset, setPreset] = useState("month");
+  const [range, setRange] = useState({ from: "", to: "" });
+  const [from, to] = finPeriodRange(preset, range.from, range.to);
+  const paid = finPaidKishts(fin.vouchers);
+  const inRange = paid.filter((x) => x.date >= from && x.date <= to);
+  const byCat = {};
+  inRange.forEach((x) => { byCat[x.v.categoryName] = (byCat[x.v.categoryName] || 0) + x.amount; });
+  const cats = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
+  const total = cats.reduce((s, [, v]) => s + v, 0);
+  const max = cats.length ? cats[0][1] : 1;
+  const months = [];
+  const now = new Date();
+  for (let i = 5; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const key = dateToLocalISO(d).slice(0, 7);
+    months.push({ key, label: d.toLocaleString("en", { month: "short" }), amt: paid.filter((x) => String(x.date).slice(0, 7) === key).reduce((s, x) => s + x.amount, 0) });
+  }
+  const mMax = Math.max(1, ...months.map((m) => m.amt));
+  const colors = ["#34d399", "#d4a94f", "#60a5fa", "#c084fc", "#fb7185", "#f59e0b", "#22d3ee", "#a3e635"];
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-[1.4fr_1fr] gap-4">
+      <section className="ct-card p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+          <div className="ct-display text-[16px] font-bold ct-h">{t("Expenses by category")}</div>
+          <FinPeriodPicker preset={preset} setPreset={setPreset} range={range} setRange={setRange} />
+        </div>
+        <div className="text-[13px] ct-t2 mb-3">{t("Total")}: <b className="ct-h text-[18px]">{fmtMoney(total)}</b> · {inRange.length} {t("payments")}</div>
+        {cats.length === 0 && <FinEmpty text="No paid vouchers in this period." />}
+        <div className="space-y-2.5">
+          {cats.map(([name, v], i) => (
+            <div key={name}>
+              <div className="flex justify-between text-[13px] mb-1"><span className="ct-h font-semibold">{name}</span><span className="tabular-nums ct-h font-bold">{fmtMoney(v)} <span className="ct-t3 font-normal">· {total ? Math.round((v / total) * 100) : 0}%</span></span></div>
+              <div className="h-2.5 rounded-full bg-slate-400/15 overflow-hidden"><div className="h-full rounded-full ct-barx" style={{ width: `${(v / max) * 100}%`, background: colors[i % colors.length] }} /></div>
+            </div>
+          ))}
+        </div>
+      </section>
+      <section className="ct-card p-5">
+        <div className="ct-display text-[16px] font-bold ct-h mb-4">{t("Last 6 months")}</div>
+        <div className="flex items-end gap-3 h-[200px]">
+          {months.map((m) => (
+            <div key={m.key} className="flex-1 flex flex-col items-center justify-end h-full">
+              <div className="text-[11px] ct-t2 mb-1 tabular-nums">{m.amt ? Math.round(m.amt / 1000) + "k" : ""}</div>
+              <div className="w-full rounded-t-lg bg-gradient-to-t from-rose-500/70 to-rose-300" style={{ height: `${(m.amt / mMax) * 100}%`, minHeight: m.amt ? 4 : 0 }} />
+              <div className="text-[11.5px] ct-t2 mt-1.5">{m.label}</div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function FinPeriodPicker({ preset, setPreset, range, setRange }) {
+  const opts = [["month", "This month"], ["last", "Last month"], ["year", "This year"], ["all", "All time"], ["custom", "Custom"]];
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {opts.map(([id, l]) => (
+        <button key={id} type="button" onClick={() => setPreset(id)}
+          className={`rounded-full px-3 py-1 text-[12px] font-bold ${preset === id ? "bg-emerald-400/20 text-emerald-500" : "ct-chip ct-t2"}`}>{t(l)}</button>
+      ))}
+      {preset === "custom" && (
+        <>
+          <input type="date" className={`${inputCls} !w-auto !py-1 !text-[12px]`} value={range.from} onChange={(e) => setRange({ ...range, from: e.target.value })} />
+          <input type="date" className={`${inputCls} !w-auto !py-1 !text-[12px]`} value={range.to} onChange={(e) => setRange({ ...range, to: e.target.value })} />
+        </>
+      )}
+    </div>
+  );
+}
+
+function CashBookPage({ currentUser, invoices, payments, settings: company }) {
+  useLanguage();
+  const fin = useFin();
+  const [tab, setTab] = useState("day");
+  const [date, setDate] = useState(todayISO());
+  const [accId, setAccId] = useState("all");
+  const movements = useMemo(() => finMovements({ settings: fin.settings, vouchers: fin.vouchers, moves: fin.moves, payments, invoices }),
+    [fin.settings, fin.vouchers, fin.moves, payments, invoices]);
+  const accounts = useMemo(() => {
+    const list = [...fin.settings.accounts];
+    if (movements.some((m) => m.accountId === "acc_unassigned")) list.push({ id: "acc_unassigned", name: t("Bank (not set)"), type: "bank", opening: 0 });
+    return list;
+  }, [fin.settings.accounts, movements]);
+
+  if (!fin.loaded) return <div className="ct-card p-10 text-center ct-t2">{t("Loading…")}</div>;
+
+  const dayRows = [];
+  let tot = { opening: 0, inAmt: 0, outAmt: 0, closing: 0 };
+  accounts.forEach((a) => {
+    if (accId !== "all" && a.id !== accId) return;
+    const d = finAccountDay(fin.settings, movements, a.id, date);
+    tot = { opening: tot.opening + d.opening, inAmt: tot.inAmt + d.inAmt, outAmt: tot.outAmt + d.outAmt, closing: tot.closing + d.closing };
+    d.rows.forEach((r) => dayRows.push({ ...r, accName: a.name }));
+  });
+
+  return (
+    <div>
+      <FinPageHead title="Cash Book" sub={t("Money in (customer payments) and out (paid vouchers) — every account")} />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        {accounts.map((a) => (
+          <button key={a.id} type="button" onClick={() => { setAccId(a.id); setTab("day"); }} className={`text-start ct-card p-4 ct-lift ${accId === a.id ? "ring-2 ring-emerald-400/60" : ""}`}>
+            <div className="text-[12px] font-semibold ct-t2 truncate">{a.type === "cash" ? "💵" : a.type === "wallet" ? "📱" : "🏦"} {a.name}</div>
+            <div className="ct-display text-[21px] font-bold ct-h tabular-nums mt-1">{fmtMoney(finAccountBalance(fin.settings, movements, a.id))}</div>
+            <div className="text-[11.5px] ct-t3">{t("Current balance")}</div>
+          </button>
+        ))}
+      </div>
+      <FinTabs value={tab} onChange={setTab} tabs={[{ id: "day", label: "Day Book" }, { id: "closing", label: "Daily Closing" }, { id: "transfers", label: "Transfer" }, { id: "expenses", label: "Expenses" }]} />
+      <div className="mt-4">
+        {tab === "day" && (
+          <div className="ct-card p-4 sm:p-5">
+            <div className="flex flex-wrap items-center gap-2 mb-4">
+              <input type="date" className={`${inputCls} !w-auto`} value={date} onChange={(e) => setDate(e.target.value)} />
+              <select className={`${inputCls} !w-auto`} value={accId} onChange={(e) => setAccId(e.target.value)}>
+                <option value="all">{t("All accounts")}</option>
+                {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+              <button type="button" className="ct-chip rounded-xl px-3 py-2 text-[12.5px] font-bold ct-t2" onClick={() => setDate(todayISO())}>{t("Today")}</button>
+            </div>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+              <FinKpi label="Opening" value={fmtMoney(tot.opening)} />
+              <FinKpi label="Cash In" value={"+" + fmtMoney(tot.inAmt)} tone="text-emerald-500" />
+              <FinKpi label="Cash Out" value={"-" + fmtMoney(tot.outAmt)} tone="text-rose-400" />
+              <FinKpi label="Closing" value={fmtMoney(tot.closing)} tone="text-[#d4a94f]" />
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[13px] min-w-[620px]">
+                <thead><tr className="text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+                  {["Type", "Detail", "Account", "In", "Out"].map((h) => <th key={h} className={`px-3 py-2.5 ${h === "In" || h === "Out" ? "text-end" : "text-start"}`}>{t(h)}</th>)}
+                </tr></thead>
+                <tbody>
+                  {dayRows.length === 0 && <tr><td colSpan={5}><FinEmpty text="No entries on this day." /></td></tr>}
+                  {dayRows.map((r) => (
+                    <tr key={r.id + r.accountId} className="border-b border-slate-100">
+                      <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${r.kind === "Payment" ? "bg-emerald-400/15 text-emerald-500" : r.kind === "Voucher" ? "bg-rose-400/15 text-rose-500" : "bg-sky-400/15 text-sky-500"}`}>{t(r.kind)}</span></td>
+                      <td className="px-3 py-2.5"><div className="font-semibold ct-h">{r.title}</div><div className="text-[11.5px] ct-t3">{r.sub}</div></td>
+                      <td className="px-3 py-2.5 ct-t2">{r.accName}</td>
+                      <td className="px-3 py-2.5 text-end tabular-nums text-emerald-500 font-semibold">{r.inAmt ? fmtMoney(r.inAmt) : ""}</td>
+                      <td className="px-3 py-2.5 text-end tabular-nums text-rose-400 font-semibold">{r.outAmt ? fmtMoney(r.outAmt) : ""}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+        {tab === "closing" && <DailyClosingPanel fin={fin} movements={movements} invoices={invoices} payments={payments} currentUser={currentUser} company={company} />}
+        {tab === "transfers" && <TransfersPanel fin={fin} currentUser={currentUser} />}
+        {tab === "expenses" && <ExpensesPanel fin={fin} />}
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   BUSINESS INSIGHTS — best customers · udhaar aging · reminders
+   ============================================================ */
+
+function finReminderText(c, out, oldest, company) {
+  return [
+    `Assalam o Alaikum ${c.name} sahib,`,
+    `${company.companyName} ka aap ki taraf baqaya *${fmtMoney(out)}* hai${oldest > 0 ? ` (${oldest} din purana)` : ""}.`,
+    "Meherbani kar ke jald adaigi kar dein. Shukriya 🙏",
+    company.companyPhone ? `Rabta: ${company.companyPhone}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+function InsightsPage({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, settings: company }) {
+  useLanguage();
+  const [tab, setTab] = useState("best");
+  const [preset, setPreset] = useState("month");
+  const [range, setRange] = useState({ from: "", to: "" });
+  const [bucket, setBucket] = useState("all");
+  const today = todayISO();
+  const active = useMemo(() => finActiveInvoices(invoices), [invoices]);
+  const outById = useMemo(() => computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments),
+    [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments]);
+  const invByCust = useMemo(() => {
+    const m = new Map();
+    active.forEach((i) => { if (!m.has(i.customerId)) m.set(i.customerId, []); m.get(i.customerId).push(i); });
+    return m;
+  }, [active]);
+  const aging = useMemo(() => {
+    const res = {};
+    (customers || []).forEach((c) => {
+      const out = outById[c.id] || 0;
+      res[c.id] = { out, ...finAgingFor(out, invByCust.get(c.id) || [], today) };
+    });
+    return res;
+  }, [customers, outById, invByCust, today]);
+
+  const [from, to] = finPeriodRange(preset, range.from, range.to);
+  const best = useMemo(() => {
+    const m = new Map();
+    active.forEach((i) => {
+      if (i.date < from || i.date > to) return;
+      const cur = m.get(i.customerId) || { id: i.customerId, name: i.customerName, total: 0, count: 0, last: "" };
+      cur.total += Number(i.total) || 0;
+      cur.count += 1;
+      if (i.date > cur.last) cur.last = i.date;
+      m.set(i.customerId, cur);
+    });
+    return Array.from(m.values()).sort((a, b) => b.total - a.total);
+  }, [active, from, to]);
+  const grand = best.reduce((s, b) => s + b.total, 0);
+  const top = best.slice(0, 10);
+  const max = top.length ? top[0].total : 1;
+  const colors = ["#34d399", "#d4a94f", "#60a5fa", "#c084fc", "#fb7185"];
+  const donut = [...best.slice(0, 5).map((b, i) => ({ name: b.name, v: b.total, c: colors[i] })), ...(best.length > 5 ? [{ name: t("Others"), v: best.slice(5).reduce((s, b) => s + b.total, 0), c: "#64748b" }] : [])];
+  const custById = useMemo(() => { const m = new Map(); (customers || []).forEach((c) => m.set(c.id, c)); return m; }, [customers]);
+  const tagCounts = { "On time": 0, "Bit late": 0, "Late payer": 0, Clear: 0 };
+  best.forEach((b) => { const a = aging[b.id] || { out: 0, oldest: 0 }; tagCounts[finPayTag(a.out, a.oldest).label]++; });
+
+  const owing = (customers || []).map((c) => ({ c, ...(aging[c.id] || { out: 0, buckets: [0, 0, 0, 0], oldest: 0 }) })).filter((x) => x.out > 0.5);
+  const bucketTotals = [0, 1, 2, 3].map((i) => owing.reduce((s, x) => s + x.buckets[i], 0));
+  const bMax = Math.max(1, ...bucketTotals);
+  const minAge = { all: -1, "30": 30, "60": 60, "90": 90 }[bucket];
+  const owingList = owing.filter((x) => x.oldest > minAge).sort((a, b) => b.out - a.out);
+
+  return (
+    <div>
+      <FinPageHead title="Business Insights" sub={t("Who buys the most, who pays on time, and who needs a reminder")} />
+      <FinTabs value={tab} onChange={setTab} tabs={[{ id: "best", label: "Best Customers" }, { id: "aging", label: "Udhaar Aging & Reminders", count: owing.filter((x) => x.oldest > 60).length }]} />
+      {tab === "best" && (
+        <div className="mt-4 space-y-4">
+          <div className="grid grid-cols-1 xl:grid-cols-[1.6fr_1fr] gap-4">
+            <section className="ct-card p-5">
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
+                <div className="ct-display text-[16px] font-bold ct-h">🏆 {t("Top customers by purchase")}</div>
+                <FinPeriodPicker preset={preset} setPreset={setPreset} range={range} setRange={setRange} />
+              </div>
+              {top.length === 0 && <FinEmpty text="No sales in this period." />}
+              <div className="space-y-2.5">
+                {top.map((b, i) => {
+                  const a = aging[b.id] || { out: 0, oldest: 0 };
+                  const tag = finPayTag(a.out, a.oldest);
+                  return (
+                    <div key={b.id} className="flex items-center gap-3">
+                      <span className={`w-6 h-6 rounded-lg flex items-center justify-center text-[11px] font-black shrink-0 ${i < 3 ? "ct-gold-bg" : "ct-chip ct-t2"}`}>{i + 1}</span>
+                      <div className="w-[34%] sm:w-[28%] min-w-0"><div className="text-[13px] font-semibold ct-h truncate">{b.name}</div><div className="text-[11px] ct-t3">{b.count} {t("invoices")}</div></div>
+                      <div className="flex-1 h-6 rounded-lg bg-slate-400/10 overflow-hidden"><div className="h-full rounded-lg bg-gradient-to-r from-emerald-600 to-emerald-400 ct-barx" style={{ width: `${(b.total / max) * 100}%` }} /></div>
+                      <div className="w-24 text-end text-[13px] font-bold ct-h tabular-nums">{fmtMoney(b.total).replace("Rs ", "")}</div>
+                      <span className={`hidden sm:inline-flex w-[92px] justify-center rounded-full px-2 py-0.5 text-[11px] font-bold ${tag.tone}`}>{t(tag.label)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+            <section className="ct-card p-5">
+              <div className="ct-display text-[16px] font-bold ct-h">{t("Share of sales")}</div>
+              <div className="flex justify-center my-4">
+                <svg width="200" height="200" viewBox="0 0 42 42">
+                  <circle cx="21" cy="21" r="15.9" fill="none" stroke="rgba(148,163,184,.15)" strokeWidth="6" />
+                  {(() => {
+                    let acc = 0;
+                    return donut.map((d) => {
+                      const pct = grand ? (d.v / grand) * 100 : 0;
+                      const el = <circle key={d.name} cx="21" cy="21" r="15.9" fill="none" stroke={d.c} strokeWidth="6" strokeDasharray={`${pct} ${100 - pct}`} strokeDashoffset={25 - acc} />;
+                      acc += pct;
+                      return el;
+                    });
+                  })()}
+                  <text x="21" y="21" textAnchor="middle" fontSize="4.2" fontWeight="800" className="fill-current ct-h">{grand >= 100000 ? (grand / 100000).toFixed(1) + " L" : Math.round(grand / 1000) + "k"}</text>
+                  <text x="21" y="25.5" textAnchor="middle" fontSize="2.4" fill="#94a3b8">{t("Total sale")}</text>
+                </svg>
+              </div>
+              <div className="space-y-1.5">
+                {donut.map((d) => (
+                  <div key={d.name} className="flex items-center gap-2 text-[12.5px]"><span className="w-2.5 h-2.5 rounded-sm" style={{ background: d.c }} /><span className="ct-h truncate flex-1">{d.name}</span><span className="ct-t2 tabular-nums">{grand ? Math.round((d.v / grand) * 100) : 0}%</span></div>
+                ))}
+              </div>
+              <div className="grid grid-cols-3 gap-2 mt-4 text-center text-[12px]">
+                <div className="rounded-xl ct-chip py-2"><div>🟢 {t("On time")}</div><b className="ct-h text-[15px]">{tagCounts["On time"] + tagCounts.Clear}</b></div>
+                <div className="rounded-xl ct-chip py-2"><div>🟡 {t("Bit late")}</div><b className="ct-h text-[15px]">{tagCounts["Bit late"]}</b></div>
+                <div className="rounded-xl ct-chip py-2"><div>🔴 {t("Late payer")}</div><b className="ct-h text-[15px]">{tagCounts["Late payer"]}</b></div>
+              </div>
+            </section>
+          </div>
+          <section className="ct-card overflow-x-auto">
+            <table className="w-full text-[13px] min-w-[720px]">
+              <thead><tr className="text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+                {["#", "Customer", "Purchases", "Invoices", "Last purchase", "Outstanding", "Payment habit", ""].map((h, i) => <th key={i} className="px-3 py-2.5 text-start">{t(h)}</th>)}
+              </tr></thead>
+              <tbody>
+                {best.map((b, i) => {
+                  const a = aging[b.id] || { out: 0, oldest: 0 };
+                  const tag = finPayTag(a.out, a.oldest);
+                  const c = custById.get(b.id);
+                  return (
+                    <tr key={b.id} className="border-b border-slate-100">
+                      <td className="px-3 py-2.5 ct-t3">{i + 1}</td>
+                      <td className="px-3 py-2.5 font-semibold ct-h">{b.name}</td>
+                      <td className="px-3 py-2.5 font-bold tabular-nums ct-h">{fmtMoney(b.total)}</td>
+                      <td className="px-3 py-2.5">{b.count}</td>
+                      <td className="px-3 py-2.5">{fmtDate(b.last)}</td>
+                      <td className={`px-3 py-2.5 tabular-nums ${a.out > 0.5 ? "text-rose-400 font-semibold" : "ct-t3"}`}>{a.out > 0.5 ? fmtMoney(a.out) : "—"}</td>
+                      <td className="px-3 py-2.5"><span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${tag.tone}`}>{t(tag.label)}</span></td>
+                      <td className="px-3 py-2.5">{c && c.phone && a.out > 0.5 && <a target="_blank" rel="noreferrer" href={waLink(c.phone, finReminderText(c, a.out, a.oldest, company))} className="text-emerald-500"><UiIcon name="wa" className="w-4 h-4" /></a>}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </section>
+        </div>
+      )}
+      {tab === "aging" && (
+        <div className="mt-4 grid grid-cols-1 xl:grid-cols-[340px_1fr] gap-4">
+          <section className="ct-card p-5">
+            <div className="ct-display text-[16px] font-bold ct-h mb-4">⏳ {t("Udhaar Aging")}</div>
+            <div className="flex items-end gap-3 h-[180px]">
+              {[["0–30", "#34d399"], ["31–60", "#fbbf24"], ["61–90", "#fb923c"], ["90+", "#fb7185"]].map(([l, c], i) => (
+                <div key={l} className="flex-1 flex flex-col items-center justify-end h-full">
+                  <div className="text-[11px] ct-t2 mb-1 tabular-nums">{bucketTotals[i] >= 100000 ? (bucketTotals[i] / 100000).toFixed(1) + "L" : Math.round(bucketTotals[i] / 1000) + "k"}</div>
+                  <div className="w-full rounded-t-lg" style={{ height: `${(bucketTotals[i] / bMax) * 100}%`, minHeight: bucketTotals[i] ? 4 : 0, background: c }} />
+                  <div className="text-[11.5px] ct-t2 mt-1.5">{l} {t("days")}</div>
+                </div>
+              ))}
+            </div>
+            <div className="mt-4 text-[13px] ct-t2">{t("Total udhaar")}: <b className="ct-h">{fmtMoney(bucketTotals.reduce((a, b) => a + b, 0))}</b> · {owing.length} {t("customers")}</div>
+          </section>
+          <section className="ct-card p-4 sm:p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <div className="ct-display text-[16px] font-bold ct-h">💬 {t("Reminders")}</div>
+              <div className="flex gap-1.5">
+                {[["all", "All"], ["30", "30+ days"], ["60", "60+ days"], ["90", "90+ days"]].map(([id, l]) => (
+                  <button key={id} type="button" onClick={() => setBucket(id)} className={`rounded-full px-3 py-1 text-[12px] font-bold ${bucket === id ? "bg-emerald-400/20 text-emerald-500" : "ct-chip ct-t2"}`}>{t(l)}</button>
+                ))}
+              </div>
+            </div>
+            {owingList.length === 0 && <FinEmpty text="No customer in this group." />}
+            <div className="divide-y divide-slate-200/60">
+              {owingList.map((x) => {
+                const tag = finPayTag(x.out, x.oldest);
+                return (
+                  <div key={x.c.id} className="py-2.5 flex items-center gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2"><span className="font-semibold ct-h text-[13.5px] truncate">{x.c.name}</span><span className={`rounded-full px-2 py-0.5 text-[10.5px] font-bold ${tag.tone}`}>{t(tag.label)}</span></div>
+                      <div className="text-[11.5px] ct-t3">{x.c.phone || t("No phone")} · {t("oldest")} {x.oldest > 90 ? "90+" : x.oldest} {t("days")}</div>
+                    </div>
+                    <div className="text-end"><div className="font-bold text-rose-400 tabular-nums">{fmtMoney(x.out)}</div></div>
+                    {x.c.phone ? (
+                      <a target="_blank" rel="noreferrer" href={waLink(x.c.phone, finReminderText(x.c, x.out, Math.min(x.oldest, 999), company))}
+                        className="ct-em-btn inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-[12.5px] font-bold"><UiIcon name="wa" className="w-4 h-4" />{t("Send")}</a>
+                    ) : <span className="w-[70px]" />}
+                  </div>
+                );
+              })}
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   QR VERIFY PAGE
+   The QR on an invoice / voucher holds a link to this app:
+     <site>/#verify=i.<invoiceId>   or   <site>/#verify=v.<voucherId>
+   Scanning it with any phone camera opens a read-only page that
+   shows only that one document (no login, nothing can be changed).
+   ============================================================ */
+
+function docVerifyUrl(kind, id) {
+  let base = "";
+  try { base = window.location.origin + window.location.pathname; } catch {}
+  return `${base}#verify=${kind}.${encodeURIComponent(id)}`;
+}
+function docVerifyParse() {
+  try {
+    const h = String(window.location.hash || "");
+    const m = h.match(/verify=([iv])\.([^&]+)/);
+    if (!m) return null;
+    const k = h.match(/[&?]k=(\d+)/);
+    const r = h.match(/[&?]r=(\d+)/);
+    return { kind: m[1], id: decodeURIComponent(m[2]), k: k ? Number(k[1]) : 0, r: r ? Number(r[1]) : 0 };
+  } catch { return null; }
+}
+function docVerifyClearHash() {
+  try { window.history.replaceState(null, "", window.location.pathname + window.location.search); } catch { window.location.hash = ""; }
+}
+
+function VerifyShell({ settings, tone, title, sub, children, onOpen }) {
+  const toneCls = {
+    ok: "from-emerald-500 to-emerald-600",
+    warn: "from-amber-400 to-amber-500",
+    bad: "from-rose-500 to-rose-600",
+  }[tone] || "from-slate-500 to-slate-600";
+  const icon = tone === "ok" ? "✓" : tone === "bad" ? "✕" : "!";
+  return (
+    <div className="min-h-[100dvh] bg-slate-100 text-slate-900 flex justify-center px-3 py-6 sm:py-10" style={{ fontFamily: "Inter, Arial, sans-serif" }}>
+      <div className="w-full max-w-md">
+        <div className="flex items-center gap-3 mb-4">
+          {settings.logoUrl ? <img src={settings.logoUrl} alt="" className="w-11 h-11 rounded-xl object-contain bg-white p-1 shadow" /> : (
+            <div className="w-11 h-11 rounded-xl bg-slate-900 text-[#d4a94f] font-black flex items-center justify-center">{uiInitials(settings.companyName)}</div>
+          )}
+          <div className="min-w-0">
+            <div className="font-black uppercase tracking-tight truncate">{settings.companyName}</div>
+            <div className="text-[12px] text-slate-500 truncate">{[settings.companyAddress, settings.companyPhone].filter(Boolean).join(" · ")}</div>
+          </div>
+        </div>
+        <div className="rounded-3xl bg-white shadow-xl shadow-slate-900/10 overflow-hidden">
+          <div className={`bg-gradient-to-br ${toneCls} text-white px-5 py-5 flex items-center gap-3`}>
+            <div className="w-11 h-11 rounded-full bg-white/20 flex items-center justify-center text-[22px] font-black shrink-0">{icon}</div>
+            <div>
+              <div className="text-[18px] font-bold leading-tight">{title}</div>
+              {sub && <div className="text-[13px] opacity-90">{sub}</div>}
+            </div>
+          </div>
+          <div className="p-5">{children}</div>
+        </div>
+        {onOpen && (
+          <button type="button" onClick={onOpen} className="mt-4 w-full rounded-2xl bg-slate-900 text-white py-3 text-[14px] font-bold active:scale-[.99]">
+            Open in app (staff login)
+          </button>
+        )}
+        <div className="text-center text-[11.5px] text-slate-400 mt-4">Scanned from the QR code · {fmtDateTime(new Date().toISOString())}</div>
+      </div>
+    </div>
+  );
+}
+
+function VerifyRow({ l, v, strong, tone }) {
+  return (
+    <div className="flex justify-between gap-4 py-2 border-b border-slate-100 text-[14px]">
+      <span className="text-slate-500">{l}</span>
+      <span className={`text-end ${strong ? "font-bold" : "font-semibold"} ${tone || "text-slate-900"}`}>{v}</span>
+    </div>
+  );
+}
+
+function InvoiceVerifyView({ invoice, settings, onOpen }) {
+  if (!invoice) {
+    return (
+      <VerifyShell settings={settings} tone="bad" title="Invoice not found" sub="This QR code does not match any invoice." onOpen={onOpen}>
+        <div className="text-[14px] text-slate-600">The invoice may have been deleted, or the code is not from this shop.</div>
+      </VerifyShell>
+    );
+  }
+  const cancelled = isInvoiceCancelled(invoice);
+  const banner = invoiceStatusBanner(invoice);
+  const prev = (invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0);
+  const outstanding = prev + (Number(invoice.balanceDue) || 0);
+  return (
+    <VerifyShell settings={settings} tone={cancelled ? "bad" : "ok"} title={cancelled ? "Cancelled invoice" : "Genuine invoice"}
+      sub={`${invoice.number} · ${fmtDate(invoice.date)}`} onOpen={onOpen}>
+      <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Bill To</div>
+      <div className="font-bold text-[16px]">{invoice.customerName}</div>
+      {invoice.customerPhone && <div className="text-[13px] text-slate-500">{invoice.customerPhone}</div>}
+      <div className="mt-4 rounded-2xl border border-slate-200 divide-y divide-slate-100">
+        {(invoice.items || []).map((it, i) => (
+          <div key={i} className="px-3 py-2.5 flex justify-between gap-3 text-[13.5px]">
+            <div className="min-w-0"><div className="font-semibold truncate">{it.name}</div><div className="text-slate-500 text-[12px]">{fmtQty(it.qty)} {it.unit || ""} × {fmtMoney(it.price)}</div></div>
+            <div className="font-bold whitespace-nowrap">{fmtMoney(it.total)}</div>
+          </div>
+        ))}
+      </div>
+      <div className="mt-3">
+        <VerifyRow l="Invoice total" v={fmtMoney(invoice.total)} strong />
+        <VerifyRow l="Paid" v={fmtMoney(invoice.paymentReceived || 0)} tone="text-emerald-600" />
+        <VerifyRow l="This invoice due" v={fmtMoney(invoice.balanceDue || 0)} />
+        {invoice.customerType !== "Cash" && <VerifyRow l="Previous balance" v={fmtMoney(prev)} />}
+        {invoice.customerType !== "Cash" && <VerifyRow l="Outstanding (at invoice time)" v={fmtMoney(outstanding)} strong tone="text-blue-700" />}
+        {invoice.driverName && <VerifyRow l="Driver" v={`${invoice.driverName}${invoice.vehicleType ? " — " + invoice.vehicleType : ""}`} />}
+      </div>
+      <div className={`mt-4 rounded-xl px-3 py-2 text-center text-[13px] font-bold ${{ emerald: "bg-emerald-50 text-emerald-700", amber: "bg-amber-50 text-amber-700", red: "bg-rose-50 text-rose-700" }[banner.tone] || "bg-slate-100 text-slate-600"}`}>{banner.text}</div>
+    </VerifyShell>
+  );
+}
+
+function VoucherVerifyView({ voucherId, target, settings, onOpen }) {
+  const fin = useFin();
+  if (!fin.loaded) {
+    return <VerifyShell settings={settings} tone="warn" title="Checking…" sub="Loading the voucher"><div className="h-10" /></VerifyShell>;
+  }
+  const v = fin.vouchers.find((x) => x.id === voucherId);
+  if (!v) {
+    return (
+      <VerifyShell settings={settings} tone="bad" title="Voucher not found" sub="This QR code does not match any voucher." onOpen={onOpen}>
+        <div className="text-[14px] text-slate-600">The code may not be from this shop.</div>
+      </VerifyShell>
+    );
+  }
+  const st = finVoucherState(v);
+  const tone = st.key === "paid" || st.key === "due" || st.key === "scheduled" ? "ok" : st.key === "pending" ? "warn" : "bad";
+  const title = { paid: "Genuine voucher · Fully paid", due: "Genuine voucher · Approved", scheduled: "Genuine voucher · Approved (scheduled)", pending: "Voucher not approved yet", rejected: "Voucher rejected", cancelled: "Voucher cancelled" }[st.key] || v.status;
+  const ap = v.approval;
+  const sig = ap && ap.sigId ? finSignatureById(fin.settings, ap.by.key, ap.sigId) : null;
+  return (
+    <VerifyShell settings={settings} tone={tone} title={title} sub={`${v.number} · ${fmtDate(v.date)}`} onOpen={onOpen}>
+      {target && target.r && target.r < finRev(v) ? <div className="mb-3 rounded-xl bg-amber-50 text-amber-700 px-3 py-2 text-[13px] font-semibold">⚠ This paper is outdated — the voucher was changed after printing.</div> : null}
+      <div className="text-[28px] font-black tracking-tight">{fmtMoney(v.amount)}</div>
+      <div className="text-[12px] text-slate-500 mb-3">{finAmountInWords(v.amount)}</div>
+      <VerifyRow l="Payee" v={`${v.payee}${v.payeePhone ? " · " + v.payeePhone : ""}`} strong />
+      <VerifyRow l="Category" v={v.categoryName} />
+      {v.particulars && <VerifyRow l="Particulars" v={v.particulars} />}
+      <div className="mt-3 rounded-2xl border border-slate-200 divide-y divide-slate-100">
+        {st.plan.map((k, i) => (
+          <div key={k.id} className={`px-3 py-2 flex justify-between gap-3 text-[13px] ${target && target.k === i + 1 ? "bg-amber-50" : ""}`}>
+            <div><b>{st.total > 1 ? `Kisht ${i + 1} · ` : ""}{fmtDate(k.date)}</b><div className="text-slate-500 text-[12px]">{finKishtMethodText(k)}</div></div>
+            <div className="text-end"><b>{fmtMoney(k.amount)}</b><div className={`text-[12px] ${k.status === "Paid" ? "text-emerald-600" : "text-slate-500"}`}>{k.status === "Paid" ? `Paid ${fmtDate(k.paid.date)}` : v.status === "Approved" ? "Due" : "—"}</div></div>
+          </div>
+        ))}
+      </div>
+      <VerifyRow l="Prepared by" v={v.createdBy ? v.createdBy.name : "-"} />
+      {v.rejection && <VerifyRow l="Rejected" v={v.rejection.reason} tone="text-rose-600" />}
+      {v.cancellation && <VerifyRow l="Cancelled" v={v.cancellation.reason} tone="text-rose-600" />}
+      {ap && (
+        <div className="mt-4 rounded-2xl border border-slate-200 p-3 text-center">
+          <div className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Approved by</div>
+          {sig && <img src={sig.dataUrl} alt="" className="h-12 mx-auto mt-1" />}
+          <div className="font-bold">{ap.by.name}</div>
+          <div className="text-[12px] text-slate-500">{fmtDateTime(ap.at)}</div>
+        </div>
+      )}
+    </VerifyShell>
+  );
+}
+
+function DocVerifyPage({ target, invoices, settings, onOpen }) {
+  useEffect(() => {
+    // The verify page always uses the light design.
+    try { document.documentElement.classList.remove("ct-dark"); document.documentElement.classList.add("ct-light"); } catch {}
+  }, []);
+  if (target.kind === "i") {
+    const inv = (invoices || []).find((i) => i.id === target.id) || null;
+    return <InvoiceVerifyView invoice={inv} settings={settings} onOpen={onOpen} />;
+  }
+  return <VoucherVerifyView voucherId={target.id} target={target} settings={settings} onOpen={onOpen} />;
+}
+
+export default App;
