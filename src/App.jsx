@@ -1190,6 +1190,7 @@ function UiIcon({ name, className = "w-[18px] h-[18px]" }) {
 const NAV_GROUPS = [
   { title: "Overview", items: [
     { id: "dashboard", label: "Dashboard", icon: "dashboard" },
+    { id: "profit", label: "Profit Calculator", icon: "trend", adminOnly: true },
   ]},
   { title: "Sales", items: [
     { id: "invoices", label: "Invoices", icon: "file" },
@@ -1209,6 +1210,7 @@ const NAV_GROUPS = [
     { id: "adjustments", label: "Adjustments", icon: "sliders" },
     { id: "vouchers", label: "Payment Vouchers", icon: "voucher" },
     { id: "paymentsDue", label: "Payments Due", icon: "calendar" },
+    { id: "portalRequests", label: "Portal Requests", icon: "users" },
     { id: "cashbook", label: "Cash Book", icon: "cash" },
   ]},
   { title: "Business", items: [
@@ -10108,7 +10110,7 @@ function App() {
       users, customers, invoices, payments, returns, exchanges, creditNotes, promises, transfers, adjustments,
       leads, products, drivers, offers, bookings, orders, settings, branches, auditLog,
       commissionAgents, commissionRules, commissionTransactions, commissionPayments, orderTargets,
-      vouchers: finState.vouchers, finSettings: finState.settings, cashClosings: finState.closings, cashMoves: finState.moves,
+      vouchers: finState.vouchers, finSettings: finState.settings, cashClosings: finState.closings, cashMoves: finState.moves, costRates: finState.costs,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -10145,6 +10147,7 @@ function App() {
     if (data.finSettings) finMutate("settings", () => finNormalizeSettings(data.finSettings));
     if (Array.isArray(data.cashClosings)) finMutate("closings", () => data.cashClosings);
     if (Array.isArray(data.cashMoves)) finMutate("moves", () => data.cashMoves);
+    if (data.costRates && typeof data.costRates === "object") finMutate("costs", () => data.costRates);
   }
 
   /* ---------- Commission Management handlers ---------- */
@@ -10262,11 +10265,16 @@ function App() {
     const mine = finLive.vouchers.filter((v) => v.status === "Pending" && finCanApprove(finLive.settings, currentUser, v));
     const today = todayISO();
     const due = finAllKishts(finLive.vouchers).filter(({ v, k }) => v.status === "Approved" && k.status !== "Paid" && k.date <= today);
+    const portalPend = finLive.portalPay.filter((c) => c.status === "Pending");
+    const portalMsg = finLive.portalMsgs.filter((m) => m.status === "Open");
     return {
       count: mine.length,
       dueCount: due.length,
+      portalCount: portalPend.length + portalMsg.length,
       list: [
         ...mine.map((v) => ({ id: "vc" + v.id, icon: "voucher", tone: "text-amber-400", page: "vouchers", title: `${v.number} — ${v.payee} · ${fmtMoney(v.amount)}`, sub: t("Voucher waiting for your approval") })),
+        ...portalPend.map((c) => ({ id: "pp" + c.id, icon: "wallet", tone: "text-emerald-400", page: "portalRequests", title: `${c.customerName} — ${fmtMoney(c.amount)}`, sub: t("Customer sent a payment — verify it") })),
+        ...portalMsg.map((m) => ({ id: "pm" + m.id, icon: "chat", tone: "text-sky-400", page: "portalRequests", title: `${m.customerName}: ${String(m.text).slice(0, 50)}`, sub: t("Customer complaint / request") })),
         ...due.map(({ v, k, idx, n }) => ({ id: "vk" + v.id + k.id, icon: "calendar", tone: k.date < today ? "text-rose-400" : "text-emerald-400", page: "paymentsDue", title: `${v.number}${n > 1 ? ` (${idx + 1}/${n})` : ""} — ${v.payee} · ${fmtMoney(k.amount)}`, sub: k.date < today ? `${t("Overdue")} · ${fmtDate(k.date)}` : t("Payment due today") })),
       ],
     };
@@ -10284,6 +10292,25 @@ function App() {
   useEffect(() => {
     applyThemeClass(currentUser && currentUser.role === "customer" ? "light" : themeState);
   }, [currentUser]);
+
+  // Customer portal → orders (one Daily Order per item) and verified payments.
+  function onPortalOrders(list) {
+    let counter = Number(settings.orderCounter) || 1;
+    const recs = list.map((data) => ({ id: uid("ord"), code: "ORD-" + String(counter++).padStart(4, "0"), status: "Pending", ...data }));
+    persist.orders([...orders, ...recs]);
+    persist.settings({ ...settings, orderCounter: counter });
+    logAudit("Order Created (Portal)", recs.map((r) => r.code).join(", "), list[0] ? list[0].customerName : "");
+  }
+  function onVerifyPortalPayment(c) {
+    const cust = customers.find((x) => x.id === c.customerId);
+    const p = {
+      id: uid("pay"), customerId: c.customerId, customerName: c.customerName, date: todayISO(), amount: Number(c.amount),
+      method: c.method || "Bank Transfer", note: `Portal ${c.code}${c.txnId ? " · Txn " + c.txnId : ""}`, promiseId: "", reference: c.txnId || "",
+      branchId: (cust && cust.branchId) || "",
+    };
+    savePayment(p);
+    return p.id;
+  }
 
   // Scanner / camera / QR link → open the voucher or invoice inside the app.
   function handleScan(parsed) {
@@ -10376,10 +10403,11 @@ function App() {
       <>
         <I18nDomBridge />
         <PrintStyles />
-        <CustomerPortal
+        <CustomerPortal2
           currentUser={currentUser} customers={customers} invoices={invoices} payments={payments}
           returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
-          offers={offers} settings={settings}
+          offers={offers} products={products} orders={orders} bookings={bookings} settings={settings}
+          onPortalOrders={onPortalOrders} onCreatePromise={onCreatePromise} saveCustomer={saveCustomer} onLogout={handleLogout}
         />
       </>
     );
@@ -10514,6 +10542,12 @@ function App() {
     assistant: <SalesAssistant customers={visibleCustomers} />,
     estimator: <CementEstimator settings={settings} />,
     vouchers: <VouchersPage currentUser={currentUser} users={users} branches={branches} settings={settings} />,
+    profit: currentUser.role === "admin" ? (
+      <ProfitPage currentUser={currentUser} products={products} customers={customers} invoices={invoices} payments={payments}
+        returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
+        commissionPayments={commissionPayments} settings={settings} />
+    ) : null,
+    portalRequests: <PortalRequestsPage currentUser={currentUser} onVerifyPortalPayment={onVerifyPortalPayment} settings={settings} />,
     paymentsDue: <PaymentsDuePage currentUser={currentUser} users={users} branches={branches} payments={visiblePayments} invoices={visibleInvoices} settings={settings} />,
     cashbook: <CashBookPage currentUser={currentUser} invoices={visibleInvoices} payments={visiblePayments} settings={settings} />,
     insights: (
@@ -10545,7 +10579,7 @@ function App() {
         <Sidebar
           page={page} setPage={goPage} role={currentUser.role} onLogout={handleLogout}
           companyName={settings.companyName} logoUrl={settings.logoUrl}
-          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount }}
+          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount, portalRequests: finAlerts.portalCount }}
         />
         <div className="flex-1 min-w-0 flex flex-col">
           <AppHeader
@@ -13696,7 +13730,7 @@ function QrSvg({ text, sizeMm = 20, style }) {
    same time do not overwrite each other's vouchers.
    ============================================================ */
 
-const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves" };
+const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles" };
 
 const FIN_DEFAULT_SETTINGS = {
   categories: [
@@ -13753,7 +13787,7 @@ Object.entries(FIN_URDU).forEach(([en, ur]) => {
 
 /* ---------------- Store ---------------- */
 
-const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [] };
+const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {} };
 const finListeners = new Set();
 let finLoadPromise = null;
 let finChannel = null;
@@ -13774,6 +13808,7 @@ function finNormalizeSettings(s) {
 }
 function finNormalize(name, value) {
   if (name === "settings") return finNormalizeSettings(value);
+  if (name === "costs" || name === "portalProfiles") return value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return Array.isArray(value) ? value : [];
 }
 
@@ -14599,6 +14634,12 @@ function VoucherSettingsPanel({ fin, users, currentUser }) {
             <div key={c.id} className="flex items-center gap-2">
               <input className={`${inputCls} !py-1.5 w-24`} defaultValue={c.code} onBlur={(e) => save((x) => ({ ...x, categories: x.categories.map((y) => (y.id === c.id ? { ...y, code: e.target.value.trim() } : y)) }))} />
               <input className={`${inputCls} !py-1.5`} defaultValue={c.name} onBlur={(e) => e.target.value.trim() && save((x) => ({ ...x, categories: x.categories.map((y) => (y.id === c.id ? { ...y, name: e.target.value.trim() } : y)) }))} />
+              <select className={`${inputCls} !py-1.5 !w-36`} value={finCatType(s, c)} title={t("Type (for profit)")}
+                onChange={(e) => save((x) => ({ ...x, categories: x.categories.map((y) => (y.id === c.id ? { ...y, type: e.target.value } : y)) }))}>
+                <option value="expense">{t("Expense")}</option>
+                <option value="stock">{t("Stock purchase")}</option>
+                <option value="owner">{t("Owner drawing")}</option>
+              </select>
               <button type="button" className="text-rose-500 text-[13px] px-2" title={t("Remove")} onClick={() => { if (s.categories.length > 1 && confirm(`${t("Remove")} ${c.name}?`)) save((x) => ({ ...x, categories: x.categories.filter((y) => y.id !== c.id) })); }}>✕</button>
             </div>
           ))}
@@ -14647,7 +14688,11 @@ function VoucherSettingsPanel({ fin, users, currentUser }) {
               <Field label="Account number"><input className={inputCls} value={acc.accountNumber || ""} onChange={(e) => setAcc({ ...acc, accountNumber: e.target.value })} /></Field>
             </div>
           )}
+          {acc.type !== "cash" && <Field label="Account title"><input className={inputCls} value={acc.accountTitle || ""} onChange={(e) => setAcc({ ...acc, accountTitle: e.target.value })} placeholder="Chaudhary Traders" /></Field>}
           <Field label="Opening balance (Rs)"><input type="number" className={inputCls} value={acc.opening} onChange={(e) => setAcc({ ...acc, opening: e.target.value })} /></Field>
+          {acc.type !== "cash" && (
+            <label className="flex items-center gap-2 text-[13px] ct-t2 mb-3"><input type="checkbox" checked={!!acc.showInPortal} onChange={(e) => setAcc({ ...acc, showInPortal: e.target.checked })} />{t("Show this account to customers in their portal (for payment)")}</label>
+          )}
           {acc.type === "bank" && (
             <label className="flex items-center gap-2 text-[13px] ct-t2 mb-4"><input type="checkbox" checked={!!acc.receiveDefault} onChange={(e) => setAcc({ ...acc, receiveDefault: e.target.checked })} />{t("Customer bank / cheque payments come into this account")}</label>
           )}
@@ -16828,6 +16873,1133 @@ function DocVerifyPage({ target, invoices, settings, onOpen }) {
     return <InvoiceVerifyView invoice={inv} settings={settings} onOpen={onOpen} />;
   }
   return <VoucherVerifyView voucherId={target.id} target={target} settings={settings} onOpen={onOpen} />;
+}
+
+/* ============================================================
+   PROFIT CALCULATOR (admin)
+   Sale − cost of goods sold = gross profit
+   gross profit − expenses (paid vouchers of "Expense" type) − commission = net profit
+   Cost rates are kept with a "from" date (ct-cost-rates), so the cost of an
+   old invoice is the rate that was valid on its date — old profit never changes.
+   ============================================================ */
+
+function finCatType(settings, cat) {
+  if (cat && cat.type) return cat.type;
+  if (cat && (cat.id === "cat_purchase" || /purchase|khareed|maal/i.test(cat.name || ""))) return "stock";
+  return "expense";
+}
+function finCatTypeById(settings, catId, catName) {
+  const c = (settings.categories || []).find((x) => x.id === catId);
+  return finCatType(settings, c || { id: catId, name: catName });
+}
+
+// Cost rate valid on a date. Before the first saved rate, the first rate is used (marked approximate).
+function finCostOn(costs, productId, date) {
+  const list = (costs && costs[productId]) || [];
+  if (!list.length) return null;
+  const sorted = [...list].sort((a, b) => String(a.from).localeCompare(String(b.from)));
+  let hit = null;
+  sorted.forEach((r) => { if (r.from <= date) hit = r; });
+  return hit ? { rate: Number(hit.rate) || 0, approx: false } : { rate: Number(sorted[0].rate) || 0, approx: true };
+}
+
+function finProfitCompute({ from, to, invoices, returns, exchanges, products, costs, vouchers, finSettings, payments, commissionPayments }) {
+  const byId = new Map(), byName = new Map();
+  (products || []).forEach((p) => { byId.set(p.id, p); byName.set(String(p.name || "").trim().toLowerCase(), p); });
+  const prod = {};
+  let sale = 0, cost = 0, discount = 0, delivery = 0, invoiceCount = 0, newUdhaar = 0, approx = 0, missing = 0;
+  finActiveInvoices(invoices).forEach((inv) => {
+    if (inv.date < from || inv.date > to) return;
+    invoiceCount++;
+    discount += Number(inv.discount) || 0;
+    delivery += (Number(inv.rickshawRent) || 0) + (Number(inv.deliveryCharges) || 0);
+    newUdhaar += Math.max(0, Number(inv.balanceDue) || 0);
+    const lines = computeInvoiceItemBreakdown(inv, returns || [], exchanges || []);
+    lines.forEach((it) => {
+      const p = (it.productId && byId.get(it.productId)) || byName.get(String(it.name || "").trim().toLowerCase());
+      const key = p ? p.id : "name:" + String(it.name || "").trim().toLowerCase();
+      const qty = Number(it.remainingQty) || 0;
+      const lineSale = qty * (Number(it.perUnitRate) || 0);
+      const c = p ? finCostOn(costs, p.id, inv.date) : null;
+      const lineCost = c ? qty * c.rate : 0;
+      if (!c && lineSale > 0) missing += lineSale;
+      if (c && c.approx) approx += lineSale;
+      sale += lineSale;
+      cost += lineCost;
+      const row = prod[key] || (prod[key] = { key, productId: p ? p.id : "", name: p ? p.name : it.name, unit: it.unit || (p && p.unit) || "", qty: 0, sale: 0, cost: 0, hasCost: !!c });
+      row.qty += qty; row.sale += lineSale; row.cost += lineCost; row.hasCost = row.hasCost && !!c;
+    });
+  });
+  const expenses = {}, stockPaid = {}, owner = {};
+  let paidOut = 0;
+  (vouchers || []).forEach((v) => {
+    if (v.status === "Cancelled") return;
+    finPlanOf(v).forEach((k) => {
+      if (k.status !== "Paid" || !k.paid) return;
+      const d = k.paid.date || v.date;
+      if (d < from || d > to) return;
+      const amt = Number(k.amount) || 0;
+      paidOut += amt;
+      const type = finCatTypeById(finSettings, v.categoryId, v.categoryName);
+      const bucket = type === "stock" ? stockPaid : type === "owner" ? owner : expenses;
+      bucket[v.categoryName] = (bucket[v.categoryName] || 0) + amt;
+    });
+  });
+  const sum = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+  const expenseTotal = sum(expenses);
+  const commission = (commissionPayments || []).filter((c) => c.date >= from && c.date <= to).reduce((s, c) => s + (Number(c.amount) || 0), 0);
+  const cancelledIds = new Set(), cancelledNums = new Set();
+  (invoices || []).forEach((i) => { if (isInvoiceCancelled(i)) { cancelledIds.add(i.id); cancelledNums.add(i.number); } });
+  const collection = (payments || []).filter((p) => p.date >= from && p.date <= to && !(p.invoiceId ? cancelledIds.has(p.invoiceId) : p.note && p.note.startsWith("Against ") && cancelledNums.has(p.note.replace("Against ", "").trim())))
+    .reduce((s, p) => s + (Number(p.amount) || 0), 0);
+  const gross = sale - cost - discount + delivery;
+  const net = gross - expenseTotal - commission;
+  return {
+    sale, cost, discount, delivery, gross, net, expenses, expenseTotal, stockPaid, stockTotal: sum(stockPaid), owner, ownerTotal: sum(owner),
+    commission, collection, paidOut, invoiceCount, newUdhaar, approx, missing,
+    products: Object.values(prod).sort((a, b) => (b.sale - b.cost) - (a.sale - a.cost)),
+  };
+}
+
+function ProfitCostSetup({ fin, products, currentUser }) {
+  const [edit, setEdit] = useState({});
+  const [from, setFrom] = useState(todayISO());
+  const save = async (p) => {
+    const rate = Number(edit[p.id]);
+    if (!(rate > 0)) return;
+    await finMutate("costs", (c) => {
+      const list = (c[p.id] || []).filter((r) => r.from !== from);
+      return { ...c, [p.id]: [...list, { rate, from, at: new Date().toISOString(), by: finActor(currentUser).name }] };
+    });
+    setEdit((e) => { const n = { ...e }; delete n[p.id]; return n; });
+  };
+  return (
+    <div className="grid grid-cols-1 xl:grid-cols-[1.5fr_1fr] gap-4">
+      <section className="ct-card p-4 sm:p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <div className="ct-display text-[16px] font-bold ct-h">① {t("Purchase rate (cost) of each product")}</div>
+          <label className="text-[12px] ct-t2 flex items-center gap-2">{t("New rate valid from")}<input type="date" className={`${inputCls} !w-auto !py-1.5`} value={from} onChange={(e) => setFrom(e.target.value)} /></label>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[13px] min-w-[640px]">
+            <thead><tr className="text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+              {["Product", "Unit", "Sale rate", "Purchase rate now", "Margin", "New purchase rate", "History"].map((h) => <th key={h} className="px-2 py-2 text-start">{t(h)}</th>)}
+            </tr></thead>
+            <tbody>
+              {(products || []).length === 0 && <tr><td colSpan={7}><FinEmpty text="Add products first (Business → Products)." /></td></tr>}
+              {(products || []).map((p) => {
+                const c = finCostOn(fin.costs, p.id, todayISO());
+                const m = c && Number(p.price) ? ((Number(p.price) - c.rate) / Number(p.price)) * 100 : null;
+                const hist = [...((fin.costs[p.id]) || [])].sort((a, b) => String(b.from).localeCompare(String(a.from)));
+                return (
+                  <tr key={p.id} className="border-b border-slate-100">
+                    <td className="px-2 py-2 font-semibold ct-h">{p.name}</td>
+                    <td className="px-2 py-2 ct-t2">{p.unit}</td>
+                    <td className="px-2 py-2 tabular-nums">{fmtMoney(p.price)}</td>
+                    <td className="px-2 py-2 tabular-nums font-bold">{c ? fmtMoney(c.rate) : <span className="text-rose-400 font-semibold">{t("Not set")}</span>}</td>
+                    <td className={`px-2 py-2 tabular-nums ${m == null ? "ct-t3" : m < 0 ? "text-rose-400" : "text-emerald-500"}`}>{m == null ? "—" : `${m.toFixed(1)}%`}</td>
+                    <td className="px-2 py-2">
+                      <div className="flex gap-1.5">
+                        <input type="number" className={`${inputCls} !py-1.5 !w-28`} value={edit[p.id] ?? ""} placeholder={c ? String(c.rate) : "Rs"} onChange={(e) => setEdit({ ...edit, [p.id]: e.target.value })} onKeyDown={(e) => { if (e.key === "Enter") save(p); }} />
+                        <Btn small onClick={() => save(p)} disabled={!(Number(edit[p.id]) > 0)}>Save</Btn>
+                      </div>
+                    </td>
+                    <td className="px-2 py-2 text-[11.5px] ct-t3">{hist.slice(0, 3).map((r) => `${fmtMoney(r.rate)} (${fmtDate(r.from)})`).join(" · ") || "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        <div className="text-[12px] ct-t3 mt-2">{t("Every invoice uses the purchase rate valid on its date, so old profit does not change when you change a rate. Invoices before the first saved rate use that first rate (estimate).")}</div>
+      </section>
+      <section className="ct-card p-4 sm:p-5">
+        <div className="ct-display text-[16px] font-bold ct-h mb-1">② {t("Voucher category type")}</div>
+        <div className="text-[12px] ct-t3 mb-3">{t("“Stock purchase” is not counted as an expense — it is already in the cost of goods. “Owner drawing” is also not an expense.")}</div>
+        {fin.settings.categories.map((c) => (
+          <div key={c.id} className="flex items-center justify-between gap-2 py-1.5 border-b border-slate-200/50">
+            <span className="text-[13px] ct-h">{c.name}</span>
+            <select className={`${inputCls} !py-1.5 !w-40`} value={finCatType(fin.settings, c)}
+              onChange={(e) => finMutate("settings", (x) => ({ ...x, categories: x.categories.map((y) => (y.id === c.id ? { ...y, type: e.target.value } : y)) }))}>
+              <option value="expense">{t("Expense")}</option>
+              <option value="stock">{t("Stock purchase")}</option>
+              <option value="owner">{t("Owner drawing")}</option>
+            </select>
+          </div>
+        ))}
+      </section>
+    </div>
+  );
+}
+
+function ProfitPage({ currentUser, products, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionPayments, settings: company }) {
+  useLanguage();
+  const fin = useFin();
+  const [tab, setTab] = useState("report");
+  const [preset, setPreset] = useState("month");
+  const [range, setRange] = useState({ from: "", to: "" });
+  const today = todayISO();
+  const [from, to] = preset === "today" ? [today, today] : finPeriodRange(preset, range.from, range.to);
+  const args = { invoices, returns, exchanges, products, costs: fin.costs, vouchers: fin.vouchers, finSettings: fin.settings, payments, commissionPayments };
+  const r = useMemo(() => finProfitCompute({ from, to, ...args }), [from, to, invoices, returns, exchanges, products, fin.costs, fin.vouchers, fin.settings, payments, commissionPayments]);
+  const months = useMemo(() => {
+    const out = [];
+    const now = new Date();
+    for (let i = 5; i >= 0; i--) {
+      const d1 = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const d2 = new Date(now.getFullYear(), now.getMonth() - i + 1, 0);
+      const x = finProfitCompute({ from: dateToLocalISO(d1), to: dateToLocalISO(d2), ...args });
+      out.push({ label: d1.toLocaleString("en", { month: "short" }), sale: x.sale, net: x.net });
+    }
+    return out;
+  }, [invoices, returns, exchanges, products, fin.costs, fin.vouchers, fin.settings, payments, commissionPayments]);
+  const outstanding = useMemo(() => {
+    const o = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+    return Object.values(o).reduce((s, v) => s + Math.max(0, Number(v) || 0), 0);
+  }, [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments]);
+  const balances = useMemo(() => {
+    const mv = finMovements({ settings: fin.settings, vouchers: fin.vouchers, moves: fin.moves, payments, invoices });
+    let cash = 0, bank = 0;
+    fin.settings.accounts.forEach((a) => { const b = finAccountBalance(fin.settings, mv, a.id); if (a.type === "cash") cash += b; else bank += b; });
+    bank += finAccountBalance(fin.settings, mv, "acc_unassigned");
+    return { cash, bank };
+  }, [fin.settings, fin.vouchers, fin.moves, payments, invoices]);
+
+  if (!fin.loaded) return <div className="ct-card p-10 text-center ct-t2">{t("Loading…")}</div>;
+  const margin = r.sale > 0 ? (r.net / r.sale) * 100 : 0;
+  const grossM = r.sale > 0 ? (r.gross / r.sale) * 100 : 0;
+  const profit = r.net >= 0;
+  const noCosts = Object.keys(fin.costs).length === 0;
+  const mMax = Math.max(1, ...months.map((m) => Math.max(m.sale, Math.abs(m.net))));
+  const expList = Object.entries(r.expenses).sort((a, b) => b[1] - a[1]);
+  const eMax = expList.length ? expList[0][1] : 1;
+  const topProfit = r.products.filter((p) => p.hasCost)[0];
+  const bestMargin = [...r.products].filter((p) => p.hasCost && p.sale > 0).sort((a, b) => (b.sale - b.cost) / b.sale - (a.sale - a.cost) / a.sale)[0];
+  const card = (label, value, tone, sub) => (
+    <div className="ct-card p-4 min-w-0">
+      <div className="text-[11px] font-bold uppercase tracking-[.1em] ct-t3 truncate">{t(label)}</div>
+      <div className={`ct-display text-[21px] font-bold mt-1 tabular-nums truncate ${tone || "ct-h"}`}>{value}</div>
+      {sub && <div className="text-[12px] ct-t2 mt-0.5 truncate">{sub}</div>}
+    </div>
+  );
+
+  return (
+    <div>
+      <FinPageHead title="Profit Calculator" sub={`${fmtDate(from === "0000-01-01" ? (invoices[0] || {}).date || today : from)} — ${fmtDate(to === "9999-12-31" ? today : to)}`}
+        right={<FinTabs value={tab} onChange={setTab} tabs={[{ id: "report", label: "Profit report" }, { id: "setup", label: "Purchase rates & setup", count: noCosts ? 1 : 0 }]} />} />
+      {tab === "setup" ? <ProfitCostSetup fin={fin} products={products} currentUser={currentUser} /> : (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <button type="button" onClick={() => setPreset("today")} className={`rounded-full px-3 py-1 text-[12px] font-bold ${preset === "today" ? "bg-emerald-400/20 text-emerald-500" : "ct-chip ct-t2"}`}>{t("Today")}</button>
+            <FinPeriodPicker preset={preset} setPreset={setPreset} range={range} setRange={setRange} />
+          </div>
+
+          {(noCosts || r.missing > 0) && (
+            <button type="button" onClick={() => setTab("setup")} className="w-full text-start rounded-2xl border border-amber-400/40 bg-amber-400/10 px-4 py-3 text-[13.5px] text-amber-600">
+              ⚠ {noCosts ? t("Purchase rates are not set yet — profit cannot be calculated. Tap here to add them.") : `${t("Some products have no purchase rate")} (${fmtMoney(r.missing)} ${t("of sale")}). ${t("Their profit is shown as the full sale. Tap here to add.")}`}
+            </button>
+          )}
+
+          <div className={`rounded-2xl border px-5 py-4 flex flex-wrap items-center gap-4 ${profit ? "border-emerald-400/40 bg-gradient-to-r from-emerald-400/20 to-emerald-400/5" : "border-rose-400/40 bg-gradient-to-r from-rose-400/20 to-rose-400/5"}`}>
+            <span className={`w-14 h-14 rounded-full ${profit ? "bg-emerald-500" : "bg-rose-500"} text-white text-[26px] font-black flex items-center justify-center`}>{profit ? "↑" : "↓"}</span>
+            <div className="flex-1 min-w-[220px]">
+              <div className="ct-display text-[22px] sm:text-[26px] font-bold ct-h">{profit ? t("Business is in profit") : t("Business is in loss")}: {fmtMoney(Math.abs(r.net))}</div>
+              <div className="text-[13px] ct-t2">{t("Net profit")} = {t("Gross profit")} {fmtMoney(r.gross)} − {t("Expenses")} {fmtMoney(r.expenseTotal)}{r.commission ? ` − ${t("Commission")} ${fmtMoney(r.commission)}` : ""}</div>
+            </div>
+            <div className="text-end"><div className="text-[12px] ct-t2">{t("Profit margin")}</div><div className={`ct-display text-[30px] font-bold ${profit ? "text-emerald-500" : "text-rose-400"}`}>{margin.toFixed(1)}%</div></div>
+          </div>
+
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {card("Total sale", fmtMoney(r.sale), "ct-h", `${r.invoiceCount} ${t("invoices")}${r.discount ? ` · ${t("discount")} ${fmtMoney(r.discount)}` : ""}`)}
+            {card("Cost of goods sold", fmtMoney(r.cost), "text-rose-400", t("purchase cost of what was sold"))}
+            {card("Gross profit", fmtMoney(r.gross), "text-[#d4a94f]", `${grossM.toFixed(1)}%${r.delivery ? ` · ${t("incl. delivery")} ${fmtMoney(r.delivery)}` : ""}`)}
+            {card("Expenses", fmtMoney(r.expenseTotal), "text-rose-400", t("paid vouchers (expense type)"))}
+            {card("Payment received", fmtMoney(r.collection), "text-emerald-500", t("from customers"))}
+            {card("Payment given", fmtMoney(r.paidOut), "text-rose-400", `${t("stock")} ${fmtMoney(r.stockTotal)} · ${t("expenses")} ${fmtMoney(r.expenseTotal)}`)}
+            {card("Udhaar outstanding", fmtMoney(outstanding), "text-amber-500", `${t("new in this period")} ${fmtMoney(r.newUdhaar)}`)}
+            {card("Cash + Bank now", fmtMoney(balances.cash + balances.bank), "ct-h", `${t("Cash")} ${fmtMoney(balances.cash)} · ${t("Bank")} ${fmtMoney(balances.bank)}`)}
+          </div>
+
+          <section className="ct-card p-5">
+            <div className="flex items-center justify-between mb-3">
+              <div className="ct-display text-[16px] font-bold ct-h">{t("Sale vs net profit — last 6 months")}</div>
+              <div className="text-[12px] ct-t2"><span className="text-emerald-400">■</span> {t("Sale")} &nbsp; <span className="text-[#e9c77b]">■</span> {t("Net profit")}</div>
+            </div>
+            <div className="flex items-end gap-4 h-[180px]">
+              {months.map((m) => (
+                <div key={m.label} className="flex-1 flex flex-col items-center justify-end h-full">
+                  <div className="flex items-end gap-1 h-full w-full justify-center">
+                    <div className="w-[38%] rounded-t-md bg-gradient-to-t from-emerald-600 to-emerald-300" style={{ height: `${(m.sale / mMax) * 100}%`, minHeight: m.sale ? 3 : 0 }} title={fmtMoney(m.sale)} />
+                    <div className={`w-[38%] rounded-t-md ${m.net >= 0 ? "bg-gradient-to-t from-[#b8862f] to-[#e9c77b]" : "bg-rose-400"}`} style={{ height: `${(Math.abs(m.net) / mMax) * 100}%`, minHeight: m.net ? 3 : 0 }} title={fmtMoney(m.net)} />
+                  </div>
+                  <div className="text-[11.5px] ct-t2 mt-1.5">{m.label}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <div className="grid grid-cols-1 xl:grid-cols-[1.6fr_1fr] gap-4">
+            <section className="ct-card p-4 sm:p-5 overflow-x-auto">
+              <div className="ct-display text-[16px] font-bold ct-h mb-2">{t("Profit by product")}</div>
+              <table className="w-full text-[13px] min-w-[620px]">
+                <thead><tr className="text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+                  {["Product", "Sold", "Sale", "Cost", "Profit", "Margin"].map((h) => <th key={h} className={`px-2 py-2 ${h === "Product" || h === "Sold" ? "text-start" : "text-end"}`}>{t(h)}</th>)}
+                </tr></thead>
+                <tbody>
+                  {r.products.length === 0 && <tr><td colSpan={6}><FinEmpty text="No sales in this period." /></td></tr>}
+                  {r.products.map((p) => {
+                    const pr = p.sale - p.cost;
+                    return (
+                      <tr key={p.key} className="border-b border-slate-100">
+                        <td className="px-2 py-2 font-semibold ct-h">{p.name}{!p.hasCost && <span className="ms-1.5 text-[10.5px] font-bold text-rose-400">{t("no rate")}</span>}</td>
+                        <td className="px-2 py-2 ct-t2">{fmtQty(p.qty)} {p.unit}</td>
+                        <td className="px-2 py-2 text-end tabular-nums">{fmtMoney(p.sale)}</td>
+                        <td className="px-2 py-2 text-end tabular-nums ct-t2">{p.hasCost ? fmtMoney(p.cost) : "—"}</td>
+                        <td className={`px-2 py-2 text-end tabular-nums font-bold ${pr >= 0 ? "text-[#d4a94f]" : "text-rose-400"}`}>{p.hasCost ? fmtMoney(pr) : "—"}</td>
+                        <td className="px-2 py-2 text-end tabular-nums">{p.hasCost && p.sale ? `${((pr / p.sale) * 100).toFixed(1)}%` : "—"}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {(topProfit || bestMargin) && (
+                <div className="mt-3 rounded-xl border border-amber-400/30 bg-amber-400/10 px-3.5 py-2.5 text-[13px] text-amber-600">
+                  {topProfit && <>{t("Most profit")}: <b>{topProfit.name}</b> ({fmtMoney(topProfit.sale - topProfit.cost)})</>}
+                  {bestMargin && <> · {t("Best margin")}: <b>{bestMargin.name}</b> ({(((bestMargin.sale - bestMargin.cost) / bestMargin.sale) * 100).toFixed(1)}%)</>}
+                </div>
+              )}
+            </section>
+            <div className="space-y-4">
+              <section className="ct-card p-5">
+                <div className="ct-display text-[16px] font-bold ct-h mb-3">{t("Expenses")}</div>
+                {expList.length === 0 && <FinEmpty text="No expense vouchers paid in this period." />}
+                {expList.map(([n, a]) => (
+                  <div key={n} className="mb-2.5">
+                    <div className="flex justify-between text-[13px]"><span className="ct-t2">{n}</span><b className="ct-h tabular-nums">{fmtMoney(a)}</b></div>
+                    <div className="h-2 rounded-full bg-slate-400/15 mt-1 overflow-hidden"><div className="h-full rounded-full bg-rose-400 ct-barx" style={{ width: `${(a / eMax) * 100}%` }} /></div>
+                  </div>
+                ))}
+                {r.ownerTotal > 0 && <div className="text-[12px] ct-t3 mt-2">{t("Owner drawings (not an expense)")}: {fmtMoney(r.ownerTotal)}</div>}
+              </section>
+              <section className="ct-card p-5">
+                <div className="ct-display text-[16px] font-bold ct-h mb-2">{t("Where is the money?")}</div>
+                {[["💵", "Cash drawer", balances.cash, "ct-h"], ["🏦", "Bank / JazzCash", balances.bank, "ct-h"], ["🧾", "Udhaar with customers", outstanding, "text-amber-500"]].map(([ic, l, v, tone]) => (
+                  <div key={l} className="flex justify-between py-2 border-b border-slate-200/50 text-[13.5px]"><span className="ct-t2">{ic} {t(l)}</span><b className={`tabular-nums ${tone}`}>{fmtMoney(v)}</b></div>
+                ))}
+                <div className="text-[11.5px] ct-t3 mt-2">{t("Stock in godown will show here once stock tracking is added.")}</div>
+              </section>
+            </div>
+          </div>
+          {r.approx > 0 && <div className="text-[12px] ct-t3">* {t("Part of this period's sale")} ({fmtMoney(r.approx)}) {t("is before the first saved purchase rate, so its cost is an estimate.")}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ============================================================
+   CUSTOMER PORTAL (new) + staff "Portal Requests"
+   Customer can: see balance / credit limit, invoices (PDF, delivery status,
+   reorder), statement (PDF / WhatsApp), send a payment with screenshot,
+   place orders (→ Daily Orders), promise a payment (→ Promise To Pay),
+   see bookings, rates & offers, cement calculator, notifications,
+   manage sites / receivers, change password, send a complaint.
+   Own storage: ct-portal-payments, ct-portal-msgs, ct-portal-profiles
+   (+ ct-portalpay-file:<id> for each screenshot).
+   ============================================================ */
+
+const PORTAL_URDU = {
+  "Your balance": "آپ کا بقایا", "Pay now": "ادائیگی کریں", "Statement": "اسٹیٹمنٹ", "Order": "آرڈر", "Reorder": "دوبارہ منگوائیں",
+  "Today's rates": "آج کے ریٹ", "Delivery": "ڈیلیوری", "Booking": "بکنگ", "Calculator": "کیلکولیٹر", "Home": "ہوم", "Invoices": "انوائسز",
+  "Ledger": "لیجر", "Profile": "پروفائل", "Latest invoices": "تازہ انوائسز", "See all": "سب دیکھیں", "Credit limit": "کریڈٹ لمٹ",
+  "Send payment for verification": "ادائیگی تصدیق کے لیے بھیجیں", "Where to send": "کہاں بھیجیں", "Payment screenshot": "ادائیگی کا اسکرین شاٹ",
+  "My payments": "میری ادائیگیاں", "Place order": "آرڈر بھیجیں", "My orders": "میرے آرڈر", "Promise a payment": "ادائیگی کا وعدہ",
+  "Notifications": "اطلاعات", "Complaint / help": "شکایت / مدد", "Change password": "پاس ورڈ تبدیل کریں", "My sites": "میری سائٹس",
+  "Material receivers": "مال لینے والے", "Log out": "لاگ آؤٹ", "Verifying": "تصدیق ہو رہی ہے", "Verified": "تصدیق شدہ", "Rejected": "مسترد",
+};
+Object.entries(PORTAL_URDU).forEach(([en, ur]) => { if (!(en in translations.ur)) translations.ur[en] = ur; });
+
+async function portalFilePut(id, dataUrl) { await storeSet(`ct-portalpay-file:${id}`, dataUrl ? { dataUrl } : null); }
+async function portalFileGet(id) { const v = await storeGet(`ct-portalpay-file:${id}`, null); return v && v.dataUrl ? v.dataUrl : ""; }
+
+function portalCode(list, prefix) {
+  let max = 0;
+  (list || []).forEach((x) => { const n = Number(String(x.code || "").replace(prefix + "-", "")) || 0; if (n > max) max = n; });
+  return `${prefix}-${String(max + 1).padStart(4, "0")}`;
+}
+function portalAccounts(settings) {
+  const accs = (settings.accounts || []).filter((a) => a.type !== "cash" && a.accountNumber);
+  const shown = accs.filter((a) => a.showInPortal);
+  return shown.length ? shown : accs;
+}
+function portalLevel(yearTotal) {
+  if (yearTotal >= 2000000) return { label: "Gold", icon: "⭐", tone: "text-amber-600" };
+  if (yearTotal >= 500000) return { label: "Silver", icon: "🥈", tone: "text-slate-500" };
+  return { label: "Bronze", icon: "🥉", tone: "text-orange-700" };
+}
+function portalLedgerRows(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments) {
+  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  let bal = Number(customer.openingBalance) || 0;
+  const rows = [...entries].sort((a, b) => String(a.date).localeCompare(String(b.date))).map((e) => {
+    bal += (Number(e.debit) || 0) - (Number(e.credit) || 0);
+    return { ...e, balance: bal };
+  });
+  return { rows, outstanding };
+}
+
+/* ---------------- Statement print ---------------- */
+
+function StatementDoc({ customer, company, from, to, opening, rows, closing, size, fit }) {
+  const s = PRINT_SIZES[size];
+  if (s.thermal) {
+    return (
+      <div style={printDocStyle(size, false, true)}>
+        <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.15em" }}>{company.companyName}</div>
+        <div style={{ textAlign: "center", fontWeight: 700 }}>ACCOUNT STATEMENT</div>
+        <div style={{ textAlign: "center" }}>{customer.name}</div>
+        <div style={{ textAlign: "center" }}>{fmtDate(from)} — {fmtDate(to)}</div>
+        <PrintRule />
+        <PrintRow l="Opening" v={fmtMoney(opening)} />
+        {rows.map((r) => (
+          <div key={r.id}>
+            <PrintRow l={`${fmtDate(r.date)} ${r.type}`} v={r.debit ? `+${fmtMoney(r.debit).replace("Rs ", "")}` : `-${fmtMoney(r.credit).replace("Rs ", "")}`} />
+          </div>
+        ))}
+        <PrintRule />
+        <PrintRow l="Closing balance" v={fmtMoney(closing)} bold big />
+      </div>
+    );
+  }
+  const cell = { padding: "1.3mm 2mm", borderBottom: "1px solid #e5e7eb" };
+  const num = { ...cell, textAlign: "right", whiteSpace: "nowrap" };
+  return (
+    <div style={{ ...printDocStyle(size, false, fit), fontFamily: "Inter, Arial, sans-serif" }}>
+      <FinDocHeader company={company} qrText="" title="Account Statement" sub={`${customer.name}${customer.phone ? " · " + customer.phone : ""} · ${fmtDate(from)} — ${fmtDate(to)}`} />
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: ".9em" }}>
+        <thead><tr style={{ background: "#0f172a", color: "#fff" }}>
+          <th style={{ ...cell, textAlign: "left" }}>Date</th><th style={{ ...cell, textAlign: "left" }}>Detail</th>
+          <th style={{ ...cell, textAlign: "right" }}>Debit</th><th style={{ ...cell, textAlign: "right" }}>Credit</th><th style={{ ...cell, textAlign: "right" }}>Balance</th>
+        </tr></thead>
+        <tbody>
+          <tr><td style={cell}>{fmtDate(from)}</td><td style={cell}><b>Opening balance</b></td><td style={num}></td><td style={num}></td><td style={num}><b>{fmtMoney(opening)}</b></td></tr>
+          {rows.map((r) => (
+            <tr key={r.id}>
+              <td style={cell}>{fmtDate(r.date)}</td><td style={cell}>{r.type}{r.ref ? ` · ${r.ref}` : ""}</td>
+              <td style={{ ...num, color: "#be123c" }}>{r.debit ? fmtMoney(r.debit) : ""}</td><td style={{ ...num, color: "#047857" }}>{r.credit ? fmtMoney(r.credit) : ""}</td>
+              <td style={num}>{fmtMoney(r.balance)}</td>
+            </tr>
+          ))}
+          <tr><td style={cell} colSpan={4}><b>Closing balance</b></td><td style={num}><b>{fmtMoney(closing)}</b></td></tr>
+        </tbody>
+      </table>
+      <div style={{ marginTop: "3mm", fontSize: ".72em", color: "#64748b" }}>Printed {fmtDateTime(new Date().toISOString())}</div>
+    </div>
+  );
+}
+
+/* ---------------- Small UI ---------------- */
+
+function PSec({ title, right, children, className = "" }) {
+  return (
+    <section className={`mx-3.5 mt-3 bg-white rounded-2xl p-3.5 shadow-[0_6px_18px_-12px_rgba(15,23,42,.35)] ${className}`}>
+      {title && <div className="flex items-center justify-between text-[11.5px] font-extrabold tracking-[.08em] uppercase text-slate-500 mb-2"><span>{t(title)}</span>{right}</div>}
+      {children}
+    </section>
+  );
+}
+function PPill({ s }) {
+  const map = { Paid: "bg-emerald-100 text-emerald-700", Partial: "bg-amber-100 text-amber-700", Unpaid: "bg-rose-100 text-rose-700", Pending: "bg-amber-100 text-amber-700", Verified: "bg-emerald-100 text-emerald-700", Rejected: "bg-rose-100 text-rose-700", Processing: "bg-sky-100 text-sky-700", Completed: "bg-emerald-100 text-emerald-700", Cancelled: "bg-slate-200 text-slate-600", Open: "bg-amber-100 text-amber-700", Resolved: "bg-emerald-100 text-emerald-700" };
+  const label = { Pending: "Pending", Verified: "Verified" }[s] || s;
+  return <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-extrabold uppercase whitespace-nowrap ${map[s] || "bg-slate-100 text-slate-600"}`}>{t(label)}</span>;
+}
+function PSheet({ title, onClose, children }) {
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => { document.body.style.overflow = prev; window.removeEventListener("keydown", onKey); };
+  }, []);
+  return (
+    <div className="fixed inset-0 z-50 bg-slate-900/50 flex items-end sm:items-center justify-center" onClick={onClose}>
+      <div className="bg-[#f4f6fa] w-full sm:max-w-lg max-h-[92dvh] overflow-y-auto rounded-t-3xl sm:rounded-3xl pb-6" onClick={(e) => e.stopPropagation()}>
+        <div className="sticky top-0 bg-[#f4f6fa] z-10 flex items-center gap-3 px-4 pt-4 pb-2">
+          <button type="button" onClick={onClose} className="w-9 h-9 rounded-xl bg-white shadow text-slate-700 font-bold">←</button>
+          <div className="text-[17px] font-extrabold text-slate-900">{t(title)}</div>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+const P_INPUT = "w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[14px] text-slate-900 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20";
+const P_BTN = "rounded-xl px-4 py-3 text-[14px] font-extrabold text-center active:scale-[.98] transition disabled:opacity-50";
+const P_EM = `${P_BTN} text-white bg-gradient-to-br from-emerald-500 to-emerald-700 shadow-[0_10px_22px_-12px_rgba(5,150,105,.8)]`;
+const P_GH = `${P_BTN} bg-slate-100 text-slate-800`;
+
+/* ---------------- Pay sheet ---------------- */
+
+function PortalPaySheet({ customer, outstanding, invoice, fin, onClose }) {
+  const accs = portalAccounts(fin.settings);
+  const [amount, setAmount] = useState(String(invoice ? Math.max(0, Number(invoice.balanceDue) || 0) || "" : Math.max(0, outstanding) || ""));
+  const [method, setMethod] = useState(accs[0] ? accs[0].id : "jazz");
+  const [txn, setTxn] = useState("");
+  const [shot, setShot] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  async function submit() {
+    const a = roundMoney(Number(amount));
+    if (!(a > 0)) { alert(t("Please enter a valid amount.")); return; }
+    if (!shot) { alert(t("Please add the payment screenshot.")); return; }
+    setBusy(true);
+    const id = uid("prq");
+    const acc = accs.find((x) => x.id === method);
+    try {
+      await finMutate("portalPay", (l) => [...l, {
+        id, code: portalCode(l, "PRQ"), customerId: customer.id, customerName: customer.name, amount: a,
+        method: acc ? (acc.type === "wallet" ? "Easypaisa/JazzCash" : "Bank Transfer") : method === "shop" ? "Cash" : "Easypaisa/JazzCash",
+        accountName: acc ? acc.name : method, invoiceId: invoice ? invoice.id : "", invoiceNumber: invoice ? invoice.number : "",
+        txnId: txn.trim(), hasProof: true, status: "Pending", at: new Date().toISOString(),
+      }]);
+      await portalFilePut(id, shot);
+      setDone(true);
+    } catch (e) { console.error(e); alert(t("Could not send. Check your internet connection and try again.")); }
+    setBusy(false);
+  }
+  const copy = (txt) => { try { navigator.clipboard.writeText(txt); } catch {} };
+  if (done) {
+    return (
+      <PSheet title="Pay now" onClose={onClose}>
+        <PSec><div className="text-center py-4"><div className="text-[44px]">✅</div><div className="text-[17px] font-extrabold text-slate-900">{t("Payment sent for verification")}</div><div className="text-[13px] text-slate-500 mt-1">{t("The shop will check it. After that your balance goes down by itself.")}</div></div>
+          <button type="button" className={`${P_EM} w-full`} onClick={onClose}>{t("OK")}</button></PSec>
+      </PSheet>
+    );
+  }
+  return (
+    <PSheet title="Pay now" onClose={onClose}>
+      <PSec title="How much?">
+        <input type="number" inputMode="decimal" className={`${P_INPUT} !text-[24px] font-black`} value={amount} onChange={(e) => setAmount(e.target.value)} />
+        <div className="flex flex-wrap gap-1.5 mt-2">
+          {outstanding > 0 && <button type="button" onClick={() => setAmount(String(outstanding))} className="rounded-full bg-sky-100 text-sky-700 px-3 py-1.5 text-[12px] font-bold">{t("Full")} {fmtMoney(outstanding)}</button>}
+          {invoice && <button type="button" onClick={() => setAmount(String(invoice.balanceDue))} className="rounded-full bg-sky-100 text-sky-700 px-3 py-1.5 text-[12px] font-bold">{invoice.number} · {fmtMoney(invoice.balanceDue)}</button>}
+        </div>
+      </PSec>
+      <PSec title="Where to send">
+        {accs.length === 0 && <div className="text-[13px] text-slate-500">{t("Ask the shop for the account number.")} {fin.settings && ""}</div>}
+        {accs.map((a) => (
+          <label key={a.id} className={`flex items-center gap-3 py-2.5 border-b border-slate-100 last:border-0 cursor-pointer`}>
+            <input type="radio" name="pacc" checked={method === a.id} onChange={() => setMethod(a.id)} className="accent-emerald-600 w-4 h-4" />
+            <div className="flex-1 min-w-0"><div className="text-[13.5px] font-bold text-slate-900">{a.type === "wallet" ? "📱" : "🏦"} {a.bankName || a.name}</div><div className="text-[12px] text-slate-500 truncate">{a.accountTitle || ""}</div></div>
+            <button type="button" onClick={() => copy(a.accountNumber)} className="text-[13px] font-extrabold text-slate-800">{a.accountNumber} 📋</button>
+          </label>
+        ))}
+        <label className="flex items-center gap-3 py-2.5 cursor-pointer"><input type="radio" name="pacc" checked={method === "shop"} onChange={() => setMethod("shop")} className="accent-emerald-600 w-4 h-4" /><span className="text-[13.5px] font-bold text-slate-900">💵 {t("Cash given at the shop / to the rider")}</span></label>
+      </PSec>
+      <PSec title="Payment screenshot">
+        <label className="block border-2 border-dashed border-slate-300 rounded-2xl p-4 text-center text-[13px] text-slate-500 cursor-pointer">
+          {shot ? <img src={shot} alt="" className="max-h-48 mx-auto rounded-xl" /> : <>📷 {t("Tap to add the screenshot / receipt photo")}</>}
+          <input type="file" accept="image/*" className="hidden" onChange={async (e) => { const f = e.target.files && e.target.files[0]; if (f) { try { setShot(await finResizeImage(f, 1200, 0.7)); } catch { alert(t("Could not read this image.")); } } }} />
+        </label>
+        <input className={`${P_INPUT} mt-2`} placeholder={t("Transaction ID (optional)")} value={txn} onChange={(e) => setTxn(e.target.value)} />
+        <button type="button" disabled={busy} onClick={submit} className={`${P_EM} w-full mt-3`}>{busy ? t("Sending…") : `✓ ${t("Send payment for verification")}`}</button>
+        <div className="text-[11.5px] text-slate-500 text-center mt-2">{t("The shop verifies it → your balance goes down → you get the receipt.")}</div>
+      </PSec>
+    </PSheet>
+  );
+}
+
+/* ---------------- Invoice sheet ---------------- */
+
+function PortalInvoiceSheet({ invoice, settings, returns, exchanges, onClose, onPay, onReorder }) {
+  const { proofs } = useRecvProofs(invoice.id, true);
+  const [print, setPrint] = useState(false);
+  const rs = computeInvoiceReturnStatus(invoice, returns, exchanges);
+  const delivered = proofs.length > 0;
+  const steps = [
+    { ok: true, label: "Invoice made", sub: fmtDate(invoice.date) },
+    { ok: !!invoice.driverName || delivered, label: "On the rickshaw", sub: invoice.driverName ? `${invoice.driverName}${invoice.vehicleType ? " · " + invoice.vehicleType : ""}` : "" },
+    { ok: delivered, label: "Delivered", sub: delivered ? `${t("Receiving photo")} ✓` : t("Waiting") },
+  ];
+  const wa = `https://wa.me/?text=${encodeURIComponent(buildInvoiceWaMessage(invoice, settings))}`;
+  return (
+    <PSheet title={`${t("Invoice")} ${invoice.number}`} onClose={onClose}>
+      <PSec>
+        <div className="flex justify-between items-start"><div><div className="text-[12px] text-slate-500">{fmtDate(invoice.date)}</div><div className="text-[22px] font-black text-slate-900">{fmtMoney(invoice.total)}</div></div><PPill s={invoice.status} /></div>
+        <div className="mt-2 divide-y divide-slate-100">
+          {(invoice.items || []).map((it, i) => <div key={i} className="flex justify-between py-2 text-[13.5px]"><span className="text-slate-700">{it.name} · {fmtQty(it.qty)} {it.unit} × {fmtMoney(it.price).replace("Rs ", "")}</span><b>{fmtMoney(it.total)}</b></div>)}
+          {(Number(invoice.rickshawRent) || 0) + (Number(invoice.deliveryCharges) || 0) > 0 && <div className="flex justify-between py-2 text-[13.5px]"><span className="text-slate-700">{t("Rickshaw + delivery")}</span><b>{fmtMoney((Number(invoice.rickshawRent) || 0) + (Number(invoice.deliveryCharges) || 0))}</b></div>}
+          {Number(invoice.discount) > 0 && <div className="flex justify-between py-2 text-[13.5px]"><span className="text-slate-700">{t("Discount")}</span><b>-{fmtMoney(invoice.discount)}</b></div>}
+          <div className="flex justify-between py-2 text-[13.5px]"><span className="text-slate-700">{t("Paid")}</span><b className="text-emerald-600">{fmtMoney(invoice.paymentReceived || 0)}</b></div>
+          <div className="flex justify-between py-2 text-[14px]"><b>{t("Due on this invoice")}</b><b className="text-rose-600">{fmtMoney(invoice.balanceDue || 0)}</b></div>
+        </div>
+      </PSec>
+      <PSec title="Delivery">
+        {steps.map((s, i) => (
+          <div key={i} className="flex gap-3 py-1.5">
+            <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[12px] font-black text-white ${s.ok ? "bg-emerald-500" : "bg-slate-300"}`}>{s.ok ? "✓" : i + 1}</span>
+            <div><div className="text-[13.5px] font-bold text-slate-900">{t(s.label)}</div>{s.sub && <div className="text-[12px] text-slate-500">{s.sub}</div>}</div>
+          </div>
+        ))}
+        {proofs[0] && <img src={recvSafeImageSrc(proofs[0].proof_image)} alt="" className="mt-2 rounded-xl max-h-52 w-full object-cover" />}
+      </PSec>
+      <div className="grid grid-cols-2 gap-2 mx-3.5 mt-3">
+        <button type="button" className={P_GH} onClick={() => setPrint(true)}>⬇ PDF</button>
+        <a className={P_GH} href={wa} target="_blank" rel="noreferrer">💬 WhatsApp</a>
+        <button type="button" className={P_GH} onClick={() => onReorder(invoice)}>🔁 {t("Reorder")}</button>
+        {Number(invoice.balanceDue) > 0 ? <button type="button" className={P_EM} onClick={() => onPay(invoice)}>💳 {t("Pay")}</button> : <span />}
+      </div>
+      {print && <InvoicePrintDialog invoice={invoice} settings={settings} rs={rs} onClose={() => setPrint(false)} />}
+    </PSheet>
+  );
+}
+
+/* ---------------- Calculator ---------------- */
+
+function PortalCalculator({ products, onOrder }) {
+  const [mode, setMode] = useState("house");
+  const [v, setV] = useState({ w: 20, l: 40, floors: 1, thick: 5, area: 100 });
+  const cement = (products || []).find((p) => /cement/i.test(p.name));
+  let bags = 0;
+  if (mode === "house") bags = Math.ceil(v.w * v.l * v.floors * 0.4);
+  if (mode === "slab") { const m3 = v.w * v.l * (v.thick / 12) * 0.0283168; bags = Math.ceil(m3 * 6.34); }
+  if (mode === "plaster") bags = Math.ceil((v.area / 100) * 1.7);
+  const set = (k) => (e) => setV({ ...v, [k]: Number(e.target.value) || 0 });
+  return (
+    <div>
+      <div className="grid grid-cols-3 gap-1.5 mb-3">
+        {[["house", "Whole house"], ["slab", "Lenter / slab"], ["plaster", "Plaster"]].map(([id, l]) => (
+          <button key={id} type="button" onClick={() => setMode(id)} className={`rounded-xl py-2 text-[12px] font-bold ${mode === id ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-700"}`}>{t(l)}</button>
+        ))}
+      </div>
+      {mode !== "plaster" ? (
+        <div className="grid grid-cols-3 gap-2">
+          <label className="text-[11.5px] text-slate-500">{t("Width ft")}<input type="number" className={P_INPUT} value={v.w} onChange={set("w")} /></label>
+          <label className="text-[11.5px] text-slate-500">{t("Length ft")}<input type="number" className={P_INPUT} value={v.l} onChange={set("l")} /></label>
+          {mode === "house" ? <label className="text-[11.5px] text-slate-500">{t("Floors")}<input type="number" className={P_INPUT} value={v.floors} onChange={set("floors")} /></label>
+            : <label className="text-[11.5px] text-slate-500">{t("Thickness in")}<input type="number" className={P_INPUT} value={v.thick} onChange={set("thick")} /></label>}
+        </div>
+      ) : (
+        <label className="text-[11.5px] text-slate-500">{t("Wall area sq.ft")}<input type="number" className={P_INPUT} value={v.area} onChange={set("area")} /></label>
+      )}
+      <div className="mt-3 rounded-2xl bg-emerald-50 p-3 flex items-center justify-between">
+        <div><div className="text-[12px] text-emerald-700 font-bold">{t("About")}</div><div className="text-[24px] font-black text-slate-900">{bags.toLocaleString()} {t("bags")}</div>{cement && <div className="text-[12px] text-slate-600">≈ {fmtMoney(bags * Number(cement.price || 0))}</div>}</div>
+        {cement && bags > 0 && <button type="button" className={P_EM} onClick={() => onOrder(cement, bags)}>🛒 {t("Order this")}</button>}
+      </div>
+      <div className="text-[11px] text-slate-400 mt-2">{t("Rough estimate only — the real need depends on the design.")}</div>
+    </div>
+  );
+}
+
+/* ---------------- Portal ---------------- */
+
+function CustomerPortal2({ currentUser, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, offers, products, orders, bookings, settings, onPortalOrders, onCreatePromise, saveCustomer, onLogout }) {
+  useLanguage();
+  const fin = useFin();
+  const customer = customers.find((c) => c.id === currentUser.id);
+  const [tab, setTab] = useState("home");
+  const [sheet, setSheet] = useState(null);
+  const [invFilter, setInvFilter] = useState("Unpaid");
+  const [cart, setCart] = useState({});
+  const [orderInfo, setOrderInfo] = useState({ site: "", when: "Kal subah", receiver: "", notes: "" });
+  const [range, setRange] = useState(() => ({ from: todayISO().slice(0, 8) + "01", to: todayISO() }));
+  const [stmtPrint, setStmtPrint] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [orderDone, setOrderDone] = useState("");
+
+  useEffect(() => { applyThemeClass("light"); }, []);
+  if (!customer) return <div className="p-6 text-slate-500">{t("Account not found — please contact the shop.")}</div>;
+
+  const today = todayISO();
+  const { rows, outstanding } = portalLedgerRows(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  const myInvoices = invoices.filter((i) => i.customerId === customer.id && !isInvoiceCancelled(i)).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  const myOrders = (orders || []).filter((o) => o.customerId === customer.id).sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.code).localeCompare(String(a.code)));
+  const myBookings = (bookings || []).filter((b) => b.customerId === customer.id && b.status !== "Cancelled");
+  const myPromises = (promises || []).filter((p) => p.customerId === customer.id && p.status !== "Deleted").map(promiseWithComputed).filter((p) => p.status === "Pending" || p.status === "Partially Paid");
+  const myClaims = fin.portalPay.filter((c) => c.customerId === customer.id).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const myMsgs = fin.portalMsgs.filter((m) => m.customerId === customer.id).sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const profile = fin.portalProfiles[customer.id] || { sites: [], receivers: [] };
+  const activeOffers = (offers || []).filter((o) => o.active);
+  const limit = Number(customer.creditLimit) || 0;
+  const used = limit ? Math.min(100, Math.round((Math.max(0, outstanding) / limit) * 100)) : 0;
+  const yearStart = today.slice(0, 4) + "-01-01";
+  const yearTotal = myInvoices.filter((i) => i.date >= yearStart).reduce((s, i) => s + (Number(i.total) || 0), 0);
+  const level = portalLevel(yearTotal);
+  const counts = { Unpaid: 0, Partial: 0, Paid: 0 };
+  myInvoices.forEach((i) => { counts[i.status] = (counts[i.status] || 0) + 1; });
+
+  const opening = (() => { let b = Number(customer.openingBalance) || 0; rows.forEach((r) => { if (r.date < range.from) b = r.balance; }); return rows.filter((r) => r.date < range.from).length ? b : Number(customer.openingBalance) || 0; })();
+  const stmtRows = rows.filter((r) => r.date >= range.from && r.date <= range.to);
+  const closing = stmtRows.length ? stmtRows[stmtRows.length - 1].balance : opening;
+
+  const notes = [];
+  myClaims.slice(0, 10).forEach((c) => { if (c.status !== "Pending") notes.push({ at: c.verifiedAt || c.at, icon: c.status === "Verified" ? "✅" : "⚠", text: `${fmtMoney(c.amount)} ${t("payment")} ${t(c.status)}${c.reason ? " — " + c.reason : ""}` }); });
+  myInvoices.slice(0, 6).forEach((i) => notes.push({ at: i.date, icon: "🧾", text: `${t("New invoice")} ${i.number} · ${fmtMoney(i.total)}` }));
+  payments.filter((p) => p.customerId === customer.id).slice(-6).forEach((p) => notes.push({ at: p.date, icon: "💰", text: `${t("Payment received")} ${fmtMoney(p.amount)} · ${p.method || ""}` }));
+  myOrders.slice(0, 6).forEach((o) => notes.push({ at: o.date, icon: "🛒", text: `${t("Order")} ${o.code} · ${o.productName} ${o.qty} — ${t(o.status)}` }));
+  myMsgs.forEach((m) => { if (m.reply) notes.push({ at: m.repliedAt || m.at, icon: "💬", text: `${t("Shop replied")}: ${m.reply}` }); });
+  notes.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+
+  const saveProfile = (patch) => finMutate("portalProfiles", (p) => ({ ...p, [customer.id]: { ...(p[customer.id] || { sites: [], receivers: [] }), ...patch } }));
+  const cartItems = Object.entries(cart).map(([pid, q]) => ({ p: (products || []).find((x) => x.id === pid), q: Number(q) || 0 })).filter((x) => x.p && x.q > 0);
+  const cartTotal = cartItems.reduce((s, x) => s + x.q * Number(x.p.price || 0), 0);
+
+  function placeOrder() {
+    if (!cartItems.length) { alert(t("Choose at least one item.")); return; }
+    const noteParts = [orderInfo.site && `Site: ${orderInfo.site}`, orderInfo.receiver && `Receiver: ${orderInfo.receiver}`, orderInfo.notes, "Portal order"].filter(Boolean).join(" · ");
+    onPortalOrders(cartItems.map(({ p, q }) => ({
+      customerId: customer.id, customerName: customer.name, customerPhone: customer.phone || "",
+      productId: p.id, productName: p.name, unit: p.unit, qty: q, requestedFor: orderInfo.when, date: today, notes: noteParts, source: "Portal",
+    })));
+    setCart({});
+    setOrderDone(t("Order sent — the shop will confirm it."));
+    setTimeout(() => setOrderDone(""), 5000);
+  }
+  function reorder(inv) {
+    const c = {};
+    (inv.items || []).forEach((it) => {
+      const p = (products || []).find((x) => x.id === it.productId) || (products || []).find((x) => String(x.name).toLowerCase() === String(it.name).toLowerCase());
+      if (p) c[p.id] = (Number(c[p.id]) || 0) + Number(it.qty);
+    });
+    setCart(c);
+    setSheet(null);
+    setTab("order");
+  }
+  const stmtText = [`*${settings.companyName} — Statement*`, customer.name, `${fmtDate(range.from)} — ${fmtDate(range.to)}`, "", `Opening: ${fmtMoney(opening)}`, ...stmtRows.map((r) => `${fmtDate(r.date)} ${r.type}: ${r.debit ? "+" + fmtMoney(r.debit) : "-" + fmtMoney(r.credit)} = ${fmtMoney(r.balance)}`), "", `Balance: ${fmtMoney(closing)}`].join("\n");
+  const phone = String(settings.companyPhone || "").replace(/[^0-9]/g, "");
+
+  const NavBtn = ({ id, icon, label }) => (
+    <button type="button" onClick={() => { setTab(id); window.scrollTo(0, 0); }} className={`flex flex-col items-center gap-0.5 text-[10.5px] font-bold ${tab === id ? "text-emerald-700" : "text-slate-400"}`}>
+      <span className="text-[19px]">{icon}</span>{t(label)}
+    </button>
+  );
+  const InvRow = ({ inv }) => (
+    <button type="button" onClick={() => setSheet({ type: "invoice", inv })} className="w-full flex justify-between items-center py-2.5 border-b border-slate-100 last:border-0 text-start">
+      <div><div className="text-[14px] font-extrabold text-slate-900">{inv.number}</div><div className="text-[11.5px] text-slate-400">{fmtDate(inv.date)} · {(inv.items || []).map((it) => `${fmtQty(it.qty)} ${it.unit || ""} ${it.name}`).join(", ").slice(0, 40)}</div></div>
+      <div className="text-end"><div className="text-[14px] font-extrabold text-slate-900">{fmtMoney(inv.total)}</div><PPill s={inv.status} /></div>
+    </button>
+  );
+
+  return (
+    <div className="min-h-[100dvh] bg-[#f4f6fa] text-slate-900 pb-24" style={{ fontFamily: "Inter, system-ui, sans-serif" }}>
+      <ThemeStyles />
+      <div className="max-w-xl mx-auto">
+        {/* Header */}
+        <div className="bg-gradient-to-br from-emerald-800 via-emerald-700 to-teal-700 text-white px-4 pt-5 pb-20 sm:rounded-b-3xl rounded-b-[26px]">
+          <div className="flex items-center justify-between gap-2">
+            <div className="min-w-0"><div className="text-[12px] opacity-80">{t("Assalam o Alaikum")} 👋</div><div className="text-[20px] font-black truncate">{customer.name}</div></div>
+            <div className="flex items-center gap-2 shrink-0">
+              <div className="bg-white/15 rounded-xl"><LanguageSwitcher compact /></div>
+              <button type="button" onClick={() => setSheet({ type: "notes" })} className="relative w-9 h-9 rounded-xl bg-white/15 text-[17px]">🔔{notes.length > 0 && <span className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-[10px] font-black flex items-center justify-center">{Math.min(9, notes.length)}</span>}</button>
+              {settings.logoUrl ? <img src={settings.logoUrl} alt="" className="w-9 h-9 rounded-xl bg-white object-contain p-0.5" /> : <div className="w-9 h-9 rounded-xl bg-white text-emerald-700 font-black flex items-center justify-center">{uiInitials(settings.companyName)}</div>}
+            </div>
+          </div>
+          <div className="text-[11.5px] opacity-85 mt-1.5">{settings.companyName}{settings.companyAddress ? ` · ${settings.companyAddress}` : ""}</div>
+          {activeOffers.length > 0 && <div className="mt-2 text-[12px] font-bold bg-white/15 rounded-xl px-3 py-1.5 truncate">🎁 {activeOffers.map((o) => o.text).join("  ·  ")}</div>}
+        </div>
+
+        {/* Balance card (always visible) */}
+        <div className="mx-3.5 -mt-16 bg-white rounded-3xl p-4 shadow-[0_18px_36px_-18px_rgba(15,23,42,.45)] relative">
+          <div className="flex justify-between">
+            <div><div className="text-[12px] font-bold text-slate-500">{t("Your balance")}</div><div className={`text-[30px] font-black tracking-tight ${outstanding > 0 ? "text-rose-600" : "text-emerald-600"}`}>{fmtMoney(outstanding)}</div></div>
+            <div className="text-end"><div className="text-[12px] font-bold text-slate-500">{t("Invoices")}</div><div className="text-[30px] font-black">{myInvoices.length}</div></div>
+          </div>
+          {limit > 0 && (
+            <>
+              <div className="flex justify-between text-[11.5px] text-slate-500 mt-1"><span>{t("Credit limit")} {fmtMoney(limit)}</span><b className={used >= 90 ? "text-rose-600" : used >= 60 ? "text-amber-600" : "text-emerald-600"}>{used}% {t("used")}</b></div>
+              <div className="h-2 rounded-full bg-slate-200 overflow-hidden mt-1"><div className={`h-full rounded-full ${used >= 90 ? "bg-rose-500" : used >= 60 ? "bg-gradient-to-r from-amber-400 to-rose-500" : "bg-emerald-500"}`} style={{ width: `${used}%` }} /></div>
+            </>
+          )}
+          <div className="grid grid-cols-2 gap-2 mt-3">
+            <button type="button" className={P_EM} onClick={() => setSheet({ type: "pay" })}>💳 {t("Pay now")}</button>
+            <button type="button" className={P_GH} onClick={() => setTab("ledger")}>📄 {t("Statement")}</button>
+          </div>
+        </div>
+
+        {tab === "home" && (
+          <>
+            <div className="grid grid-cols-4 gap-2 mx-3.5 mt-3">
+              {[["🛒", "Order", () => setTab("order")], ["🔁", "Reorder", () => { setInvFilter("All"); setTab("invoices"); }], ["🏷️", "Today's rates", () => setTab("order")], ["🚚", "Delivery", () => { setInvFilter("All"); setTab("invoices"); }],
+                ["📦", "Booking", () => setSheet({ type: "bookings" })], ["🧮", "Calculator", () => setSheet({ type: "calc" })], ["🤝", "Promise a payment", () => setSheet({ type: "promise" })], ["💬", "Complaint / help", () => setSheet({ type: "help" })]].map(([ic, l, fn]) => (
+                <button key={l} type="button" onClick={fn} className="bg-white rounded-2xl py-2.5 px-1 text-center text-[11px] font-bold text-slate-700 shadow-[0_4px_12px_-8px_rgba(15,23,42,.35)] active:scale-95 transition">
+                  <span className="block text-[22px] mb-0.5">{ic}</span>{t(l)}
+                </button>
+              ))}
+            </div>
+            {myPromises.length > 0 && (
+              <PSec title="Your promise">
+                {myPromises.map((p) => <div key={p.id} className="text-[13.5px]">🟡 {fmtDate(p.expectedDate)} — <b>{fmtMoney(p.remainingAmount)}</b> {t("to pay")}</div>)}
+              </PSec>
+            )}
+            {myClaims.some((c) => c.status === "Pending") && (
+              <PSec title="Payments being verified">
+                {myClaims.filter((c) => c.status === "Pending").map((c) => <div key={c.id} className="flex justify-between text-[13.5px] py-1"><span>{fmtDate(c.at)} · {fmtMoney(c.amount)}</span><PPill s="Pending" /></div>)}
+              </PSec>
+            )}
+            <PSec title="Latest invoices" right={<button type="button" className="text-emerald-700 normal-case tracking-normal" onClick={() => { setInvFilter("All"); setTab("invoices"); }}>{t("See all")}</button>}>
+              {myInvoices.length === 0 && <div className="text-[13px] text-slate-400 py-3 text-center">{t("No invoices yet.")}</div>}
+              {myInvoices.slice(0, 4).map((inv) => <InvRow key={inv.id} inv={inv} />)}
+            </PSec>
+            {myOrders.length > 0 && (
+              <PSec title="My orders">
+                {myOrders.slice(0, 3).map((o) => <div key={o.id} className="flex justify-between py-1.5 text-[13.5px]"><span>{o.code} · {o.productName} × {fmtQty(o.qty)}</span><PPill s={o.status} /></div>)}
+              </PSec>
+            )}
+          </>
+        )}
+
+        {tab === "invoices" && (
+          <>
+            <div className="flex gap-1.5 mx-3.5 mt-3 overflow-x-auto">
+              {["Unpaid", "Partial", "Paid", "All"].map((f) => (
+                <button key={f} type="button" onClick={() => setInvFilter(f)} className={`shrink-0 rounded-full px-3.5 py-1.5 text-[12.5px] font-extrabold ${invFilter === f ? "bg-emerald-600 text-white" : "bg-white text-slate-600"}`}>{t(f)}{f !== "All" ? ` ${counts[f] || 0}` : ""}</button>
+              ))}
+            </div>
+            <PSec>
+              {myInvoices.filter((i) => invFilter === "All" || i.status === invFilter).map((inv) => <InvRow key={inv.id} inv={inv} />)}
+              {myInvoices.filter((i) => invFilter === "All" || i.status === invFilter).length === 0 && <div className="text-[13px] text-slate-400 py-4 text-center">{t("Nothing here.")}</div>}
+            </PSec>
+          </>
+        )}
+
+        {tab === "order" && (
+          <>
+            {orderDone && <div className="mx-3.5 mt-3 rounded-2xl bg-emerald-100 text-emerald-800 px-4 py-3 text-[13.5px] font-bold">✅ {orderDone}</div>}
+            <PSec title="Today's rates" right={<span className="normal-case tracking-normal font-semibold">{fmtDate(today)}</span>}>
+              {(products || []).length === 0 && <div className="text-[13px] text-slate-400 py-3 text-center">{t("No products yet.")}</div>}
+              {(products || []).map((p) => {
+                const q = Number(cart[p.id]) || 0;
+                return (
+                  <div key={p.id} className="flex items-center justify-between gap-2 py-2.5 border-b border-slate-100 last:border-0">
+                    <div className="min-w-0"><div className="text-[14px] font-extrabold text-slate-900 truncate">{p.name}</div><div className="text-[11.5px] text-slate-400">{fmtMoney(p.price)} / {p.unit}</div></div>
+                    <div className="flex items-center gap-1 bg-slate-100 rounded-xl p-1 shrink-0">
+                      <button type="button" className="w-8 h-8 rounded-lg bg-white font-black" onClick={() => setCart({ ...cart, [p.id]: Math.max(0, q - 1) })}>−</button>
+                      <input type="number" inputMode="decimal" className="w-14 text-center bg-transparent font-extrabold outline-none" value={q || ""} placeholder="0" onChange={(e) => setCart({ ...cart, [p.id]: e.target.value })} />
+                      <button type="button" className="w-8 h-8 rounded-lg bg-white font-black" onClick={() => setCart({ ...cart, [p.id]: q + 1 })}>+</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </PSec>
+            <PSec title="Delivery">
+              <div className="grid grid-cols-1 gap-2">
+                <select className={P_INPUT} value={orderInfo.site} onChange={(e) => setOrderInfo({ ...orderInfo, site: e.target.value })}>
+                  <option value="">{t("Site / address")}: {customer.address || "—"}</option>
+                  {profile.sites.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+                <div className="grid grid-cols-3 gap-1.5">
+                  {["Aaj shaam", "Kal subah", "Kal shaam"].map((w) => <button key={w} type="button" onClick={() => setOrderInfo({ ...orderInfo, when: w })} className={`rounded-xl py-2 text-[12.5px] font-bold ${orderInfo.when === w ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-700"}`}>{w}</button>)}
+                </div>
+                <select className={P_INPUT} value={orderInfo.receiver} onChange={(e) => setOrderInfo({ ...orderInfo, receiver: e.target.value })}>
+                  <option value="">{t("Who will receive the material")}: {t("me")}</option>
+                  {profile.receivers.map((r) => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <input className={P_INPUT} placeholder={t("Note (optional)")} value={orderInfo.notes} onChange={(e) => setOrderInfo({ ...orderInfo, notes: e.target.value })} />
+              </div>
+            </PSec>
+            <PSec className="!bg-emerald-50">
+              <div className="flex justify-between items-center"><span className="text-[13px] text-slate-600">{t("Estimated total")}</span><b className="text-[22px] font-black">{fmtMoney(cartTotal)}</b></div>
+              <div className="text-[11.5px] text-slate-500">{t("Final bill is made by the shop (rate / delivery may change).")}</div>
+              <button type="button" disabled={!cartItems.length} onClick={placeOrder} className={`${P_EM} w-full mt-2`}>🛒 {t("Place order")}</button>
+            </PSec>
+            <PSec title="My orders">
+              {myOrders.length === 0 && <div className="text-[13px] text-slate-400 py-3 text-center">{t("No orders yet.")}</div>}
+              {myOrders.slice(0, 12).map((o) => {
+                const step = { Pending: 1, Processing: 2, Completed: 3 }[o.status] || 0;
+                return (
+                  <div key={o.id} className="py-2.5 border-b border-slate-100 last:border-0">
+                    <div className="flex justify-between text-[13.5px]"><b>{o.code} · {o.productName} × {fmtQty(o.qty)} {o.unit}</b><PPill s={o.status} /></div>
+                    <div className="flex items-center gap-1 mt-1.5">
+                      {["Received", "Processing", "Delivered"].map((l, i) => <div key={l} className="flex-1"><div className={`h-1.5 rounded-full ${o.status === "Cancelled" ? "bg-slate-200" : i < step ? "bg-emerald-500" : "bg-slate-200"}`} /><div className="text-[10.5px] text-slate-400 mt-0.5">{t(l)}</div></div>)}
+                    </div>
+                  </div>
+                );
+              })}
+            </PSec>
+          </>
+        )}
+
+        {tab === "ledger" && (
+          <>
+            <PSec title="Statement">
+              <div className="grid grid-cols-2 gap-2">
+                <input type="date" className={P_INPUT} value={range.from} onChange={(e) => setRange({ ...range, from: e.target.value })} />
+                <input type="date" className={P_INPUT} value={range.to} onChange={(e) => setRange({ ...range, to: e.target.value })} />
+              </div>
+              <div className="mt-2 divide-y divide-slate-100">
+                <div className="flex justify-between py-2 text-[13px]"><span className="text-slate-500">{fmtDate(range.from)} · {t("Opening")}</span><b>{fmtMoney(opening)}</b></div>
+                {stmtRows.map((r) => (
+                  <div key={r.id} className="flex justify-between gap-2 py-2 text-[13px]">
+                    <span className="text-slate-700">{fmtDate(r.date)} · {t(r.type)}</span>
+                    <span className="whitespace-nowrap">{r.debit ? <span className="text-rose-600">+{fmtMoney(r.debit).replace("Rs ", "")}</span> : <span className="text-emerald-600">−{fmtMoney(r.credit).replace("Rs ", "")}</span>} · <b>{fmtMoney(r.balance).replace("Rs ", "")}</b></span>
+                  </div>
+                ))}
+                <div className="flex justify-between py-2 text-[14px]"><b>{t("Balance")}</b><b className="text-rose-600">{fmtMoney(closing)}</b></div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                <button type="button" className={P_GH} onClick={() => setStmtPrint(true)}>⬇ PDF</button>
+                <a className={P_GH} target="_blank" rel="noreferrer" href={`https://wa.me/?text=${encodeURIComponent(stmtText)}`}>💬 {t("Share")}</a>
+              </div>
+            </PSec>
+            <PSec title="My payments">
+              {myClaims.map((c) => <div key={c.id} className="flex justify-between py-2 text-[13px] border-b border-slate-100 last:border-0"><span>{fmtDate(c.at)} · {fmtMoney(c.amount)} · {c.accountName}{c.reason ? <div className="text-[11.5px] text-rose-500">{c.reason}</div> : null}</span><PPill s={c.status} /></div>)}
+              {payments.filter((p) => p.customerId === customer.id).slice(-15).reverse().map((p) => <div key={p.id} className="flex justify-between py-2 text-[13px] border-b border-slate-100 last:border-0"><span>{fmtDate(p.date)} · {p.method}</span><b className="text-emerald-600">{fmtMoney(p.amount)}</b></div>)}
+            </PSec>
+          </>
+        )}
+
+        {tab === "profile" && (
+          <>
+            <PSec>
+              <div className="text-center">
+                <div className="w-16 h-16 rounded-2xl mx-auto bg-gradient-to-br from-emerald-500 to-emerald-700 text-white font-black text-[22px] flex items-center justify-center">{uiInitials(customer.name)}</div>
+                <div className="text-[18px] font-black mt-1.5">{customer.name}</div>
+                <div className="text-[12.5px] text-slate-500">{[customer.phone, customer.address].filter(Boolean).join(" · ")}</div>
+                <div className="flex justify-around mt-3"><div><div className="text-[18px] font-black">{fmtMoney(yearTotal).replace("Rs ", "")}</div><div className="text-[11.5px] text-slate-500">{t("Bought this year")}</div></div><div><div className={`text-[18px] font-black ${level.tone}`}>{level.icon} {level.label}</div><div className="text-[11.5px] text-slate-500">{t("Customer level")}</div></div></div>
+              </div>
+            </PSec>
+            <PSec title="My sites">
+              <PortalListEditor items={profile.sites} placeholder={t("e.g. Gulshan Colony plot 14")} onChange={(sites) => saveProfile({ sites })} />
+            </PSec>
+            <PSec title="Material receivers">
+              <PortalListEditor items={profile.receivers} placeholder={t("e.g. Munshi Akram 0301-…")} onChange={(receivers) => saveProfile({ receivers })} />
+            </PSec>
+            <PSec title="More">
+              {[["📦", "Booking", () => setSheet({ type: "bookings" })], ["🤝", "Promise a payment", () => setSheet({ type: "promise" })], ["🧮", "Calculator", () => setSheet({ type: "calc" })], ["🔔", "Notifications", () => setSheet({ type: "notes" })], ["🔒", "Change password", () => setSheet({ type: "password" })], ["💬", "Complaint / help", () => setSheet({ type: "help" })]].map(([ic, l, fn]) => (
+                <button key={l} type="button" onClick={fn} className="w-full flex justify-between py-2.5 border-b border-slate-100 last:border-0 text-[14px]"><span>{ic} {t(l)}</span><span className="text-slate-400">›</span></button>
+              ))}
+            </PSec>
+            <PSec title="Contact the shop">
+              <div className="grid grid-cols-2 gap-2">
+                {phone ? <a className={P_EM} href={waLink(settings.companyPhone, `Assalam o Alaikum, main ${customer.name} hun.`)} target="_blank" rel="noreferrer">💬 WhatsApp</a> : <span />}
+                {phone ? <a className={P_GH} href={`tel:${settings.companyPhone}`}>📞 {t("Call")}</a> : <span />}
+              </div>
+              <button type="button" onClick={onLogout} className={`${P_GH} w-full mt-2 !text-rose-600`}>⎋ {t("Log out")}</button>
+            </PSec>
+          </>
+        )}
+      </div>
+
+      {/* Bottom navigation */}
+      <div className="fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 z-40 pb-[env(safe-area-inset-bottom)]">
+        <div className="max-w-xl mx-auto flex justify-around py-2">
+          <NavBtn id="home" icon="🏠" label="Home" />
+          <NavBtn id="invoices" icon="🧾" label="Invoices" />
+          <NavBtn id="order" icon="🛒" label="Order" />
+          <NavBtn id="ledger" icon="📒" label="Ledger" />
+          <NavBtn id="profile" icon="👤" label="Profile" />
+        </div>
+      </div>
+
+      {sheet && sheet.type === "pay" && <PortalPaySheet customer={customer} outstanding={outstanding} invoice={sheet.inv || null} fin={fin} onClose={() => setSheet(null)} />}
+      {sheet && sheet.type === "invoice" && (
+        <PortalInvoiceSheet invoice={sheet.inv} settings={settings} returns={returns} exchanges={exchanges} onClose={() => setSheet(null)}
+          onPay={(inv) => setSheet({ type: "pay", inv })} onReorder={reorder} />
+      )}
+      {sheet && sheet.type === "calc" && (
+        <PSheet title="Calculator" onClose={() => setSheet(null)}>
+          <PSec><PortalCalculator products={products} onOrder={(p, bags) => { setCart({ [p.id]: bags }); setSheet(null); setTab("order"); }} /></PSec>
+        </PSheet>
+      )}
+      {sheet && sheet.type === "bookings" && (
+        <PSheet title="Booking" onClose={() => setSheet(null)}>
+          {myBookings.length === 0 && <PSec><div className="text-[13px] text-slate-400 text-center py-3">{t("No bookings.")}</div></PSec>}
+          {myBookings.map((b) => {
+            const st = computeBookingState(b, invoices, payments);
+            const total = Number(st.bookedQty ?? b.qty) || 0;
+            const deliveredQty = Number(st.deliveredQty) || 0;
+            const pct = total ? Math.min(100, Math.round((deliveredQty / total) * 100)) : 0;
+            return (
+              <PSec key={b.id}>
+                <div className="flex justify-between"><b>{b.code} · {b.productName}</b><PPill s={st.status || b.status} /></div>
+                <div className="flex justify-between text-[12.5px] mt-2"><span>{t("Booked")}: <b>{fmtQty(total)}</b></span><span>{t("Received")}: <b>{fmtQty(deliveredQty)}</b></span><span>{t("Left")}: <b className="text-emerald-600">{fmtQty(Math.max(0, total - deliveredQty))}</b></span></div>
+                <div className="h-2 rounded-full bg-slate-200 mt-1.5 overflow-hidden"><div className="h-full bg-emerald-500" style={{ width: `${pct}%` }} /></div>
+                <div className="text-[12px] text-slate-500 mt-1.5">{t("Rate")} {fmtMoney(b.rate)}{b.expiryDate ? ` · ${t("expiry")} ${fmtDate(b.expiryDate)}` : ""}</div>
+              </PSec>
+            );
+          })}
+        </PSheet>
+      )}
+      {sheet && sheet.type === "promise" && <PortalPromiseSheet customer={customer} outstanding={outstanding} onCreatePromise={onCreatePromise} onClose={() => setSheet(null)} />}
+      {sheet && sheet.type === "notes" && (
+        <PSheet title="Notifications" onClose={() => setSheet(null)}>
+          <PSec>
+            {notes.length === 0 && <div className="text-[13px] text-slate-400 text-center py-3">{t("Nothing new.")}</div>}
+            {notes.slice(0, 30).map((n, i) => <div key={i} className="flex gap-2 py-2 border-b border-slate-100 last:border-0 text-[13px]"><span>{n.icon}</span><div className="flex-1">{n.text}</div><span className="text-[11px] text-slate-400 whitespace-nowrap">{fmtDate(n.at)}</span></div>)}
+          </PSec>
+        </PSheet>
+      )}
+      {sheet && sheet.type === "password" && <PortalPasswordSheet customer={customer} saveCustomer={saveCustomer} onClose={() => setSheet(null)} />}
+      {sheet && sheet.type === "help" && (
+        <PSheet title="Complaint / help" onClose={() => setSheet(null)}>
+          <PSec title="Write to the shop">
+            <textarea className={`${P_INPUT} min-h-[100px]`} value={msg} onChange={(e) => setMsg(e.target.value)} placeholder={t("Write your problem / request")} />
+            <button type="button" disabled={!msg.trim()} className={`${P_EM} w-full mt-2`} onClick={async () => {
+              await finMutate("portalMsgs", (l) => [...l, { id: uid("pm"), code: portalCode(l, "CMP"), customerId: customer.id, customerName: customer.name, text: msg.trim(), status: "Open", at: new Date().toISOString() }]);
+              setMsg("");
+            }}>{t("Send")}</button>
+          </PSec>
+          <PSec title="My messages">
+            {myMsgs.length === 0 && <div className="text-[13px] text-slate-400 text-center py-2">{t("No messages.")}</div>}
+            {myMsgs.map((m) => <div key={m.id} className="py-2 border-b border-slate-100 last:border-0 text-[13px]"><div className="flex justify-between"><b>{m.code}</b><PPill s={m.status} /></div><div className="text-slate-700">{m.text}</div>{m.reply && <div className="mt-1 rounded-xl bg-emerald-50 px-3 py-2 text-emerald-800">💬 {m.reply}</div>}</div>)}
+          </PSec>
+        </PSheet>
+      )}
+      {stmtPrint && (
+        <PrintDialog kind="statement" title="Statement" subtitle={`${customer.name} · ${fmtDate(range.from)} — ${fmtDate(range.to)}`} includeDefs={[]}
+          sizeOrder={["full", "t80", "t58"]} defaultSize="full" fileName={`Statement-${customer.name}`} onClose={() => setStmtPrint(false)}
+          renderDoc={(p) => <StatementDoc customer={customer} company={settings} from={range.from} to={range.to} opening={opening} rows={stmtRows} closing={closing} {...p} />} />
+      )}
+    </div>
+  );
+}
+
+function PortalListEditor({ items, placeholder, onChange }) {
+  const [v, setV] = useState("");
+  return (
+    <div>
+      {(items || []).map((x) => <div key={x} className="flex justify-between py-1.5 text-[13.5px] border-b border-slate-100"><span>📍 {x}</span><button type="button" className="text-rose-500 px-2" onClick={() => onChange(items.filter((y) => y !== x))}>✕</button></div>)}
+      <div className="flex gap-2 mt-2">
+        <input className={P_INPUT} value={v} placeholder={placeholder} onChange={(e) => setV(e.target.value)} />
+        <button type="button" className={P_EM} onClick={() => { const s = v.trim(); if (s && !(items || []).includes(s)) onChange([...(items || []), s]); setV(""); }}>+</button>
+      </div>
+    </div>
+  );
+}
+
+function PortalPromiseSheet({ customer, outstanding, onCreatePromise, onClose }) {
+  const [amount, setAmount] = useState(String(Math.max(0, outstanding) || ""));
+  const [date, setDate] = useState(finAddDays(todayISO(), 7));
+  const [note, setNote] = useState("");
+  const [done, setDone] = useState(false);
+  return (
+    <PSheet title="Promise a payment" onClose={onClose}>
+      <PSec>
+        {done ? (
+          <div className="text-center py-3"><div className="text-[40px]">🤝</div><div className="font-extrabold">{t("Thank you! The shop has your promise.")}</div><button type="button" className={`${P_EM} w-full mt-3`} onClick={onClose}>{t("OK")}</button></div>
+        ) : (
+          <>
+            <div className="text-[13px] text-slate-600 mb-2">{t("Tell the shop when you will pay. You will get a reminder on that date.")}</div>
+            <label className="text-[11.5px] text-slate-500">{t("Amount")}<input type="number" className={P_INPUT} value={amount} onChange={(e) => setAmount(e.target.value)} /></label>
+            <label className="text-[11.5px] text-slate-500 block mt-2">{t("Date")}<input type="date" className={P_INPUT} value={date} min={todayISO()} onChange={(e) => setDate(e.target.value)} /></label>
+            <input className={`${P_INPUT} mt-2`} placeholder={t("Note (optional)")} value={note} onChange={(e) => setNote(e.target.value)} />
+            <button type="button" className={`${P_EM} w-full mt-3`} disabled={!(Number(amount) > 0) || !date} onClick={() => {
+              onCreatePromise({ customerId: customer.id, customerName: customer.name, amount: Number(amount), promiseDate: todayISO(), expectedDate: date, notes: [note.trim(), "Customer portal"].filter(Boolean).join(" · ") });
+              setDone(true);
+            }}>🤝 {t("Promise")}</button>
+          </>
+        )}
+      </PSec>
+    </PSheet>
+  );
+}
+
+function PortalPasswordSheet({ customer, saveCustomer, onClose }) {
+  const [f, setF] = useState({ old: "", nw: "", again: "" });
+  const [msg, setMsg] = useState("");
+  return (
+    <PSheet title="Change password" onClose={onClose}>
+      <PSec>
+        <input type="password" className={P_INPUT} placeholder={t("Current password")} value={f.old} onChange={(e) => setF({ ...f, old: e.target.value })} />
+        <input type="password" className={`${P_INPUT} mt-2`} placeholder={t("New password (min 4)")} value={f.nw} onChange={(e) => setF({ ...f, nw: e.target.value })} />
+        <input type="password" className={`${P_INPUT} mt-2`} placeholder={t("New password again")} value={f.again} onChange={(e) => setF({ ...f, again: e.target.value })} />
+        {msg && <div className="text-[13px] mt-2 font-bold text-rose-600">{msg}</div>}
+        <button type="button" className={`${P_EM} w-full mt-3`} onClick={() => {
+          if (f.old !== customer.portalPassword) { setMsg(t("Current password is wrong.")); return; }
+          if (f.nw.length < 4) { setMsg(t("New password is too short.")); return; }
+          if (f.nw !== f.again) { setMsg(t("The two new passwords are not the same.")); return; }
+          saveCustomer({ ...customer, portalPassword: f.nw });
+          onClose();
+        }}>{t("Save")}</button>
+      </PSec>
+    </PSheet>
+  );
+}
+
+/* ---------------- Staff: Portal Requests ---------------- */
+
+function PortalRequestsPage({ currentUser, onVerifyPortalPayment, settings: company }) {
+  useLanguage();
+  const fin = useFin();
+  const [tab, setTab] = useState("payments");
+  const [view, setView] = useState(null);
+  const [img, setImg] = useState("");
+  const [reply, setReply] = useState({});
+  useEffect(() => { setImg(""); if (view) portalFileGet(view.id).then(setImg).catch(() => {}); }, [view && view.id]);
+  if (!fin.loaded) return <div className="ct-card p-10 text-center ct-t2">{t("Loading…")}</div>;
+  const claims = [...fin.portalPay].sort((a, b) => (a.status === "Pending") === (b.status === "Pending") ? String(b.at).localeCompare(String(a.at)) : a.status === "Pending" ? -1 : 1);
+  const msgs = [...fin.portalMsgs].sort((a, b) => (a.status === "Open") === (b.status === "Open") ? String(b.at).localeCompare(String(a.at)) : a.status === "Open" ? -1 : 1);
+  const pend = claims.filter((c) => c.status === "Pending").length;
+  const open = msgs.filter((m) => m.status === "Open").length;
+  const actor = finActor(currentUser);
+  async function decide(c, ok, reason) {
+    const at = new Date().toISOString();
+    let paymentId = "";
+    if (ok) paymentId = onVerifyPortalPayment(c);
+    await finMutate("portalPay", (l) => l.map((x) => (x.id === c.id ? { ...x, status: ok ? "Verified" : "Rejected", reason: reason || "", paymentId, verifiedBy: actor, verifiedAt: at } : x)));
+    setView(null);
+  }
+  return (
+    <div>
+      <FinPageHead title="Portal Requests" sub={t("Payments, complaints and orders sent by customers from their portal")} />
+      <FinTabs value={tab} onChange={setTab} tabs={[{ id: "payments", label: "Payments", count: pend }, { id: "msgs", label: "Complaints", count: open }]} />
+      {tab === "payments" && (
+        <div className="ct-card mt-4 overflow-x-auto">
+          <table className="w-full text-[13px] min-w-[760px]">
+            <thead><tr className="text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">{["Request", "Date", "Customer", "Amount", "Sent to", "Txn ID", "Status", ""].map((h, i) => <th key={i} className="px-3 py-2.5 text-start">{t(h)}</th>)}</tr></thead>
+            <tbody>
+              {claims.length === 0 && <tr><td colSpan={8}><FinEmpty text="No payment requests yet." /></td></tr>}
+              {claims.map((c) => (
+                <tr key={c.id} className="border-b border-slate-100">
+                  <td className="px-3 py-2.5 font-bold ct-h">{c.code}</td><td className="px-3 py-2.5">{fmtDateTime(c.at)}</td>
+                  <td className="px-3 py-2.5">{c.customerName}{c.invoiceNumber ? <div className="text-[11.5px] ct-t3">{c.invoiceNumber}</div> : null}</td>
+                  <td className="px-3 py-2.5 font-bold tabular-nums">{fmtMoney(c.amount)}</td><td className="px-3 py-2.5">{c.accountName}</td><td className="px-3 py-2.5">{c.txnId || "—"}</td>
+                  <td className="px-3 py-2.5">{c.status === "Pending" ? <span className="rounded-full px-2.5 py-0.5 text-[11.5px] font-bold bg-amber-400/15 text-amber-500">{t("Pending")}</span> : c.status === "Verified" ? <span className="rounded-full px-2.5 py-0.5 text-[11.5px] font-bold bg-emerald-400/15 text-emerald-500">✓ {t("Verified")}</span> : <span className="rounded-full px-2.5 py-0.5 text-[11.5px] font-bold bg-rose-400/15 text-rose-500">{t("Rejected")}</span>}</td>
+                  <td className="px-3 py-2.5"><Btn small variant={c.status === "Pending" ? "primary" : "ghost"} onClick={() => setView(c)}>{c.status === "Pending" ? t("Check") : t("View")}</Btn></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {tab === "msgs" && (
+        <div className="mt-4 space-y-3">
+          {msgs.length === 0 && <div className="ct-card"><FinEmpty text="No complaints." /></div>}
+          {msgs.map((m) => (
+            <div key={m.id} className="ct-card p-4">
+              <div className="flex justify-between gap-2"><div><b className="ct-h">{m.code} · {m.customerName}</b><div className="text-[12px] ct-t3">{fmtDateTime(m.at)}</div></div><span className={`h-fit rounded-full px-2.5 py-0.5 text-[11.5px] font-bold ${m.status === "Open" ? "bg-amber-400/15 text-amber-500" : "bg-emerald-400/15 text-emerald-500"}`}>{t(m.status)}</span></div>
+              <div className="text-[14px] ct-h mt-2">{m.text}</div>
+              {m.reply ? <div className="mt-2 rounded-xl bg-emerald-400/10 px-3 py-2 text-[13px] text-emerald-600">💬 {m.reply} — {m.repliedBy}</div> : (
+                <div className="flex gap-2 mt-2">
+                  <input className={inputCls} placeholder={t("Reply to the customer")} value={reply[m.id] || ""} onChange={(e) => setReply({ ...reply, [m.id]: e.target.value })} />
+                  <Btn onClick={() => finMutate("portalMsgs", (l) => l.map((x) => (x.id === m.id ? { ...x, reply: (reply[m.id] || "").trim() || "Done", status: "Resolved", repliedBy: actor.name, repliedAt: new Date().toISOString() } : x)))}>{t("Reply & close")}</Btn>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="text-[12px] ct-t3 mt-3">{t("Customer orders go straight to Daily Orders (marked “Portal order”). Promises go to Promise To Pay.")}</div>
+      {view && (
+        <Modal title={`${t("Payment request")} ${view.code}`} onClose={() => setView(null)}>
+          <div className="rounded-2xl ct-chip px-4 py-3 mb-3">
+            <div className="text-[13px] ct-t2">{view.customerName}{view.invoiceNumber ? ` · ${view.invoiceNumber}` : ""}</div>
+            <div className="ct-display text-[26px] font-bold ct-h">{fmtMoney(view.amount)}</div>
+            <div className="text-[13px] ct-t2">{view.accountName}{view.txnId ? ` · Txn ${view.txnId}` : ""} · {fmtDateTime(view.at)}</div>
+          </div>
+          {img ? <img src={img} alt="" className="w-full rounded-xl max-h-[420px] object-contain bg-black/5" /> : <div className="text-[13px] ct-t3">{t("Loading screenshot…")}</div>}
+          {view.status === "Pending" ? (
+            <div className="flex gap-2 mt-4 justify-end">
+              <Btn variant="danger" onClick={() => { const r = prompt(t("Reason for rejecting")); if (r) decide(view, false, r); }}>✕ {t("Reject")}</Btn>
+              <Btn onClick={() => decide(view, true)}>✓ {t("Verify — add payment")}</Btn>
+            </div>
+          ) : (
+            <div className="mt-3 text-[13px] ct-t2">{t(view.status)} · {view.verifiedBy ? view.verifiedBy.name : ""} · {view.verifiedAt ? fmtDateTime(view.verifiedAt) : ""}{view.reason ? ` · ${view.reason}` : ""}</div>
+          )}
+          <div className="text-[12px] ct-t3 mt-2">{t("Check that the money really arrived in the account before verifying. Verifying adds the payment to the customer's ledger.")}</div>
+        </Modal>
+      )}
+    </div>
+  );
 }
 
 export default App;
