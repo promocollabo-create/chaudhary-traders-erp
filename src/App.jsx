@@ -1197,6 +1197,7 @@ const NAV_GROUPS = [
     { id: "invoiceHistory", label: "Invoice History", icon: "history" },
     { id: "orders", label: "Daily Orders", icon: "phone" },
     { id: "bookings", label: "Advance Booking", icon: "calendar" },
+    { id: "deliverySchedule", label: "Delivery Schedule", icon: "truck" },
     { id: "returns", label: "Sales Return", icon: "undo" },
     { id: "exchange", label: "Exchange", icon: "swap" },
     { id: "creditNotes", label: "Credit Notes", icon: "note" },
@@ -10267,18 +10268,28 @@ function App() {
     const due = finAllKishts(finLive.vouchers).filter(({ v, k }) => v.status === "Approved" && k.status !== "Paid" && k.date <= today);
     const portalPend = finLive.portalPay.filter((c) => c.status === "Pending");
     const portalMsg = finLive.portalMsgs.filter((m) => m.status === "Open");
+    const delToday = [];
+    (bookings || []).forEach((b) => {
+      const plan = finLive.deliveryPlans[b.id];
+      if (!plan || !plan.length) return;
+      const st = computeBookingState(b, invoices, payments);
+      if (st.status === "Cancelled") return;
+      finDeliveryRows(plan, Number(st.deliveredQty) || 0).forEach((r) => { if (r.status === "Today" || r.status === "Late") delToday.push({ b, r }); });
+    });
     return {
       count: mine.length,
       dueCount: due.length,
       portalCount: portalPend.length + portalMsg.length,
+      deliveryCount: delToday.length,
       list: [
         ...mine.map((v) => ({ id: "vc" + v.id, icon: "voucher", tone: "text-amber-400", page: "vouchers", title: `${v.number} — ${v.payee} · ${fmtMoney(v.amount)}`, sub: t("Voucher waiting for your approval") })),
+        ...delToday.map(({ b, r }) => ({ id: "dl" + b.id + r.id, icon: "truck", tone: r.status === "Late" ? "text-rose-400" : "text-amber-400", page: "deliverySchedule", title: `${b.customerName} — ${fmtQty(r.left)} ${b.unit} ${b.productName}`, sub: `${r.status === "Late" ? t("Late delivery") : t("Delivery today")} · ${b.code}` })),
         ...portalPend.map((c) => ({ id: "pp" + c.id, icon: "wallet", tone: "text-emerald-400", page: "portalRequests", title: `${c.customerName} — ${fmtMoney(c.amount)}`, sub: t("Customer sent a payment — verify it") })),
         ...portalMsg.map((m) => ({ id: "pm" + m.id, icon: "chat", tone: "text-sky-400", page: "portalRequests", title: `${m.customerName}: ${String(m.text).slice(0, 50)}`, sub: t("Customer complaint / request") })),
         ...due.map(({ v, k, idx, n }) => ({ id: "vk" + v.id + k.id, icon: "calendar", tone: k.date < today ? "text-rose-400" : "text-emerald-400", page: "paymentsDue", title: `${v.number}${n > 1 ? ` (${idx + 1}/${n})` : ""} — ${v.payee} · ${fmtMoney(k.amount)}`, sub: k.date < today ? `${t("Overdue")} · ${fmtDate(k.date)}` : t("Payment due today") })),
       ],
     };
-  }, [loading, currentUser, finLive.vouchers, finLive.settings]);
+  }, [loading, currentUser, finLive.vouchers, finLive.settings, finLive.portalPay, finLive.portalMsgs, finLive.deliveryPlans, bookings, invoices, payments]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -10300,6 +10311,20 @@ function App() {
     persist.orders([...orders, ...recs]);
     persist.settings({ ...settings, orderCounter: counter });
     logAudit("Order Created (Portal)", recs.map((r) => r.code).join(", "), list[0] ? list[0].customerName : "");
+    return recs.map((r) => r.code);
+  }
+  // Delivery schedule → invoice for one planned delivery of a booking.
+  function deliverFromBooking(b, qty) {
+    const st = computeBookingState(b, invoices, payments);
+    if (st.status === "Cancelled" || st.status === "Completed") { alert(`Booking ${b.code}: ${st.status}`); return; }
+    if (st.status === "Expired") { alert(`Booking ${b.code} expired on ${fmtDate(b.expiryDate)}. An admin must renew it first.`); return; }
+    const q = roundQty(Math.max(0, Math.min(Number(qty) || st.remainingQty, st.remainingQty)));
+    const suggestedAdvance = roundMoney(Math.max(0, Math.min(st.unusedAdvance, q * st.rate)));
+    setPrefill({
+      sourceType: "booking", sourceId: b.id, sourceCode: b.code, customerId: b.customerId, productId: b.productId,
+      productName: b.productName, unit: b.unit, qty: q, rate: st.rate, suggestedAdvance,
+    });
+    setPage("invoices");
   }
   function onVerifyPortalPayment(c) {
     const cust = customers.find((x) => x.id === c.customerId);
@@ -10547,6 +10572,7 @@ function App() {
         returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
         commissionPayments={commissionPayments} settings={settings} />
     ) : null,
+    deliverySchedule: <DeliverySchedulePage currentUser={currentUser} bookings={bookings} invoices={invoices} payments={payments} onDeliverFromBooking={deliverFromBooking} />,
     portalRequests: <PortalRequestsPage currentUser={currentUser} onVerifyPortalPayment={onVerifyPortalPayment} settings={settings} />,
     paymentsDue: <PaymentsDuePage currentUser={currentUser} users={users} branches={branches} payments={visiblePayments} invoices={visibleInvoices} settings={settings} />,
     cashbook: <CashBookPage currentUser={currentUser} invoices={visibleInvoices} payments={visiblePayments} settings={settings} />,
@@ -10579,7 +10605,7 @@ function App() {
         <Sidebar
           page={page} setPage={goPage} role={currentUser.role} onLogout={handleLogout}
           companyName={settings.companyName} logoUrl={settings.logoUrl}
-          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount, portalRequests: finAlerts.portalCount }}
+          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount, portalRequests: finAlerts.portalCount, deliverySchedule: finAlerts.deliveryCount }}
         />
         <div className="flex-1 min-w-0 flex flex-col">
           <AppHeader
@@ -13730,7 +13756,7 @@ function QrSvg({ text, sizeMm = 20, style }) {
    same time do not overwrite each other's vouchers.
    ============================================================ */
 
-const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles" };
+const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans" };
 
 const FIN_DEFAULT_SETTINGS = {
   categories: [
@@ -13787,7 +13813,7 @@ Object.entries(FIN_URDU).forEach(([en, ur]) => {
 
 /* ---------------- Store ---------------- */
 
-const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {} };
+const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {} };
 const finListeners = new Set();
 let finLoadPromise = null;
 let finChannel = null;
@@ -13808,7 +13834,7 @@ function finNormalizeSettings(s) {
 }
 function finNormalize(name, value) {
   if (name === "settings") return finNormalizeSettings(value);
-  if (name === "costs" || name === "portalProfiles") return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  if (name === "costs" || name === "portalProfiles" || name === "deliveryPlans") return value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return Array.isArray(value) ? value : [];
 }
 
@@ -17339,9 +17365,9 @@ const P_GH = `${P_BTN} bg-slate-100 text-slate-800`;
 
 /* ---------------- Pay sheet ---------------- */
 
-function PortalPaySheet({ customer, outstanding, invoice, fin, onClose }) {
+function PortalPaySheet({ customer, outstanding, invoice, fin, onClose, presetAmount, forLabel, orderCodes }) {
   const accs = portalAccounts(fin.settings);
-  const [amount, setAmount] = useState(String(invoice ? Math.max(0, Number(invoice.balanceDue) || 0) || "" : Math.max(0, outstanding) || ""));
+  const [amount, setAmount] = useState(String(presetAmount ? roundMoney(presetAmount) : invoice ? Math.max(0, Number(invoice.balanceDue) || 0) || "" : Math.max(0, outstanding) || ""));
   const [method, setMethod] = useState(accs[0] ? accs[0].id : "jazz");
   const [txn, setTxn] = useState("");
   const [shot, setShot] = useState("");
@@ -17360,6 +17386,7 @@ function PortalPaySheet({ customer, outstanding, invoice, fin, onClose }) {
         method: acc ? (acc.type === "wallet" ? "Easypaisa/JazzCash" : "Bank Transfer") : method === "shop" ? "Cash" : "Easypaisa/JazzCash",
         accountName: acc ? acc.name : method, invoiceId: invoice ? invoice.id : "", invoiceNumber: invoice ? invoice.number : "",
         txnId: txn.trim(), hasProof: true, status: "Pending", at: new Date().toISOString(),
+        orderCodes: orderCodes || [], forLabel: forLabel || "",
       }]);
       await portalFilePut(id, shot);
       setDone(true);
@@ -17377,10 +17404,12 @@ function PortalPaySheet({ customer, outstanding, invoice, fin, onClose }) {
   }
   return (
     <PSheet title="Pay now" onClose={onClose}>
+      {forLabel && <div className="mx-3.5 mt-2 rounded-2xl bg-emerald-100 text-emerald-800 px-4 py-2.5 text-[13px] font-bold">🛒 {forLabel}</div>}
       <PSec title="How much?">
         <input type="number" inputMode="decimal" className={`${P_INPUT} !text-[24px] font-black`} value={amount} onChange={(e) => setAmount(e.target.value)} />
         <div className="flex flex-wrap gap-1.5 mt-2">
           {outstanding > 0 && <button type="button" onClick={() => setAmount(String(outstanding))} className="rounded-full bg-sky-100 text-sky-700 px-3 py-1.5 text-[12px] font-bold">{t("Full")} {fmtMoney(outstanding)}</button>}
+          {presetAmount > 0 && <button type="button" onClick={() => setAmount(String(roundMoney(presetAmount)))} className="rounded-full bg-sky-100 text-sky-700 px-3 py-1.5 text-[12px] font-bold">{t("This order")} {fmtMoney(presetAmount)}</button>}
           {invoice && <button type="button" onClick={() => setAmount(String(invoice.balanceDue))} className="rounded-full bg-sky-100 text-sky-700 px-3 py-1.5 text-[12px] font-bold">{invoice.number} · {fmtMoney(invoice.balanceDue)}</button>}
         </div>
       </PSec>
@@ -17546,13 +17575,12 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
   function placeOrder() {
     if (!cartItems.length) { alert(t("Choose at least one item.")); return; }
     const noteParts = [orderInfo.site && `Site: ${orderInfo.site}`, orderInfo.receiver && `Receiver: ${orderInfo.receiver}`, orderInfo.notes, "Portal order"].filter(Boolean).join(" · ");
-    onPortalOrders(cartItems.map(({ p, q }) => ({
+    const codes = onPortalOrders(cartItems.map(({ p, q }) => ({
       customerId: customer.id, customerName: customer.name, customerPhone: customer.phone || "",
       productId: p.id, productName: p.name, unit: p.unit, qty: q, requestedFor: orderInfo.when, date: today, notes: noteParts, source: "Portal",
     })));
     setCart({});
-    setOrderDone(t("Order sent — the shop will confirm it."));
-    setTimeout(() => setOrderDone(""), 5000);
+    setOrderDone({ codes: codes || [], total: cartTotal });
   }
   function reorder(inv) {
     const c = {};
@@ -17663,7 +17691,17 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
 
         {tab === "order" && (
           <>
-            {orderDone && <div className="mx-3.5 mt-3 rounded-2xl bg-emerald-100 text-emerald-800 px-4 py-3 text-[13.5px] font-bold">✅ {orderDone}</div>}
+            {orderDone && (
+              <PSec className="!bg-emerald-50">
+                <div className="text-[15px] font-extrabold text-emerald-800">✅ {t("Order sent — the shop will confirm it.")}</div>
+                <div className="text-[12.5px] text-slate-600 mt-0.5">{(orderDone.codes || []).join(", ")} · {fmtMoney(orderDone.total)}</div>
+                <div className="text-[13px] text-slate-700 mt-2">{t("Want to pay now (advance)? Send to any account below and add the screenshot.")}</div>
+                <div className="grid grid-cols-2 gap-2 mt-2">
+                  <button type="button" className={P_EM} onClick={() => setSheet({ type: "pay", preset: orderDone.total, label: `${t("Order")} ${(orderDone.codes || []).join(", ")}`, codes: orderDone.codes })}>💳 {t("Pay now")}</button>
+                  <button type="button" className={P_GH} onClick={() => setOrderDone("")}>{t("Pay later")}</button>
+                </div>
+              </PSec>
+            )}
             <PSec title="Today's rates" right={<span className="normal-case tracking-normal font-semibold">{fmtDate(today)}</span>}>
               {(products || []).length === 0 && <div className="text-[13px] text-slate-400 py-3 text-center">{t("No products yet.")}</div>}
               {(products || []).map((p) => {
@@ -17701,6 +17739,17 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
               <div className="text-[11.5px] text-slate-500">{t("Final bill is made by the shop (rate / delivery may change).")}</div>
               <button type="button" disabled={!cartItems.length} onClick={placeOrder} className={`${P_EM} w-full mt-2`}>🛒 {t("Place order")}</button>
             </PSec>
+            {portalAccounts(fin.settings).length > 0 && (
+              <PSec title="Pay in advance (optional)">
+                {portalAccounts(fin.settings).map((a) => (
+                  <div key={a.id} className="flex justify-between py-2 border-b border-slate-100 last:border-0 text-[13px]">
+                    <span>{a.type === "wallet" ? "📱" : "🏦"} <b>{a.bankName || a.name}</b>{a.accountTitle ? <span className="text-slate-500"> · {a.accountTitle}</span> : null}</span>
+                    <button type="button" className="font-extrabold" onClick={() => { try { navigator.clipboard.writeText(a.accountNumber); } catch {} }}>{a.accountNumber} 📋</button>
+                  </div>
+                ))}
+                <div className="text-[11.5px] text-slate-500 mt-1">{t("After placing the order you can send the payment screenshot. Or pay on delivery.")}</div>
+              </PSec>
+            )}
             <PSec title="My orders">
               {myOrders.length === 0 && <div className="text-[13px] text-slate-400 py-3 text-center">{t("No orders yet.")}</div>}
               {myOrders.slice(0, 12).map((o) => {
@@ -17790,7 +17839,7 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
         </div>
       </div>
 
-      {sheet && sheet.type === "pay" && <PortalPaySheet customer={customer} outstanding={outstanding} invoice={sheet.inv || null} fin={fin} onClose={() => setSheet(null)} />}
+      {sheet && sheet.type === "pay" && <PortalPaySheet customer={customer} outstanding={outstanding} invoice={sheet.inv || null} fin={fin} presetAmount={sheet.preset || 0} forLabel={sheet.label || ""} orderCodes={sheet.codes || []} onClose={() => { if (sheet.codes) setOrderDone(""); setSheet(null); }} />}
       {sheet && sheet.type === "invoice" && (
         <PortalInvoiceSheet invoice={sheet.inv} settings={settings} returns={returns} exchanges={exchanges} onClose={() => setSheet(null)}
           onPay={(inv) => setSheet({ type: "pay", inv })} onReorder={reorder} />
@@ -17813,7 +17862,15 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
                 <div className="flex justify-between"><b>{b.code} · {b.productName}</b><PPill s={st.status || b.status} /></div>
                 <div className="flex justify-between text-[12.5px] mt-2"><span>{t("Booked")}: <b>{fmtQty(total)}</b></span><span>{t("Received")}: <b>{fmtQty(deliveredQty)}</b></span><span>{t("Left")}: <b className="text-emerald-600">{fmtQty(Math.max(0, total - deliveredQty))}</b></span></div>
                 <div className="h-2 rounded-full bg-slate-200 mt-1.5 overflow-hidden"><div className="h-full bg-emerald-500" style={{ width: `${pct}%` }} /></div>
-                <div className="text-[12px] text-slate-500 mt-1.5">{t("Rate")} {fmtMoney(b.rate)}{b.expiryDate ? ` · ${t("expiry")} ${fmtDate(b.expiryDate)}` : ""}</div>
+                <div className="text-[12px] text-slate-500 mt-1.5">{t("Rate")} {fmtMoney(st.rate || b.rate)}{b.expiryDate ? ` · ${t("expiry")} ${fmtDate(b.expiryDate)}` : ""}</div>
+                {(fin.deliveryPlans[b.id] || []).length > 0 && (
+                  <div className="mt-2 rounded-xl bg-slate-50 p-2.5">
+                    <div className="text-[11.5px] font-extrabold uppercase tracking-wide text-slate-500 mb-1">🚚 {t("Delivery schedule")}</div>
+                    {finDeliveryRows(fin.deliveryPlans[b.id], deliveredQty).map((r) => (
+                      <div key={r.id} className="flex justify-between py-1 text-[13px]"><span><b>{fmtDate(r.date)}</b> · {fmtQty(r.qty)} {b.unit}</span><span className={r.status === "Delivered" ? "text-emerald-600 font-bold" : r.status === "Late" ? "text-rose-600 font-bold" : "text-slate-500"}>{r.status === "Delivered" ? "✓ " : "🚚 "}{t(r.status)}</span></div>
+                    ))}
+                  </div>
+                )}
               </PSec>
             );
           })}
@@ -17998,6 +18055,152 @@ function PortalRequestsPage({ currentUser, onVerifyPortalPayment, settings: comp
           <div className="text-[12px] ct-t3 mt-2">{t("Check that the money really arrived in the account before verifying. Verifying adds the payment to the customer's ledger.")}</div>
         </Modal>
       )}
+    </div>
+  );
+}
+
+/* ============================================================
+   BOOKING DELIVERY SCHEDULE
+   Staff splits a booking into planned deliveries (e.g. 400 bags:
+   tomorrow 100, after 4 days 300). Status of each planned row is
+   worked out from the booking's real deliveries (invoices made
+   from the booking) — nothing to tick by hand.
+   Storage: ct-delivery-plans  { bookingId: [{ id, date, qty, note }] }
+   ============================================================ */
+
+function finDeliveryRows(plan, deliveredQty) {
+  let cum = 0;
+  const today = todayISO();
+  return [...(plan || [])].sort((a, b) => String(a.date).localeCompare(String(b.date))).map((r) => {
+    const from = cum;
+    cum += Number(r.qty) || 0;
+    const covered = Math.max(0, Math.min(Number(r.qty) || 0, deliveredQty - from));
+    const status = covered >= (Number(r.qty) || 0) - 0.0005 ? "Delivered" : covered > 0 ? "Part delivered" : r.date < today ? "Late" : r.date === today ? "Today" : "Planned";
+    return { ...r, covered, left: roundQty((Number(r.qty) || 0) - covered), status };
+  });
+}
+const FIN_DEL_TONE = { Delivered: "bg-emerald-400/15 text-emerald-500", "Part delivered": "bg-sky-400/15 text-sky-500", Late: "bg-rose-400/15 text-rose-500", Today: "bg-amber-400/15 text-amber-500", Planned: "bg-slate-400/15 text-slate-500" };
+
+function DeliveryPlanModal({ booking, state, plan, currentUser, onClose }) {
+  const remaining = roundQty(state.remainingQty);
+  const delivered = roundQty(state.deliveredQty);
+  const [rows, setRows] = useState(() => (plan && plan.length ? plan.map((r) => ({ ...r })) : [
+    { id: uid("dp"), date: finAddDays(todayISO(), 1), qty: Math.min(100, remaining) || remaining, note: "" },
+    ...(remaining > 100 ? [{ id: uid("dp"), date: finAddDays(todayISO(), 5), qty: roundQty(remaining - 100), note: "" }] : []),
+  ]));
+  const planned = roundQty(rows.reduce((s, r) => s + (Number(r.qty) || 0), 0));
+  const target = roundQty(state.bookedQty);
+  const err = rows.some((r) => !r.date || !(Number(r.qty) > 0)) ? t("Every row needs a date and a quantity.") : planned > target + 0.0005 ? `${t("Planned")} ${fmtQty(planned)} > ${t("booked")} ${fmtQty(target)}` : "";
+  const upd = (id, patch) => setRows(rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  async function save() {
+    if (err) return;
+    const clean = rows.map((r) => ({ id: r.id, date: r.date, qty: roundQty(Number(r.qty)), note: String(r.note || "").trim() }));
+    await finMutate("deliveryPlans", (p) => ({ ...p, [booking.id]: clean }));
+    onClose();
+  }
+  return (
+    <Modal title={`${t("Delivery schedule")} — ${booking.code}`} onClose={onClose} wide>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 -mt-1 mb-4 text-[13.5px] ct-t2">
+        <span className="font-bold ct-h">{booking.customerName}</span><span>{booking.productName}</span>
+        <span>{t("Booked")}: <b className="ct-h">{fmtQty(target)} {booking.unit}</b></span>
+        <span>{t("Delivered")}: <b className="text-emerald-500">{fmtQty(delivered)}</b></span>
+        <span>{t("Left")}: <b className="text-amber-500">{fmtQty(remaining)}</b></span>
+      </div>
+      <div className="space-y-2">
+        {rows.map((r, i) => (
+          <div key={r.id} className="rounded-xl ct-chip p-2.5 grid grid-cols-[28px_1fr_1fr] sm:grid-cols-[28px_160px_140px_1fr_auto] gap-2 items-center">
+            <span className="w-7 h-7 rounded-lg ct-gold-bg text-[12px] font-black flex items-center justify-center">{i + 1}</span>
+            <input type="date" className={`${inputCls} !py-1.5`} value={r.date} onChange={(e) => upd(r.id, { date: e.target.value })} />
+            <div className="flex items-center gap-1.5"><input type="number" className={`${inputCls} !py-1.5 font-bold`} value={r.qty} onChange={(e) => upd(r.id, { qty: e.target.value })} /><span className="text-[12px] ct-t3">{booking.unit}</span></div>
+            <input className={`${inputCls} !py-1.5 col-span-3 sm:col-span-1`} placeholder={t("Note (rickshaw, site…)")} value={r.note || ""} onChange={(e) => upd(r.id, { note: e.target.value })} />
+            {rows.length > 1 ? <button type="button" className="text-rose-500 px-2" onClick={() => setRows(rows.filter((x) => x.id !== r.id))}>✕</button> : <span />}
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 mt-2.5">
+        <div className="flex flex-wrap gap-1.5">
+          <button type="button" className="rounded-xl ct-chip px-3 py-2 text-[12.5px] font-bold ct-h" onClick={() => {
+            const last = rows[rows.length - 1];
+            setRows([...rows, { id: uid("dp"), date: finAddDays(last ? last.date : todayISO(), 1), qty: Math.max(0, roundQty(target - planned)), note: "" }]);
+          }}>+ {t("Add delivery")}</button>
+        </div>
+        <div className="text-[13px] ct-t2">{t("Planned")} <b className={Math.abs(planned - target) < 0.001 ? "text-emerald-500" : "text-amber-500"}>{fmtQty(planned)}</b> / {fmtQty(target)} {booking.unit}</div>
+      </div>
+      {err && <div className="mt-2 text-[12.5px] text-rose-500 font-semibold">⚠ {err}</div>}
+      <div className="text-[12px] ct-t3 mt-3">{t("Rows turn “Delivered” by themselves when invoices are made from this booking. The customer sees this schedule in the portal.")}</div>
+      <div className="flex gap-2 justify-end mt-4">
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={save} disabled={!!err}>Save schedule</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function DeliverySchedulePage({ currentUser, bookings, invoices, payments, onDeliverFromBooking }) {
+  useLanguage();
+  const fin = useFin();
+  const [edit, setEdit] = useState(null);
+  const [q, setQ] = useState("");
+  const today = todayISO();
+  const list = useMemo(() => (bookings || [])
+    .map((b) => ({ b, st: computeBookingState(b, invoices, payments) }))
+    .filter(({ st }) => st.status !== "Cancelled")
+    .sort((a, b) => String(b.b.date || "").localeCompare(String(a.b.date || ""))), [bookings, invoices, payments]);
+  if (!fin.loaded) return <div className="ct-card p-10 text-center ct-t2">{t("Loading…")}</div>;
+  const rowsOf = (b, st) => finDeliveryRows(fin.deliveryPlans[b.id], Number(st.deliveredQty) || 0);
+  const dueNow = [];
+  list.forEach(({ b, st }) => rowsOf(b, st).forEach((r) => { if ((r.status === "Today" || r.status === "Late" || (r.status === "Part delivered" && r.date <= today))) dueNow.push({ b, st, r }); }));
+  const ql = q.trim().toLowerCase();
+  const shown = list.filter(({ b, st }) => (st.status !== "Completed" || (fin.deliveryPlans[b.id] || []).length) && (!ql || [b.code, b.customerName, b.productName].some((x) => String(x || "").toLowerCase().includes(ql))));
+  return (
+    <div>
+      <FinPageHead title="Delivery Schedule" sub={t("Split a booking into deliveries — e.g. 100 bags tomorrow, the rest after 4 days")} />
+      <section className="ct-card p-4 sm:p-5 mb-4">
+        <div className="ct-display text-[16px] font-bold ct-h mb-2">🚚 {t("Deliveries due today / late")}</div>
+        {dueNow.length === 0 && <FinEmpty text="Nothing due today." />}
+        <div className="divide-y divide-slate-200/60">
+          {dueNow.map(({ b, st, r }) => (
+            <div key={b.id + r.id} className="py-2.5 flex flex-wrap items-center gap-3">
+              <span className={`rounded-full px-2.5 py-0.5 text-[11.5px] font-bold ${FIN_DEL_TONE[r.status]}`}>{t(r.status)}</span>
+              <div className="min-w-0 flex-1"><div className="text-[13.5px] font-semibold ct-h">{b.customerName} · {fmtQty(r.left)} {b.unit} {b.productName}</div><div className="text-[12px] ct-t3">{b.code} · {fmtDate(r.date)}{r.note ? ` · ${r.note}` : ""}</div></div>
+              <Btn small onClick={() => onDeliverFromBooking(b, r.left)}>🧾 {t("Make invoice")} ({fmtQty(Math.min(r.left, st.remainingQty))})</Btn>
+            </div>
+          ))}
+        </div>
+      </section>
+      <div className="mb-3 relative max-w-md">
+        <UiIcon name="search" className="w-4 h-4 absolute start-3 top-1/2 -translate-y-1/2 text-slate-400" />
+        <input className={`${inputCls} !ps-9`} value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("Search booking, customer…")} />
+      </div>
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
+        {shown.length === 0 && <div className="ct-card"><FinEmpty text="No active bookings." /></div>}
+        {shown.map(({ b, st }) => {
+          const rows = rowsOf(b, st);
+          const pct = st.bookedQty ? Math.min(100, Math.round((st.deliveredQty / st.bookedQty) * 100)) : 0;
+          return (
+            <section key={b.id} className="ct-card p-4">
+              <div className="flex items-start justify-between gap-2">
+                <div><div className="font-bold ct-h">{b.code} · {b.customerName}</div><div className="text-[12.5px] ct-t2">{b.productName} · {t("Rate")} {fmtMoney(st.rate)}{b.expiryDate ? ` · ${t("expiry")} ${fmtDate(b.expiryDate)}` : ""}</div></div>
+                <Btn small variant={rows.length ? "ghost" : "primary"} onClick={() => setEdit({ b, st })}>🗓 {rows.length ? t("Edit schedule") : t("Plan delivery")}</Btn>
+              </div>
+              <div className="flex justify-between text-[12.5px] mt-3 ct-t2"><span>{t("Booked")} <b className="ct-h">{fmtQty(st.bookedQty)}</b></span><span>{t("Delivered")} <b className="text-emerald-500">{fmtQty(st.deliveredQty)}</b></span><span>{t("Left")} <b className="text-amber-500">{fmtQty(st.remainingQty)}</b></span></div>
+              <div className="h-2 rounded-full bg-slate-400/15 overflow-hidden mt-1"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${pct}%` }} /></div>
+              {rows.length > 0 ? (
+                <div className="mt-3 space-y-1.5">
+                  {rows.map((r, i) => (
+                    <div key={r.id} className="flex items-center gap-2 text-[13px]">
+                      <span className="w-6 h-6 rounded-md ct-chip text-[11px] font-bold flex items-center justify-center">{i + 1}</span>
+                      <span className="ct-h font-semibold">{fmtDate(r.date)}</span><span className="ct-t2">{fmtQty(r.qty)} {b.unit}{r.note ? ` · ${r.note}` : ""}</span>
+                      <span className={`ms-auto rounded-full px-2 py-0.5 text-[11px] font-bold ${FIN_DEL_TONE[r.status]}`}>{t(r.status)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : <div className="text-[12.5px] ct-t3 mt-3">{t("No schedule yet.")}</div>}
+            </section>
+          );
+        })}
+      </div>
+      {edit && <DeliveryPlanModal booking={edit.b} state={edit.st} plan={fin.deliveryPlans[edit.b.id]} currentUser={currentUser} onClose={() => setEdit(null)} />}
     </div>
   );
 }
