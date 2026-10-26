@@ -12418,7 +12418,7 @@ const PRINT_SIZES = {
   t80: { label: "Thermal 80mm", sub: "Recommended", desc: "Shop counter printer", widthMm: 80, padMm: 4, thermal: true, font: 12 },
   a5: { label: "A5", sub: "Invoice page", desc: "148 × 210 mm", widthMm: 148, heightMm: 210, padMm: 9, thermal: false, font: 12 },
   v5: { label: "A5 Voucher", sub: "Half page", desc: "148 mm · no blank space", widthMm: 148, heightMm: 210, padMm: 8, thermal: false, fitHeight: true, font: 11.5 },
-  full: { label: "A4", sub: "Full page invoice", desc: "210 × 297 mm (8.27 × 11.69 in)", widthMm: 210, heightMm: 297, padMm: 12, thermal: false, font: 16 },
+  full: { label: "A4", sub: "Full width invoice", desc: "210 mm wide · ends after the invoice", widthMm: 210, heightMm: 297, padMm: 12, thermal: false, fitHeight: true, font: 16 },
   a4: { label: "A4", sub: "Full page", desc: "210 × 297 mm", widthMm: 210, heightMm: 297, padMm: 14, thermal: false, font: 14.5 },
 };
 const PRINT_SIZE_ORDER = ["t58", "t80", "a5"];
@@ -13117,7 +13117,7 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
           </div>
           <div className="mt-3 text-[11.5px] ct-t3 space-y-0.5">
             <div>• {t("PDF is saved in the selected size — a thermal slip stays a slip, A5 stays one invoice page.")}</div>
-            {prefs.size === "full" && <div>• {t("A4 (210 × 297 mm) — the full-page invoice in the old design. In the print window keep Paper size: A4, Margins: None.")}</div>}
+            {prefs.size === "full" && <div>• {t("A4 width (210 mm), and the page ends right after the invoice — no blank space. In the print window keep Margins: None.")}</div>}
             <div>• {t("In the print window choose “Save as PDF” as the printer.")}</div>
             <div>• {t("Your last choice is remembered for next time.")}</div>
           </div>
@@ -13158,7 +13158,7 @@ function invoiceQrText(invoice) {
 }
 
 /* Full Page — the original invoice design, exactly as the old print. */
-function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProofs, rs }) {
+function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProofs, rs, fit = true }) {
   const banner = invoiceStatusBanner(invoice);
   const bannerCls = {
     emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
@@ -13170,7 +13170,7 @@ function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProof
   const hasDelivery = invoice.rickshawRent > 0 || invoice.deliveryCharges > 0 || invoice.driverName || invoice.receivedBy;
   const showRs = rs && rs.status !== "Normal" ? rs : null;
   return (
-    <div style={{ ...printDocStyle(size, false, false), fontFamily: "Inter, Arial, sans-serif", fontSize: "16px", lineHeight: 1.5, direction: "ltr" }}>
+    <div style={{ ...printDocStyle(size, false, fit), padding: "10mm 12mm 8mm", fontFamily: "Inter, Arial, sans-serif", fontSize: "16px", lineHeight: 1.5, direction: "ltr" }}>
       <PrintCopyWrap copies={copies} thermal={false}>
         {(copyLabel) => (
           <div className="bg-white text-slate-900">
