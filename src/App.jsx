@@ -1221,6 +1221,13 @@ const NAV_GROUPS = [
     { id: "drivers", label: "Drivers", icon: "truck" },
     { id: "offers", label: "Offers", icon: "gift" },
   ]},
+  { title: "HR", items: [
+    { id: "myHr", label: "My Attendance", icon: "clock" },
+    { id: "employees", label: "Employees", icon: "users" },
+    { id: "attendance", label: "Attendance", icon: "calendar" },
+    { id: "hrRequests", label: "Leave & Advance", icon: "note" },
+    { id: "salarySheet", label: "Salary Sheet", icon: "wallet" },
+  ] },
   { title: "Tools", items: [
     { id: "reports", label: "Reports", icon: "chart" },
     { id: "insights", label: "Business Insights", icon: "trend" },
@@ -1443,7 +1450,7 @@ function Sidebar({ page, setPage, role, onLogout, companyName, logoUrl, open = f
   const { language } = useLanguage();
   const rtl = language === "ur";
   const groups = NAV_GROUPS
-    .map((g) => ({ ...g, items: g.items.filter((it) => !it.adminOnly || role === "admin") }))
+    .map((g) => ({ ...g, items: g.items.filter((it) => hrNavOk(it, role)) }))
     .filter((g) => g.items.length > 0);
 
   function go(id) {
@@ -9349,6 +9356,7 @@ function App() {
   const [scanOpen, setScanOpen] = useState(null);
   const [cameraOpen, setCameraOpen] = useState(false);
   const [scanFlash, setScanFlash] = useState(false);
+  const [hrScan, setHrScan] = useState(null);
   const [prefill, setPrefill] = useState(null);
   const [focusCustomerId, setFocusCustomerId] = useState(null);
   const [focusInvoiceId, setFocusInvoiceId] = useState(null);
@@ -10112,6 +10120,7 @@ function App() {
       leads, products, drivers, offers, bookings, orders, settings, branches, auditLog,
       commissionAgents, commissionRules, commissionTransactions, commissionPayments, orderTargets,
       vouchers: finState.vouchers, finSettings: finState.settings, cashClosings: finState.closings, cashMoves: finState.moves, costRates: finState.costs,
+      employees: finState.employees, attendance: finState.attendance, leaves: finState.leaves, advances: finState.advances, salarySheets: finState.salarySheets,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -10149,6 +10158,7 @@ function App() {
     if (Array.isArray(data.cashClosings)) finMutate("closings", () => data.cashClosings);
     if (Array.isArray(data.cashMoves)) finMutate("moves", () => data.cashMoves);
     if (data.costRates && typeof data.costRates === "object") finMutate("costs", () => data.costRates);
+    ["employees", "attendance", "leaves", "advances", "salarySheets"].forEach((k) => { if (Array.isArray(data[k])) finMutate(k, () => data[k]); });
   }
 
   /* ---------- Commission Management handlers ---------- */
@@ -10276,12 +10286,19 @@ function App() {
       if (st.status === "Cancelled") return;
       finDeliveryRows(plan, Number(st.deliveredQty) || 0).forEach((r) => { if (r.status === "Today" || r.status === "Late") delToday.push({ b, r }); });
     });
+    const hrOk = hrAllow(currentUser, "hr.approve");
+    const hrLv = hrOk ? finLive.leaves.filter((l) => l.status === "Pending") : [];
+    const hrAdv = hrOk ? finLive.advances.filter((a) => a.status === "Pending") : [];
+    const empName = (id) => (finLive.employees.find((e) => e.id === id) || {}).name || "—";
     return {
       count: mine.length,
       dueCount: due.length,
+      hrCount: hrLv.length + hrAdv.length,
       portalCount: portalPend.length + portalMsg.length,
       deliveryCount: delToday.length,
       list: [
+        ...hrLv.map((l) => ({ id: "hl" + l.id, icon: "note", tone: "text-sky-400", page: "hrRequests", title: `${empName(l.empId)} — ${l.type} leave · ${l.days} din`, sub: `${l.number} · ${fmtDate(l.from)} → ${fmtDate(l.to)}` })),
+        ...hrAdv.map((a) => ({ id: "ha" + a.id, icon: "wallet", tone: "text-amber-400", page: "hrRequests", title: `${empName(a.empId)} — Advance ${fmtMoney(a.amount)}`, sub: `${a.number} · ${t("Approval chahiye")}` })),
         ...mine.map((v) => ({ id: "vc" + v.id, icon: "voucher", tone: "text-amber-400", page: "vouchers", title: `${v.number} — ${v.payee} · ${fmtMoney(v.amount)}`, sub: t("Voucher waiting for your approval") })),
         ...delToday.map(({ b, r }) => ({ id: "dl" + b.id + r.id, icon: "truck", tone: r.status === "Late" ? "text-rose-400" : "text-amber-400", page: "deliverySchedule", title: `${b.customerName} — ${fmtQty(r.left)} ${b.unit} ${b.productName}`, sub: `${r.status === "Late" ? t("Late delivery") : t("Delivery today")} · ${b.code}` })),
         ...portalPend.map((c) => ({ id: "pp" + c.id, icon: "wallet", tone: "text-emerald-400", page: "portalRequests", title: `${c.customerName} — ${fmtMoney(c.amount)}`, sub: t("Customer sent a payment — verify it") })),
@@ -10289,7 +10306,13 @@ function App() {
         ...due.map(({ v, k, idx, n }) => ({ id: "vk" + v.id + k.id, icon: "calendar", tone: k.date < today ? "text-rose-400" : "text-emerald-400", page: "paymentsDue", title: `${v.number}${n > 1 ? ` (${idx + 1}/${n})` : ""} — ${v.payee} · ${fmtMoney(k.amount)}`, sub: k.date < today ? `${t("Overdue")} · ${fmtDate(k.date)}` : t("Payment due today") })),
       ],
     };
-  }, [loading, currentUser, finLive.vouchers, finLive.settings, finLive.portalPay, finLive.portalMsgs, finLive.deliveryPlans, bookings, invoices, payments]);
+  }, [loading, currentUser, finLive.vouchers, finLive.settings, finLive.portalPay, finLive.portalMsgs, finLive.deliveryPlans, finLive.leaves, finLive.advances, finLive.employees, bookings, invoices, payments]);
+
+  // Employee logins: only the pages admin allowed.
+  useEffect(() => {
+    if (!currentUser || currentUser.role === "customer" || !finLive.loaded) return;
+    if (!hrPageAllowed(currentUser, page)) setPage(hrFirstPage(currentUser));
+  }, [currentUser, page, finLive.loaded, finLive.employees]);
 
   useEffect(() => {
     const onKey = (e) => {
@@ -10343,6 +10366,15 @@ function App() {
     setScanFlash(true);
     setTimeout(() => setScanFlash(false), 900);
     setCameraOpen(false);
+    if (["e", "l", "a", "s"].includes(parsed.kind)) { setScanOpen(null); setHrScan({ kind: parsed.kind, id: parsed.id, n: Date.now() }); return; }
+    if (parsed.kind === "hn") {
+      const num = parsed.number;
+      const [k, list] = num.startsWith("EMP-") ? ["e", finState.employees] : num.startsWith("LV-") ? ["l", finState.leaves] : ["a", finState.advances];
+      const rec = list.find((x) => String(x.number).toUpperCase() === num);
+      setScanOpen(null);
+      setHrScan({ kind: k, id: rec ? rec.id : "__missing", n: Date.now() });
+      return;
+    }
     if (parsed.kind === "v") { setScanOpen({ id: parsed.id, k: parsed.k || 0, r: parsed.r || 0, n: Date.now() }); return; }
     if (parsed.kind === "vn") {
       const v = finState.vouchers.find((x) => String(x.number).toUpperCase() === parsed.number);
@@ -10379,7 +10411,16 @@ function App() {
   function openNewInvoice() { setPage("invoices"); setNavOpen(false); setNewInvoiceSignal((n) => n + 1); }
   function openInvoiceById(id) { setFocusInvoiceId(id); setPage("invoices"); }
 
-  function handleLogin(user) { setCurrentUser(user); }
+  function openVoucherById(id) { setHrScan(null); setScanOpen({ id, n: Date.now() }); }
+
+  function handleLogin(user) {
+    if (user && user.employeeId) {
+      const emp = finState.employees.find((e) => e.id === user.employeeId);
+      if (emp && emp.status === "Left") { alert(t("Ye login band hai.")); return; }
+    }
+    if (user && user.role !== "customer") setPage(hrFirstPage(user));
+    setCurrentUser(user);
+  }
   function handleLogout() { setCurrentUser(null); setPage("dashboard"); }
 
   // Splash -> (loading screen while data loads) -> login / dashboard / portal.
@@ -10576,6 +10617,11 @@ function App() {
     portalRequests: <PortalRequestsPage currentUser={currentUser} onVerifyPortalPayment={onVerifyPortalPayment} settings={settings} />,
     paymentsDue: <PaymentsDuePage currentUser={currentUser} users={users} branches={branches} payments={visiblePayments} invoices={visibleInvoices} settings={settings} />,
     cashbook: <CashBookPage currentUser={currentUser} invoices={visibleInvoices} payments={visiblePayments} settings={settings} />,
+    myHr: <MyHrPage currentUser={currentUser} settings={settings} />,
+    employees: <EmployeesPage currentUser={currentUser} users={users} customers={customers} branches={branches} settings={settings} saveUser={saveUser} deleteUser={deleteUser} />,
+    attendance: <AttendancePage currentUser={currentUser} />,
+    hrRequests: <HrRequestsPage currentUser={currentUser} settings={settings} onOpenVoucher={openVoucherById} />,
+    salarySheet: <SalarySheetPage currentUser={currentUser} settings={settings} onOpenVoucher={openVoucherById} />,
     insights: (
       <InsightsPage customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
         promises={promises} transfers={transfers} adjustments={adjustments} settings={settings} />
@@ -10590,6 +10636,7 @@ function App() {
     ),
   };
 
+  hrNavUser = currentUser;
   const branchLabel = currentUser.branchId
     ? (branches.find((b) => b.id === currentUser.branchId)?.name || t("Branch"))
     : (branches.length > 1 ? t("All Branches") : (branches[0]?.name || ""));
@@ -10605,17 +10652,17 @@ function App() {
         <Sidebar
           page={page} setPage={goPage} role={currentUser.role} onLogout={handleLogout}
           companyName={settings.companyName} logoUrl={settings.logoUrl}
-          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount, portalRequests: finAlerts.portalCount, deliverySchedule: finAlerts.deliveryCount }}
+          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount, portalRequests: finAlerts.portalCount, deliverySchedule: finAlerts.deliveryCount, hrRequests: finAlerts.hrCount }}
         />
         <div className="flex-1 min-w-0 flex flex-col">
           <AppHeader
-            page={page} currentUser={currentUser} alerts={[...finAlerts.list, ...shellAlerts.list]}
-            onMenu={() => setNavOpen(true)} onSearch={() => setPaletteOpen(true)} onNewInvoice={openNewInvoice} onGo={goPage}
+            page={page} currentUser={currentUser} alerts={[...finAlerts.list, ...shellAlerts.list].filter((a) => !a.page || hrPageAllowed(currentUser, a.page))}
+            onMenu={() => setNavOpen(true)} onSearch={() => setPaletteOpen(true)} onNewInvoice={hrPageAllowed(currentUser, "invoices") ? openNewInvoice : null} onGo={goPage}
             onCameraScan={finIsStaff(currentUser) ? () => setCameraOpen(true) : null} scanFlash={scanFlash}
           />
           <main className="ct-content ct-scroll flex-1 overflow-y-auto">
             <div key={page} className="ct-page max-w-[1600px] mx-auto p-3 sm:p-5 lg:p-7 pb-28 lg:pb-8">
-              {pages[page] || pages.dashboard}
+              {hrPageAllowed(currentUser, page) ? (pages[page] || pages.dashboard) : <HrNoAccess />}
             </div>
             <FinScanListener enabled={finIsStaff(currentUser)} onScan={handleScan} />
             {cameraOpen && <FinCameraScan onResult={handleScan} onClose={() => setCameraOpen(false)} />}
@@ -10623,10 +10670,11 @@ function App() {
               <VoucherWorkspace key={scanOpen.n} voucherId={scanOpen.id} focusK={scanOpen.k} rev={scanOpen.r}
                 currentUser={currentUser} users={users} branches={branches} company={settings} onClose={() => setScanOpen(null)} />
             )}
+            {hrScan && <HrScanModal key={hrScan.n} target={hrScan} currentUser={currentUser} company={settings} onClose={() => setHrScan(null)} onOpenVoucher={openVoucherById} />}
           </main>
         </div>
       </div>
-      <MobileTabBar page={page} onGo={goPage} onNewInvoice={openNewInvoice} onMore={() => setNavOpen(true)} />
+      <MobileTabBar page={page} onGo={goPage} onNewInvoice={hrPageAllowed(currentUser, "invoices") ? openNewInvoice : null} onMore={() => setNavOpen(true)} />
       <CommandPalette
         open={paletteOpen} onClose={() => setPaletteOpen(false)} role={currentUser.role}
         customers={visibleCustomers} invoices={visibleInvoices}
@@ -12317,7 +12365,7 @@ function CommandPalette({ open, onClose, role, customers, invoices, onPage, onCu
 
   const results = useMemo(() => {
     const s = q.trim().toLowerCase();
-    const pages = NAV_GROUPS.flatMap((g) => g.items.filter((it) => !it.adminOnly || role === "admin").map((it) => ({ kind: "page", id: it.id, icon: it.icon, title: t(it.label), sub: t(g.title), key: it.label })));
+    const pages = NAV_GROUPS.flatMap((g) => g.items.filter((it) => hrNavOk(it, role)).map((it) => ({ kind: "page", id: it.id, icon: it.icon, title: t(it.label), sub: t(g.title), key: it.label })));
     const pageHits = pages.filter((p) => !s || p.title.toLowerCase().includes(s) || p.key.toLowerCase().includes(s)).slice(0, s ? 6 : 8);
     if (!s) return pageHits;
     const custHits = (customers || []).filter((c) => (c.name || "").toLowerCase().includes(s) || (c.phone || "").includes(s)).slice(0, 6)
@@ -12413,9 +12461,9 @@ function AppHeader({ page, currentUser, alerts, onMenu, onSearch, onNewInvoice, 
         <UiIcon name={theme === "dark" ? "sun" : "moon"} className="w-[18px] h-[18px]" />
       </button>
       <NotificationsMenu alerts={alerts} onGo={onGo} />
-      <button type="button" onClick={onNewInvoice} className="hidden lg:flex items-center gap-2 rounded-xl ct-em-btn px-4 py-2.5 text-[13px] font-bold hover:brightness-110 active:scale-[.98] transition">
+      {onNewInvoice && <button type="button" onClick={onNewInvoice} className="hidden lg:flex items-center gap-2 rounded-xl ct-em-btn px-4 py-2.5 text-[13px] font-bold hover:brightness-110 active:scale-[.98] transition">
         <UiIcon name="plus" className="w-4 h-4" />{t("New Invoice")}
-      </button>
+      </button>}
       <div className="hidden sm:flex items-center gap-2.5 ps-3 border-s ct-line">
         <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-400 to-violet-600 text-white font-bold flex items-center justify-center text-sm ring-2 ring-emerald-400/60 ring-offset-2 ring-offset-transparent">{uiInitials(name, "U")}</div>
         <div className="leading-tight hidden xl:block">
@@ -12435,20 +12483,20 @@ function MobileTabBar({ page, onGo, onNewInvoice, onMore }) {
     null,
     { id: "customers", icon: "users", label: "Customers" },
     { id: "__more", icon: "more", label: "More" },
-  ];
+  ].map((it) => (it && it.id !== "__more" && hrNavUser && !hrPageAllowed(hrNavUser, it.id) ? { ...it, hidden: true } : it));
   return (
     <div className="lg:hidden fixed bottom-0 inset-x-0 z-40 px-3 pb-[max(12px,env(safe-area-inset-bottom))] pt-2 print:hidden pointer-events-none">
       <div className="pointer-events-auto relative flex items-center justify-around rounded-[22px] border border-white/10 bg-[#0d1424]/95 backdrop-blur-xl h-16 shadow-[0_20px_40px_-10px_rgba(0,0,0,.9)]">
-        {items.map((it, i) => it ? (
+        {items.map((it, i) => it && !it.hidden ? (
           <button key={it.id} type="button" onClick={() => (it.id === "__more" ? onMore() : onGo(it.id))}
             className={`flex flex-col items-center gap-0.5 w-16 transition-colors ${page === it.id ? "text-emerald-400" : "text-slate-500"}`}>
             <UiIcon name={it.icon} className="w-[21px] h-[21px]" />
             <span className="text-[10px] font-semibold">{t(it.label)}</span>
           </button>
         ) : <div key={"gap" + i} className="w-14" />)}
-        <button type="button" onClick={onNewInvoice} className="absolute left-1/2 -translate-x-1/2 -top-6 w-14 h-14 rounded-2xl ct-em-btn flex items-center justify-center ring-4 ring-[#060a13] active:scale-95 transition" aria-label={t("New Invoice")}>
+        {onNewInvoice && <button type="button" onClick={onNewInvoice} className="absolute left-1/2 -translate-x-1/2 -top-6 w-14 h-14 rounded-2xl ct-em-btn flex items-center justify-center ring-4 ring-[#060a13] active:scale-95 transition" aria-label={t("New Invoice")}>
           <UiIcon name="plus" className="w-7 h-7" />
-        </button>
+        </button>}
       </div>
     </div>
   );
@@ -12479,6 +12527,7 @@ const PRINT_SIZES = {
   a5: { label: "A5", sub: "Invoice page", desc: "148 × 210 mm", widthMm: 148, heightMm: 210, padMm: 9, thermal: false, font: 12 },
   v5: { label: "A5 Voucher", sub: "Half page", desc: "148 mm · no blank space", widthMm: 148, heightMm: 210, padMm: 8, thermal: false, fitHeight: true, font: 11.5 },
   full: { label: "A4", sub: "Full width invoice", desc: "210 mm wide · ends after the invoice", widthMm: 210, heightMm: 297, padMm: 12, thermal: false, fitHeight: true, font: 16 },
+  card: { label: "ID Card", sub: "CR80 · 86 × 54 mm", desc: "Card printer / PVC card", widthMm: 92, heightMm: 120, padMm: 3, thermal: false, fitHeight: true, font: 10 },
   a4: { label: "A4", sub: "Full page", desc: "210 × 297 mm", widthMm: 210, heightMm: 297, padMm: 14, thermal: false, font: 14.5 },
 };
 const PRINT_SIZE_ORDER = ["t58", "t80", "a5"];
@@ -13144,7 +13193,7 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
             })}
           </div>
 
-          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Include")}</div>
+          {(includeDefs || []).length > 0 && <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Include")}</div>}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {includeDefs.filter((d) => !d.sizes || d.sizes.includes(prefs.size)).map((d) => (
               <PrintToggle key={d.key} on={!!prefs.include[d.key]} onChange={(v) => setInc(d.key, v)} label={d.label} sub={d.disabled ? d.disabledNote : d.sub} disabled={d.disabled} />
@@ -13756,7 +13805,7 @@ function QrSvg({ text, sizeMm = 20, style }) {
    same time do not overwrite each other's vouchers.
    ============================================================ */
 
-const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans" };
+const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets" };
 
 const FIN_DEFAULT_SETTINGS = {
   categories: [
@@ -13813,7 +13862,7 @@ Object.entries(FIN_URDU).forEach(([en, ur]) => {
 
 /* ---------------- Store ---------------- */
 
-const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {} };
+const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [] };
 const finListeners = new Set();
 let finLoadPromise = null;
 let finChannel = null;
@@ -13904,6 +13953,7 @@ function finIsStaff(u) { return !!u && (u.role === "admin" || u.role === "staff"
 
 function finApproverRule(settings, user) {
   if (!user) return null;
+  if (user.role !== "admin" && user.employeeId && !hrAllow(user, "voucher.approve")) return null;
   if (user.role === "admin") return { mode: "unlimited", categoryIds: [], cashExempt: !!(settings.approvers[finUserKey(user)] || {}).cashExempt };
   const r = settings.approvers[finUserKey(user)];
   return r && (r.mode === "limit" || r.mode === "unlimited") ? r : null;
@@ -15668,7 +15718,7 @@ function VoucherDetail({ fin, voucher: v, users, currentUser, focusK, rev, onClo
             {st.plan.map((k, i) => {
               const isFocus = focusK === i + 1 || (!focusK && st.next && st.next.id === k.id);
               const dueNow = k.date <= today || k.earlyOk;
-              const canPay = v.status === "Approved" && k.status !== "Paid" && staff && dueNow;
+              const canPay = v.status === "Approved" && k.status !== "Paid" && staff && dueNow && hrAllow(currentUser, "voucher.pay");
               return (
                 <div key={k.id} className={`rounded-xl px-3 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 ${k.status === "Paid" ? "bg-emerald-400/10" : isFocus ? "ring-2 ring-emerald-400/60 ct-chip" : "ct-chip"}`}>
                   <span className="w-7 h-7 rounded-lg ct-gold-bg text-[12px] font-black flex items-center justify-center">{i + 1}</span>
@@ -15782,13 +15832,14 @@ function VoucherWorkspace({ voucherId, focusK, rev, currentUser, users, branches
 // What a scanner typed: a voucher / invoice QR link, or a plain voucher / invoice number.
 function finParseScan(text) {
   const s = String(text || "").trim();
-  const m = s.match(/verify=([iv])\.([^&\s]+)/);
+  const m = s.match(/verify=([ivelas])\.([^&\s]+)/);
   if (m) {
     const k = s.match(/[&?]k=(\d+)/);
     const r = s.match(/[&?]r=(\d+)/);
     return { kind: m[1], id: decodeURIComponent(m[2]), k: k ? Number(k[1]) : 0, r: r ? Number(r[1]) : 0 };
   }
   if (/^CPV-\d{2}-\d{2}-\d{3,}$/i.test(s)) return { kind: "vn", number: s.toUpperCase() };
+  if (/^(EMP|LV|ADV)-\d{3,}$/i.test(s)) return { kind: "hn", number: s.toUpperCase() };
   if (/^[A-Z]{1,5}-\d{2,}$/i.test(s)) return { kind: "in", number: s.toUpperCase() };
   return null;
 }
@@ -16026,7 +16077,7 @@ function VouchersPage({ currentUser, users, branches, settings: company }) {
         right={(
           <>
             {myRule && settings.signMode === "digital" && <Btn variant="ghost" onClick={() => setSigOpen(true)}>✍ {t("My Signature")}</Btn>}
-            <Btn onClick={() => setForm(true)}><UiIcon name="plus" className="w-4 h-4" />{t("New Voucher")}</Btn>
+            {hrAllow(currentUser, "voucher.create") && <Btn onClick={() => setForm(true)}><UiIcon name="plus" className="w-4 h-4" />{t("New Voucher")}</Btn>}
           </>
         )}
       />
@@ -16741,7 +16792,7 @@ function docVerifyUrl(kind, id) {
 function docVerifyParse() {
   try {
     const h = String(window.location.hash || "");
-    const m = h.match(/verify=([iv])\.([^&]+)/);
+    const m = h.match(/verify=([ivelas])\.([^&]+)/);
     if (!m) return null;
     const k = h.match(/[&?]k=(\d+)/);
     const r = h.match(/[&?]r=(\d+)/);
@@ -16898,6 +16949,7 @@ function DocVerifyPage({ target, invoices, settings, onOpen }) {
     const inv = (invoices || []).find((i) => i.id === target.id) || null;
     return <InvoiceVerifyView invoice={inv} settings={settings} onOpen={onOpen} />;
   }
+  if (["e", "l", "a", "s"].includes(target.kind)) return <HrVerifyView target={target} settings={settings} onOpen={onOpen} />;
   return <VoucherVerifyView voucherId={target.id} target={target} settings={settings} onOpen={onOpen} />;
 }
 
@@ -18008,7 +18060,7 @@ function PortalRequestsPage({ currentUser, onVerifyPortalPayment, settings: comp
               {claims.map((c) => (
                 <tr key={c.id} className="border-b border-slate-100">
                   <td className="px-3 py-2.5 font-bold ct-h">{c.code}</td><td className="px-3 py-2.5">{fmtDateTime(c.at)}</td>
-                  <td className="px-3 py-2.5">{c.customerName}{c.invoiceNumber ? <div className="text-[11.5px] ct-t3">{c.invoiceNumber}</div> : null}</td>
+                  <td className="px-3 py-2.5">{c.customerName}{c.invoiceNumber ? <div className="text-[11.5px] ct-t3">{c.invoiceNumber}</div> : null}{c.forLabel ? <div className="text-[11.5px] text-emerald-500">{c.forLabel}</div> : null}</td>
                   <td className="px-3 py-2.5 font-bold tabular-nums">{fmtMoney(c.amount)}</td><td className="px-3 py-2.5">{c.accountName}</td><td className="px-3 py-2.5">{c.txnId || "—"}</td>
                   <td className="px-3 py-2.5">{c.status === "Pending" ? <span className="rounded-full px-2.5 py-0.5 text-[11.5px] font-bold bg-amber-400/15 text-amber-500">{t("Pending")}</span> : c.status === "Verified" ? <span className="rounded-full px-2.5 py-0.5 text-[11.5px] font-bold bg-emerald-400/15 text-emerald-500">✓ {t("Verified")}</span> : <span className="rounded-full px-2.5 py-0.5 text-[11.5px] font-bold bg-rose-400/15 text-rose-500">{t("Rejected")}</span>}</td>
                   <td className="px-3 py-2.5"><Btn small variant={c.status === "Pending" ? "primary" : "ghost"} onClick={() => setView(c)}>{c.status === "Pending" ? t("Check") : t("View")}</Btn></td>
@@ -18202,6 +18254,1831 @@ function DeliverySchedulePage({ currentUser, bookings, invoices, payments, onDel
       </div>
       {edit && <DeliveryPlanModal booking={edit.b} state={edit.st} plan={fin.deliveryPlans[edit.b.id]} currentUser={currentUser} onClose={() => setEdit(null)} />}
     </div>
+  );
+}
+
+/* ============================================================
+   EMPLOYEES / HR — data, permissions, attendance, salary maths
+   Storage (same live store as vouchers):
+     ct-employees     [{ id, number EMP-0001, name, cnic, phone, emergency, address,
+                         post, salary, joinDate, dutyIn, dutyOut, branchId, status,
+                         photo, username, userId, template, perms[], approveLimit }]
+     ct-attendance    [{ id, empId, date, in, out, inSrc, outSrc, inBy, outBy, lateMin }]
+     ct-leaves        [{ id, number LV-0001, empId, from, to, days, type, reason, status, ... }]
+     ct-advances      [{ id, number ADV-0001, empId, amount, reason, months, startMonth,
+                         status Pending/Approved/Rejected, voucherId, ... }]
+     ct-salary-sheets [{ id, month, status Draft/Final, adj{empId:{maaf,advSkip,bonus,deduct}}, rows[] }]
+   HR settings live in the finance settings under "hr".
+   ============================================================ */
+
+const HR_LEAVE_TYPES = ["Casual", "Sick", "Urgent", "Annual", "Other"];
+const HR_WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function hrSettingsOf(s) {
+  const h = (s && s.hr) || {};
+  return {
+    leavePerMonth: 3, graceMin: 10, dutyIn: "09:00", dutyOut: "18:00", attendanceFrom: "",
+    ...h,
+    leavePerMonth: Number.isFinite(Number(h.leavePerMonth)) && h.leavePerMonth !== "" && h.leavePerMonth != null ? Number(h.leavePerMonth) : 3,
+    graceMin: Number.isFinite(Number(h.graceMin)) && h.graceMin !== "" && h.graceMin != null ? Number(h.graceMin) : 10,
+    weeklyOff: Array.isArray(h.weeklyOff) ? h.weeklyOff : [0],
+  };
+}
+async function hrSaveSettings(patch) {
+  await finMutate("settings", (s) => ({ ...s, hr: { ...((s && s.hr) || {}), ...patch } }));
+}
+
+/* ---------------- Access / permissions ---------------- */
+
+const HR_ACTIONS = [
+  { id: "voucher.create", label: "Voucher banana" },
+  { id: "voucher.approve", label: "Voucher approve karna" },
+  { id: "voucher.pay", label: "Voucher pay karna (cashier)" },
+  { id: "hr.approve", label: "Leave / advance approve, salary final" },
+];
+const HR_NAV_GROUP = {
+  title: "HR",
+  items: [
+    { id: "myHr", label: "My Attendance", icon: "clock" },
+    { id: "employees", label: "Employees", icon: "users" },
+    { id: "attendance", label: "Attendance", icon: "calendar" },
+    { id: "hrRequests", label: "Leave & Advance", icon: "note" },
+    { id: "salarySheet", label: "Salary Sheet", icon: "wallet" },
+  ],
+};
+const HR_TEMPLATES = {
+  manager: {
+    label: "Manager", desc: "Invoice check, ledger, voucher approve, leave/advance approve",
+    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "deliverySchedule", "returns", "customers", "ledger", "payments", "promises", "vouchers", "paymentsDue", "reports", "attendance", "hrRequests", "voucher.create", "voucher.approve", "hr.approve"],
+  },
+  clerk: {
+    label: "Clerk", desc: "Invoice banana, payment add, voucher banana",
+    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "customers", "ledger", "payments", "vouchers", "voucher.create"],
+  },
+  cashier: {
+    label: "Cashier", desc: "Voucher pay, payments due, cash book",
+    perms: ["dashboard", "vouchers", "paymentsDue", "cashbook", "payments", "voucher.pay"],
+  },
+  driver: { label: "Driver", desc: "Sirf delivery schedule aur apni hazri", perms: ["deliverySchedule"] },
+  admin: { label: "Admin", desc: "Sab kuch (admin login)", perms: ["*"] },
+  custom: { label: "Custom", desc: "Khud tick karein", perms: [] },
+};
+// Pages a plain (old) staff login cannot open — only admin or given access.
+const HR_MANAGE_PAGES = ["employees", "salarySheet"];
+
+function hrEmployeeOf(user) {
+  if (!user || !user.employeeId) return null;
+  return finState.employees.find((e) => e.id === user.employeeId) || null;
+}
+function hrPermsOf(user) {
+  const emp = hrEmployeeOf(user);
+  if (emp) return Array.isArray(emp.perms) ? emp.perms : [];
+  return Array.isArray(user && user.perms) ? user.perms : [];
+}
+function hrPageAllowed(user, pageId) {
+  if (!user) return false;
+  if (pageId === "myHr") return !!user.employeeId;
+  if (user.role === "admin") return true;
+  if (!user.employeeId) return !HR_MANAGE_PAGES.includes(pageId);
+  const p = hrPermsOf(user);
+  return p.includes("*") || p.includes(pageId);
+}
+function hrAllow(user, perm) {
+  if (!user) return false;
+  if (user.role === "admin") return true;
+  if (!user.employeeId) return perm.startsWith("voucher.");
+  const p = hrPermsOf(user);
+  return p.includes("*") || p.includes(perm);
+}
+// Sidebar / search use this (set by App on every render).
+let hrNavUser = null;
+function hrNavOk(it, role) {
+  if (role === "admin" && it.id !== "myHr") return true;
+  if (it.adminOnly) return false;
+  return hrPageAllowed(hrNavUser || { role }, it.id);
+}
+function hrFirstPage(user) {
+  if (hrPageAllowed(user, "dashboard")) return "dashboard";
+  for (const g of NAV_GROUPS) for (const it of g.items) if (!it.adminOnly && hrPageAllowed(user, it.id)) return it.id;
+  return "myHr";
+}
+
+/* ---------------- Small helpers ---------------- */
+
+function hrNextNo(list, prefix) {
+  let max = 0;
+  (list || []).forEach((x) => { const m = String(x.number || "").match(/(\d+)$/); if (m) max = Math.max(max, Number(m[1])); });
+  return `${prefix}-${String(max + 1).padStart(4, "0")}`;
+}
+function hrHM(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (isNaN(d)) return "—";
+  return d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+}
+function hrMin(hm) { const m = String(hm || "").match(/^(\d{1,2}):(\d{2})/); return m ? Number(m[1]) * 60 + Number(m[2]) : 0; }
+function hrHours(h) { const hh = Math.floor(h); const mm = Math.round((h - hh) * 60); return `${hh}h ${String(mm).padStart(2, "0")}m`; }
+function hrMonthOf(date) { return String(date || todayISO()).slice(0, 7); }
+function hrMonthLabel(month) {
+  const [y, m] = String(month).split("-").map(Number);
+  return new Date(y, (m || 1) - 1, 1).toLocaleDateString("en-US", { month: "long", year: "numeric" });
+}
+function hrNextMonth(month) { const [y, m] = month.split("-").map(Number); const d = new Date(y, m, 1); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`; }
+function hrMonthDays(month) {
+  const [y, m] = month.split("-").map(Number);
+  const n = new Date(y, m, 0).getDate();
+  return Array.from({ length: n }, (_, i) => `${month}-${String(i + 1).padStart(2, "0")}`);
+}
+function hrDow(date) { const d = parseDateValue(date); return d ? d.getDay() : 0; }
+function hrDateRange(from, to) {
+  const out = [];
+  if (!from) return out;
+  let d = from;
+  const end = to && to >= from ? to : from;
+  for (let i = 0; d <= end && i < 120; i++) { out.push(d); d = finAddDays(d, 1); }
+  return out;
+}
+function hrWorkDays(from, to, settings) {
+  const hs = hrSettingsOf(settings);
+  return hrDateRange(from, to).filter((d) => !hs.weeklyOff.includes(hrDow(d)));
+}
+function hrMaskCnic(c) { const s = String(c || ""); return s.length > 5 ? s.slice(0, 5) + "-•••••••-" + s.slice(-1) : s; }
+function hrEmpName(fin, id) { const e = fin.employees.find((x) => x.id === id); return e ? e.name : "—"; }
+function hrInitials(n) { return uiInitials ? uiInitials(n) : String(n || "?").slice(0, 2).toUpperCase(); }
+
+function hrResizeImage(file, max = 360) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onerror = reject;
+    r.onload = () => {
+      const img = new Image();
+      img.onerror = reject;
+      img.onload = () => {
+        const s = Math.min(1, max / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        resolve(c.toDataURL("image/jpeg", 0.8));
+      };
+      img.src = r.result;
+    };
+    r.readAsDataURL(file);
+  });
+}
+
+/* ---------------- Attendance ---------------- */
+
+function hrTodayRec(fin, empId, date) {
+  const d = date || todayISO();
+  return fin.attendance.find((a) => a.empId === empId && a.date === d) || null;
+}
+// Card scan / button: first = check-in, second = check-out.
+async function hrPunch(emp, byUser, src) {
+  const today = todayISO();
+  const now = new Date().toISOString();
+  const hs = hrSettingsOf(finState.settings);
+  let result = null;
+  await finMutate("attendance", (list) => {
+    const rec = list.find((a) => a.empId === emp.id && a.date === today);
+    if (!rec) {
+      const d = new Date();
+      const m = d.getHours() * 60 + d.getMinutes();
+      const duty = hrMin(emp.dutyIn || hs.dutyIn);
+      const late = m > duty + hs.graceMin ? m - duty : 0;
+      result = { type: "in", at: now, lateMin: late };
+      return [...list, { id: uid("att"), empId: emp.id, date: today, in: now, out: null, inSrc: src, inBy: byUser ? byUser.name || byUser.username : "", lateMin: late }];
+    }
+    if (!rec.out) {
+      if (Date.now() - Date.parse(rec.in) < 90 * 1000) { result = { type: "dup", at: rec.in, lateMin: rec.lateMin }; return list; }
+      result = { type: "out", at: now, inAt: rec.in, lateMin: rec.lateMin };
+      return list.map((a) => (a.id === rec.id ? { ...a, out: now, outSrc: src, outBy: byUser ? byUser.name || byUser.username : "" } : a));
+    }
+    result = { type: "done", at: rec.out, inAt: rec.in, lateMin: rec.lateMin };
+    return list;
+  });
+  if (!hs.attendanceFrom) await hrSaveSettings({ attendanceFrom: today });
+  return result;
+}
+
+// One month of one employee: day cells + totals.
+function hrMonthStats(emp, month, fin) {
+  const hs = hrSettingsOf(fin.settings);
+  const today = todayISO();
+  const days = hrMonthDays(month);
+  const attBy = {};
+  fin.attendance.forEach((a) => { if (a.empId === emp.id && String(a.date).startsWith(month)) attBy[a.date] = a; });
+  const leaveBy = {};
+  fin.leaves.forEach((l) => {
+    if (l.empId !== emp.id || l.status !== "Approved") return;
+    hrDateRange(l.from, l.to).forEach((d) => { if (d.startsWith(month)) leaveBy[d] = l; });
+  });
+  const from = [emp.joinDate || "", hs.attendanceFrom || ""].reduce((a, b) => (b > a ? b : a), "");
+  let present = 0, late = 0, leave = 0, absent = 0, hours = 0, working = 0;
+  const cells = days.map((d) => {
+    const off = hs.weeklyOff.includes(hrDow(d));
+    const a = attBy[d];
+    const lv = leaveBy[d];
+    let st;
+    if (a) st = a.lateMin > 0 ? "late" : "present";
+    else if (lv && !off) st = "leave";
+    else if (off) st = "off";
+    else if (d >= today || (from && d < from)) st = "none";
+    else st = "absent";
+    const h = a && a.out ? Math.max(0, (Date.parse(a.out) - Date.parse(a.in)) / 3600000) : 0;
+    if (!off) working++;
+    if (st === "present" || st === "late") present++;
+    if (st === "late") late++;
+    if (st === "leave") leave++;
+    if (st === "absent") absent++;
+    hours += h;
+    return { date: d, st, a, lv, hours: h, off };
+  });
+  return { cells, present, late, leave, absent, hours, working, days: days.length };
+}
+const HR_CELL_TONE = {
+  present: "bg-emerald-500 text-white", late: "bg-amber-400 text-slate-900", leave: "bg-sky-500 text-white",
+  absent: "bg-rose-500 text-white", off: "bg-slate-400/20 ct-t3", none: "ct-chip ct-t3",
+};
+const HR_CELL_LABEL = { present: "P", late: "L", leave: "LV", absent: "A", off: "Off", none: "" };
+
+/* ---------------- Leave ---------------- */
+
+function hrLeaveUsed(fin, empId, month, exceptId) {
+  let n = 0;
+  fin.leaves.forEach((l) => {
+    if (l.empId !== empId || l.status !== "Approved" || l.id === exceptId) return;
+    n += hrWorkDays(l.from, l.to, fin.settings).filter((d) => d.startsWith(month)).length;
+  });
+  return n;
+}
+
+/* ---------------- Advance ---------------- */
+
+function hrAdvanceRecovered(fin, advId) {
+  let s = 0;
+  fin.salarySheets.forEach((sh) => {
+    if (sh.status !== "Final") return;
+    (sh.rows || []).forEach((r) => (r.advParts || []).forEach((p) => { if (p.advId === advId) s += Number(p.amount) || 0; }));
+  });
+  return roundMoney(s);
+}
+function hrAdvanceInfo(fin, adv) {
+  const v = adv.voucherId ? fin.vouchers.find((x) => x.id === adv.voucherId) : null;
+  const vst = v ? finVoucherState(v) : null;
+  const paid = !!(vst && vst.key === "paid");
+  const recovered = hrAdvanceRecovered(fin, adv.id);
+  const left = roundMoney(Math.max(0, (Number(adv.amount) || 0) - recovered));
+  let status = adv.status;
+  if (adv.status === "Approved") status = left <= 0 ? "Recovered" : paid ? "Paid" : v && v.status === "Cancelled" ? "Cancelled" : "Ready to pay";
+  const per = adv.months ? Math.ceil((Number(adv.amount) || 0) / Number(adv.months)) : Number(adv.amount) || 0;
+  return { v, vst, paid, recovered, left, status, per };
+}
+const HR_STATUS_TONE = {
+  Pending: "bg-amber-400/15 text-amber-500", Approved: "bg-emerald-400/15 text-emerald-500", Rejected: "bg-rose-400/15 text-rose-500",
+  "Ready to pay": "bg-sky-400/15 text-sky-500", Paid: "bg-emerald-400/15 text-emerald-500", Recovered: "bg-violet-400/15 text-violet-500",
+  Cancelled: "bg-slate-400/15 text-slate-500", Final: "bg-emerald-400/15 text-emerald-500", Draft: "bg-amber-400/15 text-amber-500",
+  Active: "bg-emerald-400/15 text-emerald-500", Left: "bg-slate-400/15 text-slate-500",
+};
+function HrPill({ s }) {
+  return <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[11.5px] font-bold whitespace-nowrap ${HR_STATUS_TONE[s] || HR_STATUS_TONE.Cancelled}`}>{t(s)}</span>;
+}
+
+// An approved voucher made by the HR module (advance or salary).
+function hrMakeVoucher(list, o, actor) {
+  const s = finState.settings;
+  const cat = s.categories.find((c) => (o.catHint ? new RegExp(o.catHint, "i").test(c.name) : false))
+    || s.categories.find((c) => /salary/i.test(c.name)) || s.categories[0];
+  const now = new Date().toISOString();
+  const date = o.date || todayISO();
+  return {
+    id: uid("vch"), number: finNextVoucherNumber(list, date), date,
+    categoryId: cat.id, categoryName: cat.name, categoryCode: cat.code || "",
+    payee: o.payee, payeePhone: o.payeePhone || "", particulars: o.particulars, amount: roundMoney(o.amount),
+    costCenter: o.branchId || "", receiptNo: "", plan: [finNewKisht(date, o.amount, "Cash")], rev: 1, hasBill: false, status: "Approved",
+    createdBy: actor, createdAt: now, updatedAt: now,
+    approval: { by: actor, at: now, sigId: "", signMode: s.signMode || "manual", changed: false, note: o.note || "" },
+    rejection: null, payment: null, cancellation: null, hrRef: o.hrRef || null,
+    history: [{ at: now, by: actor.name, action: "Created", note: o.note || "" }, { at: now, by: actor.name, action: "Approved", note: o.note || "" }],
+  };
+}
+
+/* ---------------- Salary ---------------- */
+
+function hrAdvanceDue(fin, empId, month) {
+  return fin.advances
+    .filter((a) => a.empId === empId && a.status === "Approved" && (a.startMonth || "") <= month)
+    .map((a) => {
+      const info = hrAdvanceInfo(fin, a);
+      if (!info.paid) return null;
+      const amt = Math.min(info.per, info.left);
+      return amt > 0 ? { advId: a.id, number: a.number, amount: roundMoney(amt), left: info.left } : null;
+    })
+    .filter(Boolean);
+}
+function hrSalaryRow(fin, emp, month, adj) {
+  const hs = hrSettingsOf(fin.settings);
+  const s = hrMonthStats(emp, month, fin);
+  const a = adj || {};
+  const salary = Number(emp.salary) || 0;
+  const perDay = s.days ? salary / s.days : 0;
+  const extraLeave = Math.max(0, s.leave - hs.leavePerMonth);
+  const cutDays = extraLeave + s.absent;
+  const leaveCutCalc = roundMoney(perDay * cutDays);
+  const leaveCut = a.maaf ? 0 : leaveCutCalc;
+  const advParts = a.advSkip ? [] : hrAdvanceDue(fin, emp.id, month);
+  const advCalc = roundMoney(hrAdvanceDue(fin, emp.id, month).reduce((x, p) => x + p.amount, 0));
+  const advanceCut = roundMoney(advParts.reduce((x, p) => x + p.amount, 0));
+  const bonus = Number(a.bonus) || 0;
+  const deduct = Number(a.deduct) || 0;
+  const net = roundMoney(Math.max(0, salary - leaveCut - advanceCut + bonus - deduct));
+  return {
+    empId: emp.id, number: emp.number, name: emp.name, post: emp.post, phone: emp.phone || "", branchId: emp.branchId || "",
+    salary, days: s.days, present: s.present, late: s.late, leave: s.leave, absent: s.absent, hours: roundMoney(s.hours),
+    allowed: hs.leavePerMonth, extraLeave, cutDays, perDay: roundMoney(perDay), leaveCutCalc, leaveCut, maaf: !!a.maaf,
+    advParts, advCalc, advanceCut, advSkip: !!a.advSkip, bonus, deduct, note: a.note || "", net,
+  };
+}
+function hrSalarySlipId(sheet, empId) { return `${sheet.id}~${empId}`; }
+
+/* ============================================================
+   HR PRINTS — ID card, leave slip, advance slip, salary slip.
+   Every paper has a QR → #verify=e|l|a|s.<id>
+   ============================================================ */
+
+const HR_BOX = { border: "1px solid #cbd5e1", borderRadius: "1.2mm", padding: "1.3mm 2mm" };
+
+function HrStamp({ text, tone }) {
+  const c = tone === "ok" ? "#047857" : tone === "bad" ? "#be123c" : "#b45309";
+  return (
+    <div style={{ display: "inline-block", border: `2px solid ${c}`, color: c, borderRadius: "1.5mm", padding: ".6mm 3mm", fontWeight: 900, letterSpacing: ".12em", fontSize: "1em", transform: "rotate(-4deg)" }}>{text}</div>
+  );
+}
+function HrDocFoot({ note }) {
+  return (
+    <div style={{ marginTop: "3mm", paddingTop: "1mm", borderTop: "1px dashed #cbd5e1", display: "flex", justifyContent: "space-between", gap: "3mm", fontSize: ".7em", color: "#64748b" }}>
+      <span>{note || "QR scan karke status check karein"}</span>
+      <span>Printed {fmtDateTime(new Date().toISOString())}</span>
+    </div>
+  );
+}
+function HrEmpBlock({ emp }) {
+  return (
+    <div style={{ display: "flex", gap: "3mm", alignItems: "center", ...HR_BOX, marginBottom: "2mm" }}>
+      {emp.photo ? <img src={emp.photo} alt="" style={{ width: "13mm", height: "15mm", objectFit: "cover", borderRadius: "1mm" }} /> : null}
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontWeight: 800, fontSize: "1.1em" }}>{emp.name}</div>
+        <div style={{ fontSize: ".88em", color: "#334155" }}>{emp.post} · <b>{emp.number}</b>{emp.phone ? ` · ${emp.phone}` : ""}</div>
+      </div>
+    </div>
+  );
+}
+function HrThermalDoc({ company, title, qrText, lines, size, copies }) {
+  return (
+    <div style={printDocStyle(size, false, true)}>
+      <PrintCopyWrap copies={copies} thermal>
+        {() => (
+          <div>
+            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.15em" }}>{company.companyName}</div>
+            {company.companyPhone && <div style={{ textAlign: "center" }}>Ph: {company.companyPhone}</div>}
+            <PrintRule />
+            <div style={{ textAlign: "center", fontWeight: 700 }}>{title}</div>
+            <PrintRule />
+            {lines.map((ln, i) => (ln === "-" ? <PrintRule key={i} /> : <PrintRow key={i} l={ln[0]} v={ln[1]} bold={ln[2]} big={ln[3]} />))}
+            <PrintRule />
+            {qrText && <div style={{ display: "flex", justifyContent: "center", margin: "2mm 0" }}><QrSvg text={qrText} sizeMm={24} /></div>}
+            <div style={{ display: "flex", gap: "4mm", marginTop: "8mm" }}>
+              <div style={{ flex: 1, borderTop: "1px solid #000", textAlign: "center", fontSize: ".85em" }}>Employee</div>
+              <div style={{ flex: 1, borderTop: "1px solid #000", textAlign: "center", fontSize: ".85em" }}>Approved</div>
+            </div>
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+/* ---------------- ID card (CR80, front + back) ---------------- */
+
+function HrCardFace({ children, dark }) {
+  return (
+    <div style={{ width: "85.6mm", height: "54mm", borderRadius: "3mm", overflow: "hidden", position: "relative", boxSizing: "border-box", border: "0.3mm solid #cbd5e1", background: dark ? "#0f172a" : "#fff", color: dark ? "#fff" : "#0f172a", breakInside: "avoid", pageBreakInside: "avoid", WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      {children}
+    </div>
+  );
+}
+function HrCardFront({ emp, company }) {
+  return (
+    <HrCardFace>
+      <div style={{ background: "linear-gradient(135deg,#0f172a,#1e293b)", color: "#fff", padding: "2mm 3mm", display: "flex", alignItems: "center", gap: "2mm", height: "11mm", boxSizing: "border-box" }}>
+        {company.logoUrl ? <img src={company.logoUrl} alt="" style={{ width: "7mm", height: "7mm", objectFit: "contain", background: "#fff", borderRadius: "1mm" }} /> : (
+          <div style={{ width: "7mm", height: "7mm", borderRadius: "1.2mm", background: "#d4a94f", color: "#0f172a", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "8px" }}>{uiInitials(company.companyName)}</div>
+        )}
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontWeight: 900, fontSize: "9.5px", textTransform: "uppercase", lineHeight: 1.1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{company.companyName}</div>
+          <div style={{ fontSize: "6px", color: "#d4a94f", letterSpacing: ".14em", fontWeight: 700 }}>EMPLOYEE IDENTITY CARD</div>
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: "3mm", padding: "2.5mm 3mm 0" }}>
+        <div style={{ width: "21mm", height: "26mm", borderRadius: "1.5mm", overflow: "hidden", background: "#e2e8f0", border: "0.5mm solid #d4a94f", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, fontSize: "18px", color: "#64748b" }}>
+          {emp.photo ? <img src={emp.photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : uiInitials(emp.name)}
+        </div>
+        <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
+          <div style={{ fontWeight: 900, fontSize: "11px", lineHeight: 1.15 }}>{emp.name}</div>
+          <div style={{ fontSize: "8px", fontWeight: 700, color: "#047857", textTransform: "uppercase", letterSpacing: ".06em", marginTop: ".6mm" }}>{emp.post}</div>
+          <div style={{ marginTop: "2mm", fontSize: "7px", color: "#64748b" }}>EMPLOYEE NO</div>
+          <div style={{ fontWeight: 900, fontSize: "10px", letterSpacing: ".04em" }}>{emp.number}</div>
+          <div style={{ position: "absolute", right: 0, top: "6mm" }}><QrSvg text={docVerifyUrl("e", emp.id)} sizeMm={17} /></div>
+        </div>
+      </div>
+      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "5mm", background: "#d4a94f", color: "#0f172a", fontSize: "6.5px", fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", letterSpacing: ".1em" }}>
+        SCAN QR · CHECK-IN / CHECK-OUT
+      </div>
+    </HrCardFace>
+  );
+}
+function HrCardBack({ emp, company }) {
+  const row = (l, v) => (
+    <div style={{ display: "flex", fontSize: "8px", lineHeight: 1.55 }}><span style={{ width: "22mm", color: "#64748b" }}>{l}</span><b style={{ flex: 1 }}>{v || "—"}</b></div>
+  );
+  return (
+    <HrCardFace>
+      <div style={{ padding: "3mm 3.5mm" }}>
+        {row("CNIC", emp.cnic)}
+        {row("Phone", emp.phone)}
+        {row("Join date", emp.joinDate ? fmtDate(emp.joinDate) : "")}
+        {row("Emergency", emp.emergency)}
+        {row("Duty time", `${emp.dutyIn || "09:00"} – ${emp.dutyOut || "18:00"}`)}
+        <div style={{ fontSize: "6.5px", color: "#475569", marginTop: "1.5mm", lineHeight: 1.3 }}>
+          Ye card {company.companyName} ki milkiyat hai. Milne par wapas karein: {[company.companyAddress, company.companyPhone].filter(Boolean).join(" · ")}
+        </div>
+        <div style={{ display: "flex", gap: "5mm", marginTop: "5mm" }}>
+          <div style={{ flex: 1, borderTop: "0.3mm solid #0f172a", textAlign: "center", fontSize: "6.5px", paddingTop: ".5mm" }}>Employee Sign</div>
+          <div style={{ flex: 1, borderTop: "0.3mm solid #0f172a", textAlign: "center", fontSize: "6.5px", paddingTop: ".5mm" }}>Authorized Sign</div>
+        </div>
+      </div>
+      <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: "3mm", background: "#0f172a" }} />
+    </HrCardFace>
+  );
+}
+function HrCardDoc({ emps, company, size }) {
+  return (
+    <div style={{ ...printDocStyle(size, false, true), fontFamily: "Inter, Arial, sans-serif" }}>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: "4mm", justifyContent: "center" }}>
+        {emps.map((emp) => (
+          <React.Fragment key={emp.id}>
+            <HrCardFront emp={emp} company={company} />
+            <HrCardBack emp={emp} company={company} />
+          </React.Fragment>
+        ))}
+      </div>
+    </div>
+  );
+}
+function HrCardPrintDialog({ emps, company, onClose }) {
+  return (
+    <PrintDialog kind="hrcard" title="Print ID Card" subtitle={emps.length === 1 ? `${emps[0].number} · ${emps[0].name}` : `${emps.length} cards`}
+      includeDefs={[]} sizeOrder={["card", "a4"]} defaultSize="card" copyLabels={[[1, "1 Copy"]]}
+      fileName={emps.length === 1 ? `ID-Card-${emps[0].number}` : "ID-Cards"} onClose={onClose}
+      renderDoc={(p) => <HrCardDoc emps={emps} company={company} size={p.size} />} />
+  );
+}
+
+/* ---------------- Leave slip ---------------- */
+
+function HrLeaveSlipDoc({ lv, emp, fin, company, size, copies, fit }) {
+  const hs = hrSettingsOf(fin.settings);
+  const month = hrMonthOf(lv.from);
+  const used = hrLeaveUsed(fin, lv.empId, month, lv.id);
+  const thisDays = hrWorkDays(lv.from, lv.to, fin.settings).filter((d) => d.startsWith(month)).length;
+  const total = used + thisDays;
+  const extra = Math.max(0, total - hs.leavePerMonth) - Math.max(0, used - hs.leavePerMonth);
+  const tone = lv.status === "Approved" ? "ok" : lv.status === "Rejected" ? "bad" : "warn";
+  return (
+    <div style={{ ...printDocStyle(size, false, fit), fontFamily: "Inter, Arial, sans-serif" }}>
+      <PrintCopyWrap copies={copies} thermal={false}>
+        {() => (
+          <div>
+            <FinDocHeader company={company} qrText={docVerifyUrl("l", lv.id)} title="Leave Slip" />
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: ".95em", marginBottom: "2mm" }}>
+              <div><b>Slip No:</b> {lv.number}</div><div><b>Date:</b> {fmtDate(String(lv.createdAt || "").slice(0, 10) || todayISO())}</div>
+            </div>
+            <HrEmpBlock emp={emp} />
+            <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: ".92em" }}>
+              <thead><tr><th style={FIN_HEAD}>Leave type</th><th style={FIN_HEAD}>From</th><th style={FIN_HEAD}>To</th><th style={{ ...FIN_HEAD, width: "16%" }}>Days</th></tr></thead>
+              <tbody><tr>
+                <td style={{ ...FIN_CELL, textAlign: "center" }}><b>{lv.type}</b></td>
+                <td style={{ ...FIN_CELL, textAlign: "center" }}>{fmtDate(lv.from)}</td>
+                <td style={{ ...FIN_CELL, textAlign: "center" }}>{fmtDate(lv.to)}</td>
+                <td style={{ ...FIN_CELL, textAlign: "center" }}><b>{lv.days}</b></td>
+              </tr></tbody>
+            </table>
+            <div style={{ marginTop: "2mm", fontSize: ".95em" }}><b>Wajah:</b> {lv.reason || "—"}</div>
+            <div style={{ display: "flex", gap: "2mm", marginTop: "2mm", fontSize: ".86em" }}>
+              <div style={{ ...HR_BOX, flex: 1 }}><b>{hrMonthLabel(month)}:</b> {total} / {hs.leavePerMonth} chhuttiyan</div>
+              <div style={{ ...HR_BOX, flex: 1, color: extra > 0 ? "#be123c" : "#047857" }}><b>Extra:</b> {extra > 0 ? `${extra} din (salary se cut${lv.maaf ? " — maaf" : ""})` : "Koi nahi"}</div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "3mm" }}>
+              <HrStamp text={String(lv.status).toUpperCase()} tone={tone} />
+              {lv.decision && <div style={{ fontSize: ".82em", textAlign: "end" }}>{lv.decision.by} · {fmtDateTime(lv.decision.at)}{lv.decision.note ? <div>{lv.decision.note}</div> : null}</div>}
+            </div>
+            <FinSignRow items={[
+              { label: "Employee" },
+              { label: "Approved By", top: lv.decision && lv.status === "Approved" ? lv.decision.by : "", bold: true },
+              { label: "HR / Admin" },
+            ]} />
+            <HrDocFoot />
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+function HrLeavePrintDialog({ lv, emp, fin, company, onClose }) {
+  return (
+    <PrintDialog kind="hrleave" title="Print Leave Slip" subtitle={`${lv.number} · ${emp.name}`} includeDefs={[]}
+      sizeOrder={["v5", "t80"]} defaultSize="v5" copyLabels={[[1, "1 Copy"], [2, "2 Copies (Employee + Office)"]]}
+      fileName={`Leave-${lv.number}`} onClose={onClose}
+      renderDoc={(p) => (PRINT_SIZES[p.size].thermal
+        ? <HrThermalDoc company={company} title={`LEAVE SLIP · ${lv.number}`} qrText={docVerifyUrl("l", lv.id)} size={p.size} copies={p.copies}
+            lines={[["Employee", emp.name, true], ["EMP", emp.number], ["Post", emp.post], "-", ["Type", lv.type], ["From", fmtDate(lv.from)], ["To", fmtDate(lv.to)], ["Days", String(lv.days), true], ["Reason", lv.reason || "—"], "-", ["Status", String(lv.status).toUpperCase(), true, true]]} />
+        : <HrLeaveSlipDoc lv={lv} emp={emp} fin={fin} company={company} {...p} />)} />
+  );
+}
+
+/* ---------------- Advance slip ---------------- */
+
+function HrAdvanceSlipDoc({ adv, emp, fin, company, size, copies, fit }) {
+  const info = hrAdvanceInfo(fin, adv);
+  const tone = ["Paid", "Recovered", "Ready to pay", "Approved"].includes(info.status) ? "ok" : info.status === "Pending" ? "warn" : "bad";
+  const months = [];
+  if (adv.startMonth && adv.months) {
+    let m = adv.startMonth, left = Number(adv.amount) || 0;
+    for (let i = 0; i < adv.months && left > 0; i++) { const a = Math.min(info.per, left); months.push([m, a]); left -= a; m = hrNextMonth(m); }
+  }
+  return (
+    <div style={{ ...printDocStyle(size, false, fit), fontFamily: "Inter, Arial, sans-serif" }}>
+      <PrintCopyWrap copies={copies} thermal={false}>
+        {() => (
+          <div>
+            <FinDocHeader company={company} qrText={docVerifyUrl("a", adv.id)} title="Advance Salary Slip" />
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: ".95em", marginBottom: "2mm" }}>
+              <div><b>Slip No:</b> {adv.number}</div>
+              <div><b>Date:</b> {fmtDate(String(adv.createdAt || "").slice(0, 10) || todayISO())}</div>
+            </div>
+            <HrEmpBlock emp={emp} />
+            <div style={{ display: "flex", gap: "2mm", alignItems: "stretch" }}>
+              <div style={{ ...HR_BOX, flex: 1 }}>
+                <div style={{ fontSize: ".8em", color: "#64748b" }}>Advance raqam</div>
+                <div style={{ fontWeight: 900, fontSize: "1.5em" }}>Rs {finMoney2(adv.amount)}</div>
+                <div style={{ fontSize: ".82em" }}><u>{finAmountInWords(adv.amount)}</u></div>
+              </div>
+              <div style={{ ...HR_BOX, flex: 1, fontSize: ".9em" }}>
+                <div><b>Wajah:</b> {adv.reason || "—"}</div>
+                {adv.voucherId && info.v && <div><b>Voucher:</b> {info.v.number}</div>}
+                <div><b>Wapsi:</b> {adv.months ? `${adv.months} mahine × Rs ${finMoney2(info.per)}` : "—"}</div>
+              </div>
+            </div>
+            {months.length > 0 && (
+              <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: ".86em", marginTop: "2mm" }}>
+                <thead><tr><th style={FIN_HEAD}>#</th><th style={FIN_HEAD}>Salary month</th><th style={FIN_HEAD}>Cut</th></tr></thead>
+                <tbody>{months.map(([m, a], i) => (
+                  <tr key={m}><td style={{ ...FIN_CELL, textAlign: "center" }}>{i + 1}</td><td style={FIN_CELL}>{hrMonthLabel(m)}</td><td style={{ ...FIN_CELL, ...FIN_NUM }}>{finMoney2(a)}</td></tr>
+                ))}</tbody>
+              </table>
+            )}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "3mm" }}>
+              <HrStamp text={String(info.status).toUpperCase()} tone={tone} />
+              <div style={{ fontSize: ".82em", textAlign: "end" }}>
+                {adv.decision && <div>{adv.status === "Rejected" ? "Rejected" : "Approved"}: {adv.decision.by} · {fmtDate(adv.decision.at)}</div>}
+                {info.recovered > 0 && <div>Wapis: Rs {finMoney2(info.recovered)} · Baqi: Rs {finMoney2(info.left)}</div>}
+              </div>
+            </div>
+            <FinSignRow items={[
+              { label: "Received By (Employee)" },
+              { label: "Approved By", top: adv.decision && adv.status === "Approved" ? adv.decision.by : "", bold: true },
+              { label: "Paid By (Cashier)" },
+            ]} />
+            <HrDocFoot note="Cashier: QR scan karke voucher pay karein" />
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+function HrAdvancePrintDialog({ adv, emp, fin, company, onClose }) {
+  const info = hrAdvanceInfo(fin, adv);
+  return (
+    <PrintDialog kind="hradv" title="Print Advance Slip" subtitle={`${adv.number} · ${emp.name} · Rs ${finMoney2(adv.amount)}`} includeDefs={[]}
+      sizeOrder={["v5", "t80"]} defaultSize="v5" copyLabels={[[1, "1 Copy"], [2, "2 Copies (Employee + Office)"]]}
+      fileName={`Advance-${adv.number}`} onClose={onClose}
+      renderDoc={(p) => (PRINT_SIZES[p.size].thermal
+        ? <HrThermalDoc company={company} title={`ADVANCE SLIP · ${adv.number}`} qrText={docVerifyUrl("a", adv.id)} size={p.size} copies={p.copies}
+            lines={[["Employee", emp.name, true], ["EMP", emp.number], "-", ["Amount", `Rs ${finMoney2(adv.amount)}`, true, true], ["Reason", adv.reason || "—"], ["Repay", adv.months ? `${adv.months} x Rs ${finMoney2(info.per)}` : "—"], ["Voucher", info.v ? info.v.number : "—"], "-", ["Status", String(info.status).toUpperCase(), true]]} />
+        : <HrAdvanceSlipDoc adv={adv} emp={emp} fin={fin} company={company} {...p} />)} />
+  );
+}
+
+/* ---------------- Salary slip ---------------- */
+
+function HrSalarySlipBody({ sheet, row, fin, company }) {
+  const v = row.voucherId ? fin.vouchers.find((x) => x.id === row.voucherId) : null;
+  const paid = !!(v && finVoucherState(v).key === "paid");
+  const line = (l, a, neg, bold) => (
+    <tr key={l}><td style={{ ...FIN_CELL, fontWeight: bold ? 800 : 400 }}>{l}</td><td style={{ ...FIN_CELL, ...FIN_NUM, fontWeight: bold ? 800 : 400, color: neg && a ? "#be123c" : undefined }}>{neg && a ? "− " : ""}{finMoney2(a)}</td></tr>
+  );
+  return (
+    <div style={{ breakInside: "avoid", pageBreakInside: "avoid" }}>
+      <FinDocHeader company={company} qrText={docVerifyUrl("s", hrSalarySlipId(sheet, row.empId))} title="Salary Slip" sub={hrMonthLabel(sheet.month)} />
+      <HrEmpBlock emp={{ ...row, photo: (fin.employees.find((e) => e.id === row.empId) || {}).photo }} />
+      <div style={{ display: "flex", gap: "1.5mm", fontSize: ".82em", marginBottom: "2mm", textAlign: "center" }}>
+        {[["Present", row.present], ["Late", row.late], ["Leave", `${row.leave}/${row.allowed}`], ["Absent", row.absent], ["Hours", hrHours(row.hours || 0)]].map(([l, x]) => (
+          <div key={l} style={{ ...HR_BOX, flex: 1, padding: "1mm" }}><div style={{ color: "#64748b" }}>{l}</div><b>{x}</b></div>
+        ))}
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: ".92em" }}>
+        <tbody>
+          {line("Basic salary", row.salary)}
+          {row.cutDays > 0 && (row.maaf
+            ? <tr><td style={FIN_CELL}>Extra leave / absent ({row.cutDays} din)</td><td style={{ ...FIN_CELL, ...FIN_NUM, color: "#047857" }}>Maaf</td></tr>
+            : line(`Extra leave / absent (${row.cutDays} din × ${finMoney2(row.perDay)})`, row.leaveCut, true))}
+          {(row.advParts || []).map((p) => line(`Advance cut (${p.number})`, p.amount, true))}
+          {row.advSkip && row.advCalc > 0 && <tr><td style={FIN_CELL}>Advance cut</td><td style={{ ...FIN_CELL, ...FIN_NUM, color: "#047857" }}>Is mahine nahi</td></tr>}
+          {row.bonus > 0 && line("Bonus / overtime", row.bonus)}
+          {row.deduct > 0 && line("Other deduction", row.deduct, true)}
+          <tr><td style={{ ...FIN_HEAD, textAlign: "left", fontSize: "1em" }}>NET SALARY</td><td style={{ ...FIN_HEAD, ...FIN_NUM, fontSize: "1.15em" }}>Rs {finMoney2(row.net)}</td></tr>
+        </tbody>
+      </table>
+      <div style={{ marginTop: "1.5mm", fontSize: ".88em" }}><b>Rupees:</b> <u>{finAmountInWords(row.net)}</u></div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "2.5mm" }}>
+        <HrStamp text={paid ? "PAID" : "UNPAID"} tone={paid ? "ok" : "warn"} />
+        <div style={{ fontSize: ".82em", textAlign: "end" }}>{v ? <>Voucher <b>{v.number}</b></> : null}{row.note ? <div>{row.note}</div> : null}</div>
+      </div>
+      <FinSignRow items={[{ label: "Received By (Employee)" }, { label: "Paid By (Cashier)" }, { label: "Approved By", top: sheet.finalBy || "", bold: true }]} />
+      <HrDocFoot />
+    </div>
+  );
+}
+function HrSalarySlipDoc({ sheet, rows, fin, company, size, fit }) {
+  return (
+    <div style={{ ...printDocStyle(size, false, fit), fontFamily: "Inter, Arial, sans-serif" }}>
+      {rows.map((row, i) => (
+        <div key={row.empId} style={i > 0 ? { borderTop: "1px dashed #94a3b8", marginTop: "5mm", paddingTop: "5mm" } : undefined}>
+          <HrSalarySlipBody sheet={sheet} row={row} fin={fin} company={company} />
+        </div>
+      ))}
+    </div>
+  );
+}
+function HrSalaryPrintDialog({ sheet, rows, fin, company, onClose }) {
+  const one = rows.length === 1 ? rows[0] : null;
+  return (
+    <PrintDialog kind="hrsalary" title={one ? "Print Salary Slip" : "Print All Salary Slips"} subtitle={`${hrMonthLabel(sheet.month)} · ${one ? one.name : rows.length + " employees"}`}
+      includeDefs={[]} sizeOrder={one ? ["v5", "t80"] : ["a4"]} defaultSize={one ? "v5" : "a4"} copyLabels={[[1, "1 Copy"]]}
+      fileName={`Salary-${sheet.month}${one ? "-" + one.number : ""}`} onClose={onClose}
+      renderDoc={(p) => (PRINT_SIZES[p.size].thermal && one
+        ? <HrThermalDoc company={company} title={`SALARY SLIP · ${hrMonthLabel(sheet.month).toUpperCase()}`} qrText={docVerifyUrl("s", hrSalarySlipId(sheet, one.empId))} size={p.size} copies={1}
+            lines={[["Employee", one.name, true], ["EMP", one.number], "-", ["Present", String(one.present)], ["Leave / Absent", `${one.leave} / ${one.absent}`], "-", ["Salary", finMoney2(one.salary)], ["Leave cut", one.maaf ? "Maaf" : finMoney2(one.leaveCut)], ["Advance cut", finMoney2(one.advanceCut)], ...(one.bonus ? [["Bonus", finMoney2(one.bonus)]] : []), ...(one.deduct ? [["Deduction", finMoney2(one.deduct)]] : []), "-", ["NET", `Rs ${finMoney2(one.net)}`, true, true]]} />
+        : <HrSalarySlipDoc sheet={sheet} rows={rows} fin={fin} company={company} size={p.size} fit={p.fit} />)} />
+  );
+}
+
+/* ============================================================
+   HR PAGES — Employees, Attendance, Leave & Advance, Salary Sheet,
+   My Attendance (employee self-service), scan result + verify view.
+   ============================================================ */
+
+function HrAvatar({ emp, size = 44, rounded = "rounded-xl" }) {
+  return emp && emp.photo
+    ? <img src={emp.photo} alt="" className={`${rounded} object-cover shrink-0`} style={{ width: size, height: size }} />
+    : <div className={`${rounded} ct-gold-bg font-black flex items-center justify-center shrink-0`} style={{ width: size, height: size, fontSize: size * 0.34 }}>{uiInitials(emp ? emp.name : "?")}</div>;
+}
+function HrNoAccess() {
+  return (
+    <div className="ct-card p-10 text-center">
+      <div className="text-[40px]">🔒</div>
+      <div className="ct-display text-[20px] font-bold ct-h mt-2">{t("No access")}</div>
+      <div className="text-[13.5px] ct-t2 mt-1">{t("Admin ne aap ko is page ki access nahi di.")}</div>
+    </div>
+  );
+}
+function HrLoading() { return <div className="ct-card p-10 text-center ct-t2">{t("Loading…")}</div>; }
+
+/* ---------------- Employee form ---------------- */
+
+function HrAccessMatrix({ perms, onChange }) {
+  const has = (id) => perms.includes(id);
+  const toggle = (id) => onChange(has(id) ? perms.filter((p) => p !== id) : [...perms, id]);
+  const groups = NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((it) => !it.adminOnly && it.id !== "myHr") })).filter((g) => g.items.length);
+  return (
+    <div className="space-y-3">
+      {groups.map((g) => (
+        <div key={g.title}>
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-1.5">{t(g.title)}</div>
+          <div className="flex flex-wrap gap-1.5">
+            {g.items.map((it) => (
+              <button key={it.id} type="button" onClick={() => toggle(it.id)}
+                className={`rounded-lg px-2.5 py-1.5 text-[12.5px] font-semibold border transition ${has(it.id) ? "bg-emerald-500 border-emerald-500 text-white" : "ct-chip border-transparent ct-t2"}`}>
+                {has(it.id) ? "✓ " : ""}{t(it.label)}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+      <div>
+        <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-1.5">{t("Actions")}</div>
+        <div className="flex flex-wrap gap-1.5">
+          {HR_ACTIONS.map((it) => (
+            <button key={it.id} type="button" onClick={() => toggle(it.id)}
+              className={`rounded-lg px-2.5 py-1.5 text-[12.5px] font-semibold border transition ${has(it.id) ? "bg-violet-500 border-violet-500 text-white" : "ct-chip border-transparent ct-t2"}`}>
+              {has(it.id) ? "✓ " : ""}{t(it.label)}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EmployeeForm({ initial, startTab, users, customers, branches, saveUser, deleteUser, onClose }) {
+  const fin = useFin();
+  const hs = hrSettingsOf(fin.settings);
+  const editing = !!initial;
+  const [tab, setTab] = useState(startTab || "details");
+  const [f, setF] = useState(() => ({
+    name: "", cnic: "", phone: "", emergency: "", address: "", post: "", salary: "", joinDate: todayISO(),
+    dutyIn: hs.dutyIn, dutyOut: hs.dutyOut, branchId: "", status: "Active", photo: "",
+    username: "", password: "", template: "clerk", perms: [...HR_TEMPLATES.clerk.perms], approveLimit: "",
+    ...(initial || {}),
+  }));
+  const [busy, setBusy] = useState(false);
+  const set = (patch) => setF((x) => ({ ...x, ...patch }));
+  const userId = (initial && initial.userId) || "";
+
+  async function pickPhoto(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try { set({ photo: await hrResizeImage(file) }); } catch { alert(t("Photo load nahi hui.")); }
+  }
+  function pickTemplate(id) { set({ template: id, perms: id === "custom" ? f.perms : [...HR_TEMPLATES[id].perms] }); }
+
+  async function save() {
+    const name = String(f.name).trim();
+    if (!name) { alert(t("Naam likhein.")); setTab("details"); return; }
+    if (!String(f.post).trim()) { alert(t("Post / designation likhein.")); setTab("details"); return; }
+    const uname = String(f.username || "").trim().toLowerCase();
+    if (uname) {
+      if (!String(f.password || "").trim()) { alert(t("Login ke liye password likhein.")); setTab("access"); return; }
+      const clash = (users || []).some((u) => String(u.username).toLowerCase() === uname && u.id !== userId)
+        || (customers || []).some((c) => String(c.portalUsername || "").toLowerCase() === uname);
+      if (clash) { alert(t("Ye username pehle se kisi aur ka hai.")); setTab("access"); return; }
+    }
+    setBusy(true);
+    try {
+      const id = editing ? initial.id : uid("emp");
+      const newUserId = uname ? (userId || "u_" + id) : "";
+      const rec = {
+        id, name, cnic: String(f.cnic).trim(), phone: String(f.phone).trim(), emergency: String(f.emergency).trim(), address: String(f.address).trim(),
+        post: String(f.post).trim(), salary: roundMoney(Number(f.salary) || 0), joinDate: f.joinDate || todayISO(),
+        dutyIn: f.dutyIn || hs.dutyIn, dutyOut: f.dutyOut || hs.dutyOut, branchId: f.branchId || "", status: f.status || "Active",
+        photo: f.photo || "", username: uname, userId: newUserId, template: f.template, perms: f.template === "admin" ? ["*"] : f.perms,
+        approveLimit: roundMoney(Number(f.approveLimit) || 0), updatedAt: new Date().toISOString(),
+      };
+      await finMutate("employees", (list) => {
+        if (editing) return list.map((e) => (e.id === id ? { ...e, ...rec } : e));
+        return [...list, { ...rec, number: hrNextNo(list, "EMP"), createdAt: rec.updatedAt }];
+      });
+      // Login: a normal user record, linked to this employee.
+      if (uname && rec.status === "Active") {
+        saveUser({ id: newUserId, username: uname, password: String(f.password).trim(), role: rec.template === "admin" ? "admin" : "staff", name, branchId: rec.branchId, employeeId: id, perms: rec.perms });
+      } else if (userId && (users || []).some((u) => u.id === userId)) {
+        deleteUser(userId);
+      }
+      // Voucher approve right → approver rule (Voucher Settings shows it too).
+      const oldKey = initial && initial.username;
+      await finMutate("settings", (s) => {
+        const ap = { ...(s.approvers || {}) };
+        if (oldKey && oldKey !== uname && ap[oldKey] && ap[oldKey].fromHr) delete ap[oldKey];
+        if (uname) {
+          const wants = rec.status === "Active" && rec.template !== "admin" && rec.perms.includes("voucher.approve");
+          if (wants) ap[uname] = { ...(ap[uname] || { categoryIds: [], cashExempt: false }), mode: rec.approveLimit > 0 ? "limit" : "unlimited", limit: rec.approveLimit, fromHr: true };
+          else if (ap[uname] && ap[uname].fromHr) delete ap[uname];
+        }
+        return { ...s, approvers: ap, hr: { ...((s && s.hr) || {}), attendanceFrom: ((s && s.hr) || {}).attendanceFrom || todayISO() } };
+      });
+      onClose();
+    } catch (e) {
+      console.error(e);
+      alert(t("Could not save. Check your internet connection and try again."));
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <Modal title={editing ? `${t("Edit Employee")} — ${initial.number}` : "New Employee"} onClose={onClose} wide>
+      <div className="mb-4"><FinTabs tabs={[{ id: "details", label: "Details" }, { id: "access", label: "Login & Access" }]} value={tab} onChange={setTab} /></div>
+      {tab === "details" ? (
+        <div>
+          <div className="flex items-center gap-4 mb-4">
+            <HrAvatar emp={{ ...f, name: f.name || "?" }} size={84} rounded="rounded-2xl" />
+            <div className="flex flex-wrap gap-2">
+              <label className="rounded-xl ct-chip px-3 py-2 text-[13px] font-bold ct-h cursor-pointer">📷 {t(f.photo ? "Change photo" : "Add photo")}<input type="file" accept="image/*" className="hidden" onChange={pickPhoto} /></label>
+              {f.photo && <button type="button" className="rounded-xl px-3 py-2 text-[13px] font-bold text-rose-500" onClick={() => set({ photo: "" })}>{t("Remove")}</button>}
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4">
+            <Field label="Full name"><input className={inputCls} value={f.name} onChange={(e) => set({ name: e.target.value })} /></Field>
+            <Field label="CNIC"><input className={inputCls} value={f.cnic} placeholder="35202-1234567-1" onChange={(e) => set({ cnic: e.target.value })} /></Field>
+            <Field label="Post / designation"><input className={inputCls} value={f.post} list="hr-posts" placeholder="Manager, Clerk, Cashier, Driver…" onChange={(e) => set({ post: e.target.value })} /></Field>
+            <datalist id="hr-posts">{["Manager", "Clerk", "Cashier", "Driver", "Helper", "Accountant", "Salesman", "Guard"].map((p) => <option key={p} value={p} />)}</datalist>
+            <Field label="Monthly salary (Rs)"><input type="number" className={inputCls} value={f.salary} onChange={(e) => set({ salary: e.target.value })} /></Field>
+            <Field label="Phone"><input className={inputCls} value={f.phone} onChange={(e) => set({ phone: e.target.value })} /></Field>
+            <Field label="Emergency number"><input className={inputCls} value={f.emergency} onChange={(e) => set({ emergency: e.target.value })} /></Field>
+            <Field label="Join date"><input type="date" className={inputCls} value={f.joinDate} onChange={(e) => set({ joinDate: e.target.value })} /></Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label="Duty start"><input type="time" className={inputCls} value={f.dutyIn} onChange={(e) => set({ dutyIn: e.target.value })} /></Field>
+              <Field label="Duty end"><input type="time" className={inputCls} value={f.dutyOut} onChange={(e) => set({ dutyOut: e.target.value })} /></Field>
+            </div>
+            {branches && branches.length > 0 && (
+              <Field label="Branch">
+                <select className={inputCls} value={f.branchId} onChange={(e) => set({ branchId: e.target.value })}>
+                  <option value="">{t("All / main")}</option>
+                  {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                </select>
+              </Field>
+            )}
+            <Field label="Status">
+              <select className={inputCls} value={f.status} onChange={(e) => set({ status: e.target.value })}>
+                <option value="Active">{t("Active")}</option><option value="Left">{t("Left (job chhor di)")}</option>
+              </select>
+            </Field>
+            <div className="md:col-span-2"><Field label="Address"><input className={inputCls} value={f.address} onChange={(e) => set({ address: e.target.value })} /></Field></div>
+          </div>
+        </div>
+      ) : (
+        <div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-4">
+            <Field label="Login username"><input className={inputCls} value={f.username} autoComplete="off" placeholder={t("e.g. ali")} onChange={(e) => set({ username: e.target.value.replace(/\s/g, "") })} /></Field>
+            <Field label="Password"><input className={inputCls} value={f.password} autoComplete="off" onChange={(e) => set({ password: e.target.value })} /></Field>
+          </div>
+          {!f.username && <div className="text-[12.5px] ct-t3 -mt-2 mb-3">{t("Username khali ho to employee login nahi kar sakega (sirf card se hazri).")}</div>}
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{t("Access template")}</div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mb-4">
+            {Object.entries(HR_TEMPLATES).map(([id, tp]) => (
+              <button key={id} type="button" onClick={() => pickTemplate(id)}
+                className={`text-start rounded-xl p-3 border-2 transition ${f.template === id ? "border-emerald-500 bg-emerald-500/10" : "border-transparent ct-chip"}`}>
+                <div className="font-bold ct-h text-[14px]">{t(tp.label)}</div>
+                <div className="text-[11.5px] ct-t2 leading-snug">{t(tp.desc)}</div>
+              </button>
+            ))}
+          </div>
+          {f.template === "admin" ? (
+            <div className="rounded-xl bg-violet-400/10 text-violet-500 px-3 py-2.5 text-[13px] font-semibold">{t("Admin login: sab pages aur sab actions.")}</div>
+          ) : (
+            <>
+              <HrAccessMatrix perms={f.perms} onChange={(p) => set({ perms: p, template: "custom" })} />
+              {f.perms.includes("voucher.approve") && (
+                <div className="mt-4 max-w-xs">
+                  <Field label="Voucher approve limit (0 = unlimited)"><input type="number" className={inputCls} value={f.approveLimit} onChange={(e) => set({ approveLimit: e.target.value })} /></Field>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      <div className="flex gap-2 justify-end mt-5">
+        <Btn variant="ghost" onClick={onClose}>Cancel</Btn>
+        <Btn onClick={save} disabled={busy}>{busy ? t("Saving…") : t("Save employee")}</Btn>
+      </div>
+    </Modal>
+  );
+}
+
+function HrSettingsModal({ onClose }) {
+  const fin = useFin();
+  const hs = hrSettingsOf(fin.settings);
+  const [f, setF] = useState({ leavePerMonth: hs.leavePerMonth, graceMin: hs.graceMin, dutyIn: hs.dutyIn, dutyOut: hs.dutyOut, weeklyOff: hs.weeklyOff, attendanceFrom: hs.attendanceFrom });
+  async function save() {
+    await hrSaveSettings({ leavePerMonth: Math.max(0, Number(f.leavePerMonth) || 0), graceMin: Math.max(0, Number(f.graceMin) || 0), dutyIn: f.dutyIn, dutyOut: f.dutyOut, weeklyOff: f.weeklyOff, attendanceFrom: f.attendanceFrom });
+    onClose();
+  }
+  return (
+    <Modal title="HR Settings" onClose={onClose}>
+      <div className="grid grid-cols-2 gap-x-4">
+        <Field label="Leave limit per month"><input type="number" className={inputCls} value={f.leavePerMonth} onChange={(e) => setF({ ...f, leavePerMonth: e.target.value })} /></Field>
+        <Field label="Late after (minutes grace)"><input type="number" className={inputCls} value={f.graceMin} onChange={(e) => setF({ ...f, graceMin: e.target.value })} /></Field>
+        <Field label="Default duty start"><input type="time" className={inputCls} value={f.dutyIn} onChange={(e) => setF({ ...f, dutyIn: e.target.value })} /></Field>
+        <Field label="Default duty end"><input type="time" className={inputCls} value={f.dutyOut} onChange={(e) => setF({ ...f, dutyOut: e.target.value })} /></Field>
+      </div>
+      <div className="text-[12.5px] font-semibold text-slate-600 mb-1.5">{t("Weekly off (chhutti ka din)")}</div>
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {HR_WEEKDAYS.map((d, i) => (
+          <button key={d} type="button" onClick={() => setF({ ...f, weeklyOff: f.weeklyOff.includes(i) ? f.weeklyOff.filter((x) => x !== i) : [...f.weeklyOff, i] })}
+            className={`rounded-lg px-3 py-1.5 text-[12.5px] font-bold ${f.weeklyOff.includes(i) ? "bg-emerald-500 text-white" : "ct-chip ct-t2"}`}>{t(d)}</button>
+        ))}
+      </div>
+      <Field label="Absent counting starts from"><input type="date" className={inputCls} value={f.attendanceFrom} onChange={(e) => setF({ ...f, attendanceFrom: e.target.value })} /></Field>
+      <div className="text-[12px] ct-t3 -mt-2">{t("Is date se pehle ke din absent nahi gine jayenge.")}</div>
+      <div className="flex gap-2 justify-end mt-5"><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={save}>Save</Btn></div>
+    </Modal>
+  );
+}
+
+/* ---------------- Employees page ---------------- */
+
+function EmployeesPage({ currentUser, users, customers, branches, settings, saveUser, deleteUser }) {
+  useLanguage();
+  const fin = useFin();
+  const [form, setForm] = useState(null);
+  const [card, setCard] = useState(null);
+  const [hrSet, setHrSet] = useState(false);
+  const [q, setQ] = useState("");
+  const [show, setShow] = useState("Active");
+  if (!fin.loaded) return <HrLoading />;
+  const today = todayISO();
+  const emps = fin.employees;
+  const active = emps.filter((e) => e.status !== "Left");
+  const inToday = active.filter((e) => hrTodayRec(fin, e.id, today));
+  const onLeave = active.filter((e) => fin.leaves.some((l) => l.empId === e.id && l.status === "Approved" && l.from <= today && (l.to || l.from) >= today));
+  const ql = q.trim().toLowerCase();
+  const list = emps.filter((e) => (show === "All" || (show === "Left" ? e.status === "Left" : e.status !== "Left"))
+    && (!ql || [e.name, e.number, e.post, e.phone, e.cnic, e.username].some((x) => String(x || "").toLowerCase().includes(ql))));
+  const branchName = (id) => (branches || []).find((b) => b.id === id)?.name || "";
+  return (
+    <div>
+      <FinPageHead title="Employees" sub={t("Staff record, ID card, login aur access")} right={
+        <div className="flex flex-wrap gap-2">
+          <Btn variant="ghost" onClick={() => setHrSet(true)}>⚙ {t("HR Settings")}</Btn>
+          {active.length > 0 && <Btn variant="ghost" onClick={() => setCard(active)}>🪪 {t("All cards")}</Btn>}
+          <Btn onClick={() => setForm({})}><UiIcon name="plus" className="w-4 h-4" />{t("New Employee")}</Btn>
+        </div>
+      } />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <FinKpi label="Active staff" value={active.length} />
+        <FinKpi label="Present today" value={inToday.length} tone="text-emerald-500" sub={`${active.length - inToday.length - onLeave.length} ${t("not in")}`} />
+        <FinKpi label="On leave today" value={onLeave.length} tone="text-sky-500" />
+        <FinKpi label="Monthly salaries" value={fmtMoney(active.reduce((s, e) => s + (Number(e.salary) || 0), 0))} />
+      </div>
+      <div className="flex flex-wrap gap-2 items-center mb-3">
+        <div className="relative flex-1 min-w-[200px] max-w-md">
+          <UiIcon name="search" className="w-4 h-4 absolute start-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input className={`${inputCls} !ps-9`} value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("Search name, EMP no, CNIC…")} />
+        </div>
+        <FinTabs tabs={[{ id: "Active", label: "Active" }, { id: "Left", label: "Left" }, { id: "All", label: "All" }]} value={show} onChange={setShow} />
+      </div>
+      {list.length === 0 && <div className="ct-card"><FinEmpty text={emps.length ? "No employee found." : "Abhi koi employee nahi. “New Employee” se shuru karein."} /></div>}
+      <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-3">
+        {list.map((e) => {
+          const rec = hrTodayRec(fin, e.id, today);
+          const lv = onLeave.includes(e);
+          const tp = HR_TEMPLATES[e.template] || HR_TEMPLATES.custom;
+          return (
+            <section key={e.id} className="ct-card p-4">
+              <div className="flex gap-3">
+                <HrAvatar emp={e} size={56} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap"><span className="font-bold ct-h text-[15px] truncate">{e.name}</span>{e.status === "Left" && <HrPill s="Left" />}</div>
+                  <div className="text-[12.5px] ct-t2">{e.number} · {e.post}{e.branchId ? ` · ${branchName(e.branchId)}` : ""}</div>
+                  <div className="text-[12px] ct-t3">{e.phone || "—"} · {fmtMoney(e.salary)}/{t("month")}</div>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-1.5 mt-3 text-[11.5px]">
+                <span className={`rounded-full px-2 py-0.5 font-bold ${e.template === "admin" ? "bg-violet-400/15 text-violet-500" : "bg-slate-400/15 ct-t2"}`}>🔑 {t(tp.label)}{e.username ? ` · ${e.username}` : ` · ${t("no login")}`}</span>
+                {e.status !== "Left" && (rec
+                  ? <span className={`rounded-full px-2 py-0.5 font-bold ${rec.lateMin ? "bg-amber-400/15 text-amber-500" : "bg-emerald-400/15 text-emerald-500"}`}>{t("In")} {hrHM(rec.in)}{rec.out ? ` · ${t("Out")} ${hrHM(rec.out)}` : ""}{rec.lateMin ? ` · ${t("late")} ${rec.lateMin}m` : ""}</span>
+                  : lv ? <span className="rounded-full px-2 py-0.5 font-bold bg-sky-400/15 text-sky-500">{t("On leave")}</span>
+                    : <span className="rounded-full px-2 py-0.5 font-bold bg-slate-400/15 ct-t3">{t("Not in yet")}</span>)}
+              </div>
+              <div className="flex flex-wrap gap-1.5 mt-3">
+                <Btn small variant="ghost" onClick={() => setForm({ emp: e })}>✎ {t("Edit")}</Btn>
+                <Btn small variant="ghost" onClick={() => setForm({ emp: e, tab: "access" })}>🔑 {t("Access")}</Btn>
+                <Btn small variant="ghost" onClick={() => setCard([e])}>🪪 {t("ID Card")}</Btn>
+              </div>
+            </section>
+          );
+        })}
+      </div>
+      {form && (
+        <EmployeeForm initial={form.emp ? { ...form.emp, password: ((users || []).find((u) => u.id === form.emp.userId) || {}).password || "" } : null} startTab={form.tab}
+          users={users} customers={customers} branches={branches} saveUser={saveUser} deleteUser={deleteUser} onClose={() => setForm(null)} />
+      )}
+      {card && <HrCardPrintDialog emps={card} company={settings} onClose={() => setCard(null)} />}
+      {hrSet && <HrSettingsModal onClose={() => setHrSet(false)} />}
+    </div>
+  );
+}
+
+/* ---------------- Attendance ---------------- */
+
+function HrCalendar({ emp, month, fin }) {
+  const s = hrMonthStats(emp, month, fin);
+  const first = hrDow(`${month}-01`);
+  return (
+    <div>
+      <div className="grid grid-cols-7 gap-1 text-center text-[11px] font-bold ct-t3 mb-1">{HR_WEEKDAYS.map((d) => <div key={d}>{t(d)}</div>)}</div>
+      <div className="grid grid-cols-7 gap-1">
+        {Array.from({ length: first }).map((_, i) => <div key={"b" + i} />)}
+        {s.cells.map((c) => (
+          <div key={c.date} title={c.a ? `${hrHM(c.a.in)} – ${c.a.out ? hrHM(c.a.out) : "…"}` : c.lv ? `${c.lv.type} leave` : ""}
+            className={`rounded-lg h-12 sm:h-14 flex flex-col items-center justify-center ${HR_CELL_TONE[c.st]}`}>
+            <span className="text-[12px] font-bold leading-none">{Number(c.date.slice(8))}</span>
+            <span className="text-[10px] font-semibold leading-tight mt-0.5">{HR_CELL_LABEL[c.st]}{c.a ? ` ${hrHM(c.a.in).replace(/ ?[AP]M/, "")}` : ""}</span>
+          </div>
+        ))}
+      </div>
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mt-3 text-center">
+        {[["Present", s.present, "text-emerald-500"], ["Late", s.late, "text-amber-500"], ["Leave", s.leave, "text-sky-500"], ["Absent", s.absent, "text-rose-500"], ["Working days", s.working, "ct-h"], ["Hours", hrHours(s.hours), "ct-h"]].map(([l, v, tone]) => (
+          <div key={l} className="rounded-xl ct-chip px-2 py-2"><div className="text-[10.5px] font-bold uppercase ct-t3">{t(l)}</div><div className={`font-bold text-[16px] ${tone}`}>{v}</div></div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HrAttEditModal({ emp, date, rec, currentUser, onClose }) {
+  const fin = useFin();
+  const hs = hrSettingsOf(fin.settings);
+  const toHM = (iso) => { if (!iso) return ""; const d = new Date(iso); return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
+  const [d, setD] = useState(date || todayISO());
+  const cur = hrTodayRec(fin, emp.id, d);
+  const [tin, setTin] = useState(toHM(cur && cur.in));
+  const [tout, setTout] = useState(toHM(cur && cur.out));
+  useEffect(() => { const r = hrTodayRec(fin, emp.id, d); setTin(toHM(r && r.in)); setTout(toHM(r && r.out)); }, [d]);
+  const iso = (hm) => { if (!hm) return null; const [h, m] = hm.split(":").map(Number); const x = parseDateValue(d) || new Date(); x.setHours(h, m, 0, 0); return x.toISOString(); };
+  async function save() {
+    const by = currentUser.name || currentUser.username;
+    await finMutate("attendance", (list) => {
+      const r = list.find((a) => a.empId === emp.id && a.date === d);
+      if (!tin) return list.filter((a) => a !== r);
+      const m = hrMin(tin), duty = hrMin(emp.dutyIn || hs.dutyIn);
+      const lateMin = m > duty + hs.graceMin ? m - duty : 0;
+      const patch = { in: iso(tin), out: tout ? iso(tout) : null, lateMin, editedBy: by, editedAt: new Date().toISOString() };
+      if (r) return list.map((a) => (a === r ? { ...a, ...patch } : a));
+      return [...list, { id: uid("att"), empId: emp.id, date: d, inSrc: "edit", inBy: by, ...patch }];
+    });
+    onClose();
+  }
+  return (
+    <Modal title={`${t("Edit attendance")} — ${emp.name}`} onClose={onClose}>
+      <Field label="Date"><input type="date" className={inputCls} value={d} max={todayISO()} onChange={(e) => setD(e.target.value)} /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Check-in"><input type="time" className={inputCls} value={tin} onChange={(e) => setTin(e.target.value)} /></Field>
+        <Field label="Check-out"><input type="time" className={inputCls} value={tout} onChange={(e) => setTout(e.target.value)} /></Field>
+      </div>
+      <div className="text-[12px] ct-t3 -mt-2">{t("Check-in khali kar ke save karein to us din ki hazri hat jayegi.")}</div>
+      <div className="flex gap-2 justify-end mt-5"><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={save}>Save</Btn></div>
+    </Modal>
+  );
+}
+
+function HrPunchResult({ emp, res }) {
+  if (!res) return <div className="py-6 text-center ct-t2">{t("Checking…")}</div>;
+  const map = {
+    in: { icon: "✓", tone: res.lateMin ? "from-amber-400 to-amber-500" : "from-emerald-500 to-emerald-600", title: "Check-in", sub: `${hrHM(res.at)}${res.lateMin ? ` · ${t("Late")} ${res.lateMin} ${t("min")}` : ` · ${t("On time")}`}` },
+    out: { icon: "👋", tone: "from-sky-500 to-sky-600", title: "Check-out", sub: `${hrHM(res.at)} · ${hrHours((Date.parse(res.at) - Date.parse(res.inAt)) / 3600000)}` },
+    dup: { icon: "!", tone: "from-amber-400 to-amber-500", title: "Already checked in", sub: `${hrHM(res.at)} · ${t("dobara thori der baad scan karein (check-out)")}` },
+    done: { icon: "✓", tone: "from-slate-500 to-slate-600", title: "Aaj ki hazri mukammal", sub: `${t("In")} ${hrHM(res.inAt)} · ${t("Out")} ${hrHM(res.at)}` },
+    left: { icon: "✕", tone: "from-rose-500 to-rose-600", title: "Employee job chhor chuka hai", sub: "" },
+    missing: { icon: "✕", tone: "from-rose-500 to-rose-600", title: "Card nahi mila", sub: t("Ye card is system ka nahi") },
+  }[res.type];
+  return (
+    <div className={`rounded-2xl bg-gradient-to-br ${map.tone} text-white p-5 flex items-center gap-4`}>
+      {emp ? <HrAvatar emp={emp} size={64} rounded="rounded-2xl" /> : <div className="w-16 h-16 rounded-2xl bg-white/20 flex items-center justify-center text-[28px] font-black">{map.icon}</div>}
+      <div className="min-w-0">
+        {emp && <div className="text-[13px] opacity-90">{emp.number} · {emp.post}</div>}
+        {emp && <div className="text-[20px] font-black leading-tight">{emp.name}</div>}
+        <div className="text-[16px] font-bold mt-1">{map.icon} {t(map.title)}</div>
+        {map.sub && <div className="text-[13px] opacity-90">{map.sub}</div>}
+      </div>
+    </div>
+  );
+}
+
+function AttendancePage({ currentUser }) {
+  useLanguage();
+  const fin = useFin();
+  const [tab, setTab] = useState("today");
+  const [month, setMonth] = useState(hrMonthOf());
+  const [empId, setEmpId] = useState("");
+  const [edit, setEdit] = useState(null);
+  const [punch, setPunch] = useState(null);
+  if (!fin.loaded) return <HrLoading />;
+  const today = todayISO();
+  const isAdmin = currentUser.role === "admin" || hrAllow(currentUser, "hr.approve");
+  const active = fin.employees.filter((e) => e.status !== "Left");
+  const emp = fin.employees.find((e) => e.id === empId) || active[0];
+  async function doPunch(e) {
+    setPunch({ emp: e, res: null });
+    const res = await hrPunch(e, currentUser, "manual");
+    setPunch({ emp: e, res });
+    setTimeout(() => setPunch((p) => (p && p.emp.id === e.id ? null : p)), 3500);
+  }
+  return (
+    <div>
+      <FinPageHead title="Attendance" sub={t("Card QR scanner par scan karein = check-in, dobara scan = check-out")} />
+      <div className="mb-4"><FinTabs tabs={[{ id: "today", label: "Today" }, { id: "calendar", label: "Calendar" }, { id: "sheet", label: "Monthly sheet" }]} value={tab} onChange={setTab} /></div>
+      {punch && <div className="mb-4"><HrPunchResult emp={punch.emp} res={punch.res} /></div>}
+      {tab === "today" && (
+        <section className="ct-card p-4 sm:p-5">
+          <div className="flex items-center justify-between mb-2"><div className="ct-display text-[16px] font-bold ct-h">{fmtDate(today)}</div><div className="text-[12.5px] ct-t2">{active.filter((e) => hrTodayRec(fin, e.id)).length}/{active.length} {t("present")}</div></div>
+          {active.length === 0 && <FinEmpty text="No employees yet." />}
+          <div className="divide-y divide-slate-200/60">
+            {active.map((e) => {
+              const r = hrTodayRec(fin, e.id);
+              const lv = fin.leaves.find((l) => l.empId === e.id && l.status === "Approved" && l.from <= today && (l.to || l.from) >= today);
+              return (
+                <div key={e.id} className="py-2.5 flex flex-wrap items-center gap-3">
+                  <HrAvatar emp={e} size={40} />
+                  <div className="min-w-0 flex-1"><div className="font-semibold ct-h text-[14px]">{e.name}</div><div className="text-[12px] ct-t3">{e.number} · {e.post} · {t("Duty")} {e.dutyIn || "09:00"}</div></div>
+                  <div className="text-[12.5px] text-end">
+                    {r ? <><div className={r.lateMin ? "text-amber-500 font-bold" : "text-emerald-500 font-bold"}>{t("In")} {hrHM(r.in)}{r.lateMin ? ` · ${t("late")} ${r.lateMin}m` : ""}</div><div className="ct-t2">{r.out ? `${t("Out")} ${hrHM(r.out)} · ${hrHours((Date.parse(r.out) - Date.parse(r.in)) / 3600000)}` : t("Still in")}</div></>
+                      : lv ? <span className="text-sky-500 font-bold">{t("On leave")} ({t(lv.type)})</span> : <span className="ct-t3">{t("Not in yet")}</span>}
+                  </div>
+                  <div className="flex gap-1.5">
+                    {(!r || !r.out) && <Btn small onClick={() => doPunch(e)}>{r ? t("Check-out") : t("Check-in")}</Btn>}
+                    {isAdmin && <Btn small variant="ghost" onClick={() => setEdit({ emp: e, date: today })}>✎</Btn>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+      {tab === "calendar" && (
+        <section className="ct-card p-4 sm:p-5">
+          <div className="flex flex-wrap gap-2 mb-4">
+            <select className={`${inputCls} !w-auto`} value={emp ? emp.id : ""} onChange={(e) => setEmpId(e.target.value)}>
+              {fin.employees.map((e) => <option key={e.id} value={e.id}>{e.number} · {e.name}</option>)}
+            </select>
+            <input type="month" className={`${inputCls} !w-auto`} value={month} onChange={(e) => setMonth(e.target.value || hrMonthOf())} />
+            {isAdmin && emp && <Btn variant="ghost" onClick={() => setEdit({ emp, date: today })}>✎ {t("Edit a day")}</Btn>}
+          </div>
+          {emp ? <HrCalendar emp={emp} month={month} fin={fin} /> : <FinEmpty text="No employees yet." />}
+        </section>
+      )}
+      {tab === "sheet" && (
+        <section className="ct-card p-4 sm:p-5 overflow-x-auto">
+          <div className="flex items-center gap-2 mb-3"><input type="month" className={`${inputCls} !w-auto`} value={month} onChange={(e) => setMonth(e.target.value || hrMonthOf())} /><span className="text-[13px] ct-t2">{hrMonthLabel(month)}</span></div>
+          <table className="w-full text-[13px]">
+            <thead><tr className="text-start ct-t3 text-[11.5px] uppercase">{["Employee", "Present", "Late", "Leave", "Absent", "Hours"].map((h) => <th key={h} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+            <tbody>
+              {fin.employees.map((e) => {
+                const s = hrMonthStats(e, month, fin);
+                return (
+                  <tr key={e.id} className="border-t border-slate-200/60 cursor-pointer hover:bg-slate-400/5" onClick={() => { setEmpId(e.id); setTab("calendar"); }}>
+                    <td className="py-2 pe-3"><b className="ct-h">{e.name}</b><div className="text-[11.5px] ct-t3">{e.number}</div></td>
+                    <td className="py-2 pe-3 text-emerald-500 font-bold">{s.present}</td><td className="py-2 pe-3 text-amber-500 font-bold">{s.late}</td>
+                    <td className="py-2 pe-3 text-sky-500 font-bold">{s.leave}</td><td className="py-2 pe-3 text-rose-500 font-bold">{s.absent}</td>
+                    <td className="py-2 pe-3 ct-h">{hrHours(s.hours)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </section>
+      )}
+      {edit && <HrAttEditModal emp={edit.emp} date={edit.date} currentUser={currentUser} onClose={() => setEdit(null)} />}
+    </div>
+  );
+}
+
+/* ---------------- Leave & advance: request + decide ---------------- */
+
+function HrEmpPicker({ value, onChange, fin }) {
+  return (
+    <Field label="Employee">
+      <select className={inputCls} value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">{t("Choose…")}</option>
+        {fin.employees.filter((e) => e.status !== "Left").map((e) => <option key={e.id} value={e.id}>{e.number} · {e.name}</option>)}
+      </select>
+    </Field>
+  );
+}
+
+function LeaveRequestModal({ empId: fixedEmp, currentUser, onClose, onSaved }) {
+  const fin = useFin();
+  const hs = hrSettingsOf(fin.settings);
+  const [f, setF] = useState({ empId: fixedEmp || "", from: finAddDays(todayISO(), 1), to: finAddDays(todayISO(), 1), type: "Casual", reason: "" });
+  const days = hrWorkDays(f.from, f.to, fin.settings).length;
+  const month = hrMonthOf(f.from);
+  const used = f.empId ? hrLeaveUsed(fin, f.empId, month) : 0;
+  const extra = Math.max(0, used + days - hs.leavePerMonth) - Math.max(0, used - hs.leavePerMonth);
+  async function save() {
+    if (!f.empId) { alert(t("Employee choose karein.")); return; }
+    if (!f.from || (f.to && f.to < f.from)) { alert(t("Dates theek karein.")); return; }
+    if (!days) { alert(t("In dates mein koi working day nahi.")); return; }
+    const actor = finActor(currentUser);
+    let rec = null;
+    await finMutate("leaves", (list) => {
+      rec = { id: uid("lv"), number: hrNextNo(list, "LV"), empId: f.empId, from: f.from, to: f.to || f.from, days, type: f.type, reason: String(f.reason).trim(), status: "Pending", createdAt: new Date().toISOString(), createdBy: actor.name };
+      return [...list, rec];
+    });
+    onSaved && onSaved(rec);
+    onClose();
+  }
+  return (
+    <Modal title="Leave Request" onClose={onClose}>
+      {!fixedEmp && <HrEmpPicker value={f.empId} onChange={(v) => setF({ ...f, empId: v })} fin={fin} />}
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="From"><input type="date" className={inputCls} value={f.from} onChange={(e) => setF({ ...f, from: e.target.value, to: f.to < e.target.value ? e.target.value : f.to })} /></Field>
+        <Field label="To"><input type="date" className={inputCls} value={f.to} min={f.from} onChange={(e) => setF({ ...f, to: e.target.value })} /></Field>
+      </div>
+      <Field label="Leave type">
+        <div className="flex flex-wrap gap-1.5">{HR_LEAVE_TYPES.map((x) => <button key={x} type="button" onClick={() => setF({ ...f, type: x })} className={`rounded-lg px-3 py-1.5 text-[12.5px] font-bold ${f.type === x ? "bg-emerald-500 text-white" : "ct-chip ct-t2"}`}>{t(x)}</button>)}</div>
+      </Field>
+      <Field label="Reason"><textarea rows={2} className={inputCls} value={f.reason} onChange={(e) => setF({ ...f, reason: e.target.value })} /></Field>
+      {f.empId && (
+        <div className={`rounded-xl px-3 py-2.5 text-[13px] font-semibold ${extra > 0 ? "bg-rose-400/10 text-rose-500" : "bg-emerald-400/10 text-emerald-600"}`}>
+          {days} {t("din")} · {hrMonthLabel(month)}: {used}/{hs.leavePerMonth} {t("pehle li")}{extra > 0 ? ` · ${extra} ${t("din extra — salary se cut ho sakte hain")}` : ` · ${t("limit ke andar")}`}
+        </div>
+      )}
+      <div className="flex gap-2 justify-end mt-5"><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={save}>{t("Send request")}</Btn></div>
+    </Modal>
+  );
+}
+
+async function hrDecideLeave(lv, approve, currentUser, note) {
+  const actor = finActor(currentUser);
+  let blocked = "";
+  await finMutate("leaves", (list) => list.map((x) => {
+    if (x.id !== lv.id) return x;
+    if (x.status !== "Pending") { blocked = x.status; return x; }
+    return { ...x, status: approve ? "Approved" : "Rejected", decision: { by: actor.name, key: actor.key, at: new Date().toISOString(), note: String(note || "").trim() } };
+  }));
+  if (blocked) alert(`${t("Already")} ${t(blocked)}`);
+}
+
+function LeaveDecideModal({ lv, currentUser, onClose }) {
+  const fin = useFin();
+  const hs = hrSettingsOf(fin.settings);
+  const [note, setNote] = useState("");
+  const emp = fin.employees.find((e) => e.id === lv.empId) || { name: "—" };
+  const month = hrMonthOf(lv.from);
+  const used = hrLeaveUsed(fin, lv.empId, month, lv.id);
+  const thisDays = hrWorkDays(lv.from, lv.to, fin.settings).filter((d) => d.startsWith(month)).length;
+  const extra = Math.max(0, used + thisDays - hs.leavePerMonth) - Math.max(0, used - hs.leavePerMonth);
+  async function go(ok) { await hrDecideLeave(lv, ok, currentUser, note); onClose(); }
+  return (
+    <Modal title={`${t("Leave")} ${lv.number}`} onClose={onClose}>
+      <div className="flex items-center gap-3 mb-3"><HrAvatar emp={emp} size={48} /><div><div className="font-bold ct-h">{emp.name}</div><div className="text-[12.5px] ct-t2">{emp.number} · {emp.post}</div></div></div>
+      <div className="rounded-xl ct-chip p-3 text-[13.5px] space-y-1">
+        <div><b className="ct-h">{t(lv.type)}</b> · {fmtDate(lv.from)} → {fmtDate(lv.to)} · <b>{lv.days} {t("din")}</b></div>
+        {lv.reason && <div className="ct-t2">{lv.reason}</div>}
+      </div>
+      <div className={`mt-3 rounded-xl px-3 py-2.5 text-[13px] font-semibold ${extra > 0 ? "bg-rose-400/10 text-rose-500" : "bg-emerald-400/10 text-emerald-600"}`}>
+        {hrMonthLabel(month)}: {used} + {thisDays} = {used + thisDays} / {hs.leavePerMonth}
+        {extra > 0 ? ` · ${extra} ${t("din extra → salary se cut (Salary Sheet mein “Maaf” kar sakte hain)")}` : ` · ${t("limit ke andar")}`}
+      </div>
+      <Field label="Note (optional)"><input className={`${inputCls} mt-3`} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      <div className="flex gap-2 justify-end"><Btn variant="danger" onClick={() => go(false)}>✕ {t("Reject")}</Btn><Btn onClick={() => go(true)}>✓ {t("Approve")}</Btn></div>
+    </Modal>
+  );
+}
+
+function AdvanceRequestModal({ empId: fixedEmp, currentUser, onClose, onSaved }) {
+  const fin = useFin();
+  const [f, setF] = useState({ empId: fixedEmp || "", amount: "", reason: "", months: 1 });
+  const emp = fin.employees.find((e) => e.id === f.empId);
+  const openAdv = f.empId ? fin.advances.filter((a) => a.empId === f.empId && (a.status === "Pending" || (a.status === "Approved" && hrAdvanceInfo(fin, a).left > 0))) : [];
+  async function save() {
+    if (!f.empId) { alert(t("Employee choose karein.")); return; }
+    const amt = roundMoney(Number(f.amount) || 0);
+    if (!(amt > 0)) { alert(t("Please enter a valid amount.")); return; }
+    const actor = finActor(currentUser);
+    let rec = null;
+    await finMutate("advances", (list) => {
+      rec = { id: uid("adv"), number: hrNextNo(list, "ADV"), empId: f.empId, amount: amt, reason: String(f.reason).trim(), months: Math.max(1, Number(f.months) || 1), status: "Pending", createdAt: new Date().toISOString(), createdBy: actor.name };
+      return [...list, rec];
+    });
+    onSaved && onSaved(rec);
+    onClose();
+  }
+  return (
+    <Modal title="Advance Salary Request" onClose={onClose}>
+      {!fixedEmp && <HrEmpPicker value={f.empId} onChange={(v) => setF({ ...f, empId: v })} fin={fin} />}
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Amount (Rs)"><input type="number" className={`${inputCls} font-bold`} value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} /></Field>
+        <Field label="Wapsi kitne mahine mein?"><select className={inputCls} value={f.months} onChange={(e) => setF({ ...f, months: Number(e.target.value) })}>{[1, 2, 3, 4, 5, 6, 8, 10, 12].map((m) => <option key={m} value={m}>{m} {t(m > 1 ? "months" : "month")}</option>)}</select></Field>
+      </div>
+      <Field label="Reason"><textarea rows={2} className={inputCls} value={f.reason} onChange={(e) => setF({ ...f, reason: e.target.value })} /></Field>
+      {emp && Number(f.amount) > Number(emp.salary) && <div className="rounded-xl bg-amber-400/10 text-amber-600 px-3 py-2 text-[13px] font-semibold mb-2">⚠ {t("Raqam ek mahine ki salary se zyada hai")} ({fmtMoney(emp.salary)})</div>}
+      {openAdv.length > 0 && <div className="rounded-xl bg-amber-400/10 text-amber-600 px-3 py-2 text-[13px] font-semibold">⚠ {t("Pehle se advance baqi hai")}: {openAdv.map((a) => `${a.number} (${fmtMoney(a.status === "Pending" ? a.amount : hrAdvanceInfo(fin, a).left)})`).join(", ")}</div>}
+      <div className="flex gap-2 justify-end mt-5"><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={save}>{t("Send request")}</Btn></div>
+    </Modal>
+  );
+}
+
+function AdvanceDecideModal({ adv, currentUser, onClose }) {
+  const fin = useFin();
+  const emp = fin.employees.find((e) => e.id === adv.empId) || { name: "—" };
+  const [months, setMonths] = useState(adv.months || 1);
+  const [start, setStart] = useState(hrNextMonth(hrMonthOf()));
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const per = Math.ceil((Number(adv.amount) || 0) / Math.max(1, months));
+  async function approve() {
+    if (busy) return;
+    const cur = finState.advances.find((a) => a.id === adv.id);
+    if (!cur || cur.status !== "Pending") { alert(`${t("Already")} ${t(cur ? cur.status : "")}`); onClose(); return; }
+    setBusy(true);
+    try {
+      const actor = finActor(currentUser);
+      let voucherId = "";
+      await finMutate("vouchers", (list) => {
+        const v = hrMakeVoucher(list, {
+          payee: emp.name, payeePhone: emp.phone, amount: adv.amount, branchId: emp.branchId, catHint: "advance",
+          particulars: `Advance salary ${adv.number} · ${emp.number}${adv.reason ? " · " + adv.reason : ""}`,
+          note: `Advance ${adv.number} · wapsi ${months} mahine`, hrRef: { kind: "advance", id: adv.id },
+        }, actor);
+        voucherId = v.id;
+        return [...list, v];
+      });
+      await finMutate("advances", (list) => list.map((a) => (a.id === adv.id ? { ...a, status: "Approved", months, startMonth: start, voucherId, decision: { by: actor.name, key: actor.key, at: new Date().toISOString(), note: note.trim() } } : a)));
+      onClose();
+    } finally { setBusy(false); }
+  }
+  async function reject() {
+    const actor = finActor(currentUser);
+    await finMutate("advances", (list) => list.map((a) => (a.id === adv.id && a.status === "Pending" ? { ...a, status: "Rejected", decision: { by: actor.name, key: actor.key, at: new Date().toISOString(), note: note.trim() } } : a)));
+    onClose();
+  }
+  return (
+    <Modal title={`${t("Advance")} ${adv.number}`} onClose={onClose}>
+      <div className="flex items-center gap-3 mb-3"><HrAvatar emp={emp} size={48} /><div><div className="font-bold ct-h">{emp.name}</div><div className="text-[12.5px] ct-t2">{emp.number} · {emp.post} · {t("Salary")} {fmtMoney(emp.salary)}</div></div></div>
+      <div className="rounded-xl ct-chip p-3"><div className="ct-display text-[24px] font-bold ct-h">{fmtMoney(adv.amount)}</div>{adv.reason && <div className="text-[13px] ct-t2">{adv.reason}</div>}</div>
+      <div className="grid grid-cols-2 gap-3 mt-3">
+        <Field label="Wapsi (months)"><select className={inputCls} value={months} onChange={(e) => setMonths(Number(e.target.value))}>{[1, 2, 3, 4, 5, 6, 8, 10, 12].map((m) => <option key={m} value={m}>{m}</option>)}</select></Field>
+        <Field label="Cut starts from"><input type="month" className={inputCls} value={start} onChange={(e) => setStart(e.target.value || start)} /></Field>
+      </div>
+      <div className="rounded-xl bg-emerald-400/10 text-emerald-600 px-3 py-2 text-[13px] font-semibold">{months} × {fmtMoney(per)} {t("har mahine salary se cut")} · {hrMonthLabel(start)} {t("se")}</div>
+      <div className="text-[12px] ct-t3 mt-2">{t("Approve karte hi Payment Voucher ban jayega (approved). Cashier slip/voucher scan karke pay karega.")}</div>
+      <Field label="Note (optional)"><input className={`${inputCls} mt-3`} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      <div className="flex gap-2 justify-end"><Btn variant="danger" onClick={reject}>✕ {t("Reject")}</Btn><Btn onClick={approve} disabled={busy}>✓ {t("Approve + make voucher")}</Btn></div>
+    </Modal>
+  );
+}
+
+function HrLeaveRow({ lv, fin, canDecide, onDecide, onPrint }) {
+  const emp = fin.employees.find((e) => e.id === lv.empId) || { name: "—", number: "" };
+  return (
+    <div className="py-2.5 flex flex-wrap items-center gap-3">
+      <HrAvatar emp={emp} size={38} />
+      <div className="min-w-0 flex-1">
+        <div className="text-[13.5px] font-semibold ct-h">{emp.name} · {t(lv.type)} · {lv.days} {t("din")}</div>
+        <div className="text-[12px] ct-t3">{lv.number} · {fmtDate(lv.from)} → {fmtDate(lv.to)}{lv.reason ? ` · ${lv.reason}` : ""}{lv.decision ? ` · ${lv.decision.by}` : ""}</div>
+      </div>
+      <HrPill s={lv.status} />
+      {canDecide && lv.status === "Pending" && <Btn small onClick={() => onDecide(lv)}>{t("Review")}</Btn>}
+      <Btn small variant="ghost" onClick={() => onPrint(lv)}>🖨</Btn>
+    </div>
+  );
+}
+function HrAdvanceRow({ adv, fin, canDecide, onDecide, onPrint, onOpenVoucher }) {
+  const emp = fin.employees.find((e) => e.id === adv.empId) || { name: "—", number: "" };
+  const info = hrAdvanceInfo(fin, adv);
+  return (
+    <div className="py-2.5 flex flex-wrap items-center gap-3">
+      <HrAvatar emp={emp} size={38} />
+      <div className="min-w-0 flex-1">
+        <div className="text-[13.5px] font-semibold ct-h">{emp.name} · {fmtMoney(adv.amount)}</div>
+        <div className="text-[12px] ct-t3">{adv.number}{adv.months ? ` · ${adv.months} × ${fmtMoney(info.per)}` : ""}{info.v ? ` · ${info.v.number}` : ""}{info.recovered > 0 ? ` · ${t("baqi")} ${fmtMoney(info.left)}` : ""}{adv.reason ? ` · ${adv.reason}` : ""}</div>
+      </div>
+      <HrPill s={info.status} />
+      {canDecide && adv.status === "Pending" && <Btn small onClick={() => onDecide(adv)}>{t("Review")}</Btn>}
+      {info.v && info.status === "Ready to pay" && onOpenVoucher && <Btn small variant="ghost" onClick={() => onOpenVoucher(info.v.id)}>💵 {t("Voucher")}</Btn>}
+      <Btn small variant="ghost" onClick={() => onPrint(adv)}>🖨</Btn>
+    </div>
+  );
+}
+
+function HrRequestsPage({ currentUser, settings, onOpenVoucher }) {
+  useLanguage();
+  const fin = useFin();
+  const [tab, setTab] = useState("leave");
+  const [modal, setModal] = useState(null);
+  if (!fin.loaded) return <HrLoading />;
+  const canDecide = hrAllow(currentUser, "hr.approve");
+  const leaves = [...fin.leaves].sort((a, b) => (a.status === "Pending") - (b.status === "Pending") || String(b.createdAt).localeCompare(String(a.createdAt))).sort((a, b) => (b.status === "Pending") - (a.status === "Pending"));
+  const advs = [...fin.advances].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).sort((a, b) => (b.status === "Pending") - (a.status === "Pending"));
+  const pl = fin.leaves.filter((l) => l.status === "Pending").length;
+  const pa = fin.advances.filter((a) => a.status === "Pending").length;
+  const empOf = (id) => fin.employees.find((e) => e.id === id) || { name: "—", number: "", post: "" };
+  return (
+    <div>
+      <FinPageHead title="Leave & Advance" sub={t("Requests approve / reject karein, slips print karein")} right={
+        <div className="flex gap-2"><Btn variant="ghost" onClick={() => setModal({ kind: "newLeave" })}>+ {t("Leave")}</Btn><Btn onClick={() => setModal({ kind: "newAdv" })}>+ {t("Advance")}</Btn></div>
+      } />
+      <div className="mb-4"><FinTabs tabs={[{ id: "leave", label: "Leave", count: pl }, { id: "advance", label: "Advance", count: pa }]} value={tab} onChange={setTab} /></div>
+      <section className="ct-card p-4 sm:p-5">
+        {tab === "leave" ? (
+          <div className="divide-y divide-slate-200/60">
+            {leaves.length === 0 && <FinEmpty text="No leave requests." />}
+            {leaves.map((lv) => <HrLeaveRow key={lv.id} lv={lv} fin={fin} canDecide={canDecide} onDecide={(x) => setModal({ kind: "lv", x })} onPrint={(x) => setModal({ kind: "plv", x })} />)}
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-200/60">
+            {advs.length === 0 && <FinEmpty text="No advance requests." />}
+            {advs.map((a) => <HrAdvanceRow key={a.id} adv={a} fin={fin} canDecide={canDecide} onDecide={(x) => setModal({ kind: "adv", x })} onPrint={(x) => setModal({ kind: "padv", x })} onOpenVoucher={onOpenVoucher} />)}
+          </div>
+        )}
+      </section>
+      {modal && modal.kind === "newLeave" && <LeaveRequestModal currentUser={currentUser} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "newAdv" && <AdvanceRequestModal currentUser={currentUser} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "lv" && <LeaveDecideModal lv={modal.x} currentUser={currentUser} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "adv" && <AdvanceDecideModal adv={modal.x} currentUser={currentUser} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "plv" && <HrLeavePrintDialog lv={fin.leaves.find((x) => x.id === modal.x.id) || modal.x} emp={empOf(modal.x.empId)} fin={fin} company={settings} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "padv" && <HrAdvancePrintDialog adv={fin.advances.find((x) => x.id === modal.x.id) || modal.x} emp={empOf(modal.x.empId)} fin={fin} company={settings} onClose={() => setModal(null)} />}
+    </div>
+  );
+}
+
+/* ---------------- Salary sheet ---------------- */
+
+function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
+  useLanguage();
+  const fin = useFin();
+  const [month, setMonth] = useState(() => { const d = new Date(); return d.getDate() < 20 ? hrMonthOf(finAddMonths(todayISO(), -1)) : hrMonthOf(); });
+  const [busy, setBusy] = useState(false);
+  const [print, setPrint] = useState(null);
+  if (!fin.loaded) return <HrLoading />;
+  const canFinal = hrAllow(currentUser, "hr.approve");
+  const sheet = fin.salarySheets.find((s) => s.month === month) || null;
+  const isFinal = !!(sheet && sheet.status === "Final");
+  const adj = (sheet && sheet.adj) || {};
+  const monthEnd = hrMonthDays(month).slice(-1)[0];
+  const emps = fin.employees.filter((e) => e.status !== "Left" && (!e.joinDate || e.joinDate <= monthEnd));
+  const rows = isFinal ? sheet.rows : emps.map((e) => hrSalaryRow(fin, e, month, adj[e.id]));
+  const sum = (k) => roundMoney(rows.reduce((s, r) => s + (Number(r[k]) || 0), 0));
+
+  async function setAdj(empId, patch) {
+    await finMutate("salarySheets", (list) => {
+      const ex = list.find((s) => s.month === month);
+      if (ex && ex.status === "Final") return list;
+      const next = { ...(ex || { id: uid("sal"), month, status: "Draft" }), adj: { ...((ex && ex.adj) || {}), [empId]: { ...(((ex && ex.adj) || {})[empId] || {}), ...patch } } };
+      return ex ? list.map((s) => (s.id === ex.id ? next : s)) : [...list, next];
+    });
+  }
+  async function finalize() {
+    if (!rows.length) return;
+    if (!confirm(`${hrMonthLabel(month)} ${t("ki salary sheet final karein? Har employee ka salary voucher ban jayega.")}`)) return;
+    setBusy(true);
+    try {
+      const actor = finActor(currentUser);
+      const fresh = emps.map((e) => hrSalaryRow(finState, e, month, adj[e.id]));
+      const ids = {};
+      await finMutate("vouchers", (list) => {
+        const out = [...list];
+        fresh.forEach((r) => {
+          if (!(r.net > 0)) return;
+          const v = hrMakeVoucher(out, { payee: r.name, payeePhone: r.phone, amount: r.net, branchId: r.branchId, particulars: `Salary ${hrMonthLabel(month)} · ${r.number}`, note: `Salary sheet ${month}`, hrRef: { kind: "salary", month, empId: r.empId } }, actor);
+          ids[r.empId] = v.id;
+          out.push(v);
+        });
+        return out;
+      });
+      await finMutate("salarySheets", (list) => {
+        const ex = list.find((s) => s.month === month);
+        const next = { ...(ex || { id: uid("sal"), month, adj: {} }), status: "Final", rows: fresh.map((r) => ({ ...r, voucherId: ids[r.empId] || "" })), finalAt: new Date().toISOString(), finalBy: actor.name };
+        return ex ? list.map((s) => (s.id === ex.id ? next : s)) : [...list, next];
+      });
+    } finally { setBusy(false); }
+  }
+  async function reopen() {
+    const paidAny = rows.some((r) => { const v = fin.vouchers.find((x) => x.id === r.voucherId); return v && finPlanOf(v).some((k) => k.status === "Paid"); });
+    if (paidAny) { alert(t("Kuch salary pay ho chuki hai — sheet dobara nahi khul sakti.")); return; }
+    if (!confirm(t("Sheet dobara kholein? Is mahine ke salary vouchers cancel ho jayenge."))) return;
+    const actor = finActor(currentUser);
+    const vids = new Set(rows.map((r) => r.voucherId).filter(Boolean));
+    const now = new Date().toISOString();
+    await finMutate("vouchers", (list) => list.map((v) => (vids.has(v.id) && v.status !== "Paid" ? { ...v, status: "Cancelled", cancellation: { by: actor, at: now, reason: "Salary sheet reopened" }, history: [...(v.history || []), { at: now, by: actor.name, action: "Cancelled", note: "Salary sheet reopened" }] } : v)));
+    await finMutate("salarySheets", (list) => list.map((s) => (s.month === month ? { ...s, status: "Draft", rows: [], finalAt: null, finalBy: "" } : s)));
+  }
+  const voucherOf = (r) => (r.voucherId ? fin.vouchers.find((x) => x.id === r.voucherId) : null);
+  return (
+    <div>
+      <FinPageHead title="Salary Sheet" sub={`${hrMonthLabel(month)} · ${t("hazri, leave cut, advance cut — har line par Cut / Maaf")}`} right={
+        <div className="flex flex-wrap gap-2 items-center">
+          <input type="month" className={`${inputCls} !w-auto`} value={month} onChange={(e) => setMonth(e.target.value || month)} />
+          {isFinal ? (
+            <>
+              <Btn variant="ghost" onClick={() => setPrint(rows)}>🖨 {t("All slips")}</Btn>
+              {currentUser.role === "admin" && <Btn variant="ghost" onClick={reopen}>↺ {t("Reopen")}</Btn>}
+            </>
+          ) : canFinal && <Btn onClick={finalize} disabled={busy || !rows.length}>✓ {t("Final + vouchers")}</Btn>}
+        </div>
+      } />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <FinKpi label="Status" value={<HrPill s={isFinal ? "Final" : "Draft"} />} sub={isFinal ? `${sheet.finalBy} · ${fmtDate(sheet.finalAt)}` : t("Abhi change ho sakti hai")} />
+        <FinKpi label="Gross salary" value={fmtMoney(sum("salary"))} />
+        <FinKpi label="Cuts" value={fmtMoney(sum("leaveCut") + sum("advanceCut") + sum("deduct"))} tone="text-rose-500" sub={`${t("Leave")} ${fmtMoney(sum("leaveCut"))} · ${t("Advance")} ${fmtMoney(sum("advanceCut"))}`} />
+        <FinKpi label="Net payable" value={fmtMoney(sum("net"))} tone="text-emerald-500" />
+      </div>
+      <section className="ct-card p-3 sm:p-4 overflow-x-auto">
+        {rows.length === 0 && <FinEmpty text="No employees for this month." />}
+        {rows.length > 0 && (
+          <table className="w-full text-[13px] min-w-[980px]">
+            <thead><tr className="ct-t3 text-[11px] uppercase">{["Employee", "Salary", "P / L / Lv / A", "Leave cut", "Advance cut", "Bonus", "Deduct", "Net", ""].map((h, i) => <th key={i} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+            <tbody>
+              {rows.map((r) => {
+                const v = voucherOf(r);
+                const paid = v && finVoucherState(v).key === "paid";
+                return (
+                  <tr key={r.empId} className="border-t border-slate-200/60 align-top">
+                    <td className="py-2.5 pe-3"><b className="ct-h">{r.name}</b><div className="text-[11.5px] ct-t3">{r.number} · {r.post}</div></td>
+                    <td className="py-2.5 pe-3 ct-h font-semibold">{fmtMoney(r.salary)}</td>
+                    <td className="py-2.5 pe-3"><span className="text-emerald-500 font-bold">{r.present}</span> / <span className="text-amber-500 font-bold">{r.late}</span> / <span className="text-sky-500 font-bold">{r.leave}</span> / <span className="text-rose-500 font-bold">{r.absent}</span><div className="text-[11px] ct-t3">{t("extra")} {r.extraLeave} + {t("absent")} {r.absent} = {r.cutDays} {t("din")}</div></td>
+                    <td className="py-2.5 pe-3">
+                      {r.cutDays > 0 ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className={r.maaf ? "line-through ct-t3" : "text-rose-500 font-bold"}>{fmtMoney(r.leaveCutCalc)}</span>
+                          {!isFinal && <button type="button" onClick={() => setAdj(r.empId, { maaf: !r.maaf })} className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${r.maaf ? "bg-emerald-500 text-white" : "bg-rose-400/15 text-rose-500"}`}>{r.maaf ? t("Maaf") : t("Cut")}</button>}
+                          {isFinal && r.maaf && <span className="text-emerald-500 text-[11px] font-bold">{t("Maaf")}</span>}
+                        </div>
+                      ) : <span className="ct-t3">—</span>}
+                    </td>
+                    <td className="py-2.5 pe-3">
+                      {r.advCalc > 0 ? (
+                        <div className="flex items-center gap-1.5">
+                          <span className={r.advSkip ? "line-through ct-t3" : "text-rose-500 font-bold"}>{fmtMoney(r.advCalc)}</span>
+                          {!isFinal && <button type="button" onClick={() => setAdj(r.empId, { advSkip: !r.advSkip })} className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${r.advSkip ? "bg-emerald-500 text-white" : "bg-rose-400/15 text-rose-500"}`}>{r.advSkip ? t("Skip") : t("Cut")}</button>}
+                        </div>
+                      ) : <span className="ct-t3">—</span>}
+                    </td>
+                    <td className="py-2.5 pe-3">{isFinal ? (r.bonus ? fmtMoney(r.bonus) : "—") : <input type="number" className={`${inputCls} !py-1 !w-24`} defaultValue={r.bonus || ""} onBlur={(e) => Number(e.target.value || 0) !== r.bonus && setAdj(r.empId, { bonus: Number(e.target.value) || 0 })} />}</td>
+                    <td className="py-2.5 pe-3">{isFinal ? (r.deduct ? fmtMoney(r.deduct) : "—") : <input type="number" className={`${inputCls} !py-1 !w-24`} defaultValue={r.deduct || ""} onBlur={(e) => Number(e.target.value || 0) !== r.deduct && setAdj(r.empId, { deduct: Number(e.target.value) || 0 })} />}</td>
+                    <td className="py-2.5 pe-3 font-black text-emerald-500 text-[14px]">{fmtMoney(r.net)}</td>
+                    <td className="py-2.5 whitespace-nowrap">
+                      {isFinal && (
+                        <div className="flex items-center gap-1.5">
+                          {v ? <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${paid ? "bg-emerald-400/15 text-emerald-500" : "bg-sky-400/15 text-sky-500"}`}>{paid ? t("Paid") : t("Unpaid")}</span> : null}
+                          {v && !paid && onOpenVoucher && <Btn small variant="ghost" onClick={() => onOpenVoucher(v.id)}>💵</Btn>}
+                          <Btn small variant="ghost" onClick={() => setPrint([r])}>🖨</Btn>
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+      {!isFinal && rows.length > 0 && <div className="text-[12px] ct-t3 mt-2">{t("“Final” dabane par har employee ka approved salary voucher banega — cashier Payments Due se pay karega. Final ke baad slips print karein.")}</div>}
+      {print && sheet && <HrSalaryPrintDialog sheet={sheet} rows={print} fin={fin} company={settings} onClose={() => setPrint(null)} />}
+    </div>
+  );
+}
+
+/* ---------------- My attendance (employee self-service) ---------------- */
+
+function MyHrPage({ currentUser, settings }) {
+  useLanguage();
+  const fin = useFin();
+  const [month, setMonth] = useState(hrMonthOf());
+  const [modal, setModal] = useState(null);
+  const [punch, setPunch] = useState(null);
+  if (!fin.loaded) return <HrLoading />;
+  const emp = fin.employees.find((e) => e.id === currentUser.employeeId);
+  if (!emp) return <div className="ct-card"><FinEmpty text="Aap ka employee record nahi mila." /></div>;
+  const hs = hrSettingsOf(fin.settings);
+  const rec = hrTodayRec(fin, emp.id);
+  const myLeaves = fin.leaves.filter((l) => l.empId === emp.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  const myAdv = fin.advances.filter((a) => a.empId === emp.id).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  const slips = fin.salarySheets.filter((s) => s.status === "Final").map((s) => ({ s, r: (s.rows || []).find((r) => r.empId === emp.id) })).filter((x) => x.r).sort((a, b) => b.s.month.localeCompare(a.s.month));
+  const used = hrLeaveUsed(fin, emp.id, hrMonthOf());
+  async function doPunch() {
+    setPunch({ res: null });
+    const res = await hrPunch(emp, currentUser, "button");
+    setPunch({ res });
+    setTimeout(() => setPunch(null), 4000);
+  }
+  return (
+    <div>
+      <FinPageHead title="My Attendance" sub={`${emp.number} · ${emp.post}`} />
+      <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.2fr] gap-4">
+        <div className="space-y-4">
+          <section className="ct-card p-5">
+            <div className="flex items-center gap-4">
+              <HrAvatar emp={emp} size={72} rounded="rounded-2xl" />
+              <div className="min-w-0"><div className="ct-display text-[20px] font-bold ct-h">{emp.name}</div><div className="text-[13px] ct-t2">{t("Duty")} {emp.dutyIn || hs.dutyIn} – {emp.dutyOut || hs.dutyOut}</div></div>
+            </div>
+            <div className="mt-4 rounded-2xl ct-chip p-4 text-center">
+              <div className="text-[12px] font-bold uppercase ct-t3">{fmtDate(todayISO())}</div>
+              <div className="text-[15px] font-bold ct-h mt-1">
+                {rec ? <>{t("In")} {hrHM(rec.in)}{rec.lateMin ? <span className="text-amber-500"> · {t("late")} {rec.lateMin}m</span> : null}{rec.out ? ` · ${t("Out")} ${hrHM(rec.out)}` : ""}</> : t("Abhi check-in nahi kiya")}
+              </div>
+              {!(rec && rec.out) && (
+                <button type="button" onClick={doPunch} className={`mt-3 w-full rounded-2xl py-4 text-[18px] font-black text-white active:scale-[.99] ${rec ? "bg-sky-500" : "bg-emerald-500"}`}>
+                  {rec ? `👋 ${t("Check-out")}` : `✓ ${t("Check-in")}`}
+                </button>
+              )}
+            </div>
+            {punch && <div className="mt-3"><HrPunchResult emp={emp} res={punch.res} /></div>}
+            <div className="flex flex-wrap gap-2 mt-4">
+              <Btn onClick={() => setModal({ kind: "leave" })}>🗓 {t("Leave request")}</Btn>
+              <Btn variant="ghost" onClick={() => setModal({ kind: "adv" })}>💵 {t("Advance request")}</Btn>
+            </div>
+            <div className="text-[12.5px] ct-t2 mt-2">{t("Is mahine leave")}: <b className="ct-h">{used}/{hs.leavePerMonth}</b></div>
+          </section>
+          <section className="ct-card p-4">
+            <div className="ct-display text-[15px] font-bold ct-h mb-1">{t("My leaves")}</div>
+            {myLeaves.length === 0 && <FinEmpty text="No leave requests." />}
+            <div className="divide-y divide-slate-200/60">{myLeaves.slice(0, 8).map((lv) => <HrLeaveRow key={lv.id} lv={lv} fin={fin} canDecide={false} onPrint={(x) => setModal({ kind: "plv", x })} />)}</div>
+          </section>
+          <section className="ct-card p-4">
+            <div className="ct-display text-[15px] font-bold ct-h mb-1">{t("My advances")}</div>
+            {myAdv.length === 0 && <FinEmpty text="No advance requests." />}
+            <div className="divide-y divide-slate-200/60">{myAdv.slice(0, 8).map((a) => <HrAdvanceRow key={a.id} adv={a} fin={fin} canDecide={false} onPrint={(x) => setModal({ kind: "padv", x })} />)}</div>
+          </section>
+        </div>
+        <div className="space-y-4">
+          <section className="ct-card p-4 sm:p-5">
+            <div className="flex items-center justify-between mb-3"><div className="ct-display text-[15px] font-bold ct-h">{t("My calendar")}</div><input type="month" className={`${inputCls} !w-auto`} value={month} onChange={(e) => setMonth(e.target.value || month)} /></div>
+            <HrCalendar emp={emp} month={month} fin={fin} />
+          </section>
+          <section className="ct-card p-4">
+            <div className="ct-display text-[15px] font-bold ct-h mb-1">{t("Salary slips")}</div>
+            {slips.length === 0 && <FinEmpty text="No salary slips yet." />}
+            <div className="divide-y divide-slate-200/60">
+              {slips.map(({ s, r }) => (
+                <div key={s.id} className="py-2.5 flex items-center gap-3">
+                  <div className="flex-1"><div className="font-semibold ct-h text-[13.5px]">{hrMonthLabel(s.month)}</div><div className="text-[12px] ct-t3">{t("Net")} {fmtMoney(r.net)}</div></div>
+                  <Btn small variant="ghost" onClick={() => setModal({ kind: "slip", s, r })}>🖨</Btn>
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      </div>
+      {modal && modal.kind === "leave" && <LeaveRequestModal empId={emp.id} currentUser={currentUser} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "adv" && <AdvanceRequestModal empId={emp.id} currentUser={currentUser} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "plv" && <HrLeavePrintDialog lv={modal.x} emp={emp} fin={fin} company={settings} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "padv" && <HrAdvancePrintDialog adv={modal.x} emp={emp} fin={fin} company={settings} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "slip" && <HrSalaryPrintDialog sheet={modal.s} rows={[modal.r]} fin={fin} company={settings} onClose={() => setModal(null)} />}
+    </div>
+  );
+}
+
+/* ---------------- Scan result inside the app ---------------- */
+
+function hrFindSlip(fin, id) {
+  const [sid, empId] = String(id).split("~");
+  const sheet = fin.salarySheets.find((s) => s.id === sid);
+  const row = sheet && (sheet.rows || []).find((r) => r.empId === empId);
+  return { sheet, row };
+}
+
+function HrScanModal({ target, currentUser, company, onClose, onOpenVoucher }) {
+  const fin = useFin();
+  const done = React.useRef(false);
+  const [res, setRes] = useState(null);
+  const [modal, setModal] = useState(null);
+  const kind = target.kind;
+  const emp = kind === "e" ? fin.employees.find((e) => e.id === target.id) : null;
+  useEffect(() => {
+    if (kind !== "e" || !fin.loaded || done.current) return;
+    done.current = true;
+    if (!emp) { setRes({ type: "missing" }); return; }
+    if (emp.status === "Left") { setRes({ type: "left" }); return; }
+    hrPunch(emp, currentUser, "scan").then(setRes);
+  }, [fin.loaded]);
+  useEffect(() => {
+    if (kind !== "e" || !res) return undefined;
+    const tm = setTimeout(onClose, 5000);
+    return () => clearTimeout(tm);
+  }, [res]);
+  if (!fin.loaded) return <Modal title="Scan" onClose={onClose}><HrLoading /></Modal>;
+  const canDecide = hrAllow(currentUser, "hr.approve");
+  const empOf = (id) => fin.employees.find((e) => e.id === id) || { name: "—", number: "", post: "" };
+  let body = null, title = "Scan";
+  if (kind === "e") {
+    title = "Attendance";
+    body = <HrPunchResult emp={emp} res={res} />;
+  } else if (kind === "l") {
+    const lv = fin.leaves.find((x) => x.id === target.id);
+    title = lv ? `${t("Leave Slip")} ${lv.number}` : "Leave Slip";
+    body = !lv ? <FinEmpty text="Slip nahi mili." /> : (
+      <div>
+        <HrLeaveRow lv={lv} fin={fin} canDecide={false} onPrint={(x) => setModal({ kind: "plv", x })} />
+        {lv.decision && <div className="text-[12.5px] ct-t2 mt-1">{lv.status === "Approved" ? "✓" : "✕"} {lv.decision.by} · {fmtDateTime(lv.decision.at)}{lv.decision.note ? ` · ${lv.decision.note}` : ""}</div>}
+        {lv.status === "Pending" && (canDecide ? <div className="mt-3"><Btn onClick={() => setModal({ kind: "lv", x: lv })}>{t("Approve / Reject")}</Btn></div> : <div className="mt-3 text-[13px] text-amber-500 font-semibold">{t("Approval ka intezar")}</div>)}
+      </div>
+    );
+  } else if (kind === "a") {
+    const adv = fin.advances.find((x) => x.id === target.id);
+    const info = adv ? hrAdvanceInfo(fin, adv) : null;
+    title = adv ? `${t("Advance Slip")} ${adv.number}` : "Advance Slip";
+    body = !adv ? <FinEmpty text="Slip nahi mili." /> : (
+      <div>
+        <HrAdvanceRow adv={adv} fin={fin} canDecide={false} onPrint={(x) => setModal({ kind: "padv", x })} />
+        <div className={`mt-3 rounded-xl px-3 py-2.5 text-[13.5px] font-bold ${info.status === "Paid" || info.status === "Recovered" ? "bg-emerald-400/10 text-emerald-600" : info.status === "Ready to pay" ? "bg-sky-400/10 text-sky-600" : info.status === "Pending" ? "bg-amber-400/10 text-amber-600" : "bg-rose-400/10 text-rose-500"}`}>
+          {info.status === "Paid" ? `✓ ${t("Already paid")} — ${t("dobara pay na karein")}` : info.status === "Ready to pay" ? `💵 ${t("Approved — pay karne ke liye tayyar")}` : info.status === "Pending" ? t("Approval ka intezar") : t(info.status)}
+          {info.recovered > 0 && <div className="text-[12px] font-semibold">{t("Wapis")} {fmtMoney(info.recovered)} · {t("baqi")} {fmtMoney(info.left)}</div>}
+        </div>
+        <div className="flex flex-wrap gap-2 mt-3">
+          {adv.status === "Pending" && canDecide && <Btn onClick={() => setModal({ kind: "adv", x: adv })}>{t("Approve / Reject")}</Btn>}
+          {info.status === "Ready to pay" && info.v && <Btn onClick={() => { onClose(); onOpenVoucher(info.v.id); }}>💵 {t("Pay")} ({info.v.number})</Btn>}
+        </div>
+      </div>
+    );
+  } else if (kind === "s") {
+    const { sheet, row } = hrFindSlip(fin, target.id);
+    const v = row && row.voucherId ? fin.vouchers.find((x) => x.id === row.voucherId) : null;
+    const paid = v && finVoucherState(v).key === "paid";
+    title = "Salary Slip";
+    body = !row ? <FinEmpty text="Slip nahi mili." /> : (
+      <div>
+        <div className="flex items-center gap-3"><HrAvatar emp={empOf(row.empId)} size={48} /><div><div className="font-bold ct-h">{row.name}</div><div className="text-[12.5px] ct-t2">{row.number} · {hrMonthLabel(sheet.month)}</div></div></div>
+        <div className="mt-3 ct-display text-[24px] font-bold ct-h">{fmtMoney(row.net)}</div>
+        <div className={`mt-2 rounded-xl px-3 py-2.5 text-[13.5px] font-bold ${paid ? "bg-emerald-400/10 text-emerald-600" : "bg-sky-400/10 text-sky-600"}`}>{paid ? `✓ ${t("Salary paid")}` : `💵 ${t("Unpaid")}${v ? ` · ${v.number}` : ""}`}</div>
+        <div className="flex flex-wrap gap-2 mt-3">
+          {v && !paid && <Btn onClick={() => { onClose(); onOpenVoucher(v.id); }}>💵 {t("Pay")}</Btn>}
+          <Btn variant="ghost" onClick={() => setModal({ kind: "slip", sheet, row })}>🖨 {t("Print")}</Btn>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <Modal title={title} onClose={onClose}>
+      {body}
+      {modal && modal.kind === "lv" && <LeaveDecideModal lv={modal.x} currentUser={currentUser} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "adv" && <AdvanceDecideModal adv={modal.x} currentUser={currentUser} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "plv" && <HrLeavePrintDialog lv={modal.x} emp={empOf(modal.x.empId)} fin={fin} company={company} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "padv" && <HrAdvancePrintDialog adv={modal.x} emp={empOf(modal.x.empId)} fin={fin} company={company} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "slip" && <HrSalaryPrintDialog sheet={modal.sheet} rows={[modal.row]} fin={fin} company={company} onClose={() => setModal(null)} />}
+    </Modal>
+  );
+}
+
+/* ---------------- Public verify page (no login) ---------------- */
+
+function HrVerifyView({ target, settings, onOpen }) {
+  const fin = useFin();
+  if (!fin.loaded) return <VerifyShell settings={settings} tone="warn" title="Checking…" sub="Loading"><div className="h-10" /></VerifyShell>;
+  const empOf = (id) => fin.employees.find((e) => e.id === id);
+  const notFound = (what) => (
+    <VerifyShell settings={settings} tone="bad" title={`${what} not found`} sub="This QR code does not match our records." onOpen={onOpen}>
+      <div className="text-[14px] text-slate-600">The code may not be from this shop.</div>
+    </VerifyShell>
+  );
+  const head = (emp) => emp && (
+    <div className="flex items-center gap-3 mb-3">
+      {emp.photo ? <img src={emp.photo} alt="" className="w-14 h-14 rounded-xl object-cover" /> : <div className="w-14 h-14 rounded-xl bg-slate-900 text-[#d4a94f] font-black flex items-center justify-center">{uiInitials(emp.name)}</div>}
+      <div><div className="font-bold text-[17px]">{emp.name}</div><div className="text-[13px] text-slate-500">{emp.post} · {emp.number}</div></div>
+    </div>
+  );
+  if (target.kind === "e") {
+    const emp = empOf(target.id);
+    if (!emp) return notFound("Employee");
+    const active = emp.status !== "Left";
+    return (
+      <VerifyShell settings={settings} tone={active ? "ok" : "bad"} title={active ? "Genuine employee card" : "Card not valid — employee left"} sub={emp.number} onOpen={onOpen}>
+        {head(emp)}
+        <VerifyRow l="Status" v={active ? "Active" : "Left"} strong tone={active ? "text-emerald-600" : "text-rose-600"} />
+        <VerifyRow l="Join date" v={emp.joinDate ? fmtDate(emp.joinDate) : "-"} />
+        <VerifyRow l="CNIC" v={hrMaskCnic(emp.cnic) || "-"} />
+        <div className="text-[12px] text-slate-400 mt-3">Staff: scan this card on the shop scanner for check-in / check-out.</div>
+      </VerifyShell>
+    );
+  }
+  if (target.kind === "l") {
+    const lv = fin.leaves.find((x) => x.id === target.id);
+    if (!lv) return notFound("Leave slip");
+    const emp = empOf(lv.empId);
+    const tone = lv.status === "Approved" ? "ok" : lv.status === "Rejected" ? "bad" : "warn";
+    return (
+      <VerifyShell settings={settings} tone={tone} title={`Leave ${lv.status === "Pending" ? "pending approval" : lv.status.toLowerCase()}`} sub={lv.number} onOpen={onOpen}>
+        {head(emp)}
+        <VerifyRow l="Type" v={lv.type} />
+        <VerifyRow l="Dates" v={`${fmtDate(lv.from)} → ${fmtDate(lv.to)}`} strong />
+        <VerifyRow l="Days" v={lv.days} />
+        {lv.decision && <VerifyRow l={lv.status === "Approved" ? "Approved by" : "Decided by"} v={`${lv.decision.by} · ${fmtDate(lv.decision.at)}`} />}
+      </VerifyShell>
+    );
+  }
+  if (target.kind === "a") {
+    const adv = fin.advances.find((x) => x.id === target.id);
+    if (!adv) return notFound("Advance slip");
+    const info = hrAdvanceInfo(fin, adv);
+    const tone = ["Paid", "Recovered", "Ready to pay"].includes(info.status) ? "ok" : info.status === "Pending" ? "warn" : "bad";
+    return (
+      <VerifyShell settings={settings} tone={tone} title={{ Paid: "Advance paid", Recovered: "Advance fully recovered", "Ready to pay": "Advance approved", Pending: "Advance pending approval" }[info.status] || `Advance ${info.status.toLowerCase()}`} sub={adv.number} onOpen={onOpen}>
+        {head(empOf(adv.empId))}
+        <VerifyRow l="Status" v={info.status} strong />
+        {adv.decision && <VerifyRow l="Decided by" v={`${adv.decision.by} · ${fmtDate(adv.decision.at)}`} />}
+        <div className="text-[12px] text-slate-400 mt-3">Amount is visible to staff only.</div>
+      </VerifyShell>
+    );
+  }
+  const { sheet, row } = hrFindSlip(fin, target.id);
+  if (!row) return notFound("Salary slip");
+  const v = row.voucherId ? fin.vouchers.find((x) => x.id === row.voucherId) : null;
+  const paid = !!(v && finVoucherState(v).key === "paid");
+  return (
+    <VerifyShell settings={settings} tone="ok" title={`Genuine salary slip · ${paid ? "Paid" : "Unpaid"}`} sub={hrMonthLabel(sheet.month)} onOpen={onOpen}>
+      {head(empOf(row.empId) || row)}
+      <VerifyRow l="Month" v={hrMonthLabel(sheet.month)} strong />
+      <VerifyRow l="Payment" v={paid ? "Paid" : "Not paid yet"} tone={paid ? "text-emerald-600" : "text-amber-600"} />
+      <div className="text-[12px] text-slate-400 mt-3">Salary details are visible to staff only.</div>
+    </VerifyShell>
   );
 }
 
