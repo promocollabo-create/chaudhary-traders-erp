@@ -1207,6 +1207,7 @@ const NAV_GROUPS = [
     { id: "ledger", label: "Ledger", icon: "book" },
     { id: "payments", label: "Payments", icon: "wallet" },
     { id: "promises", label: "Promise To Pay", icon: "clock" },
+    { id: "creditControl", label: "Credit Control", icon: "shield" },
     { id: "outstandingTransfer", label: "Outstanding Transfer", icon: "transfer" },
     { id: "adjustments", label: "Adjustments", icon: "sliders" },
     { id: "vouchers", label: "Payment Vouchers", icon: "voucher" },
@@ -2848,17 +2849,7 @@ function CustomerForm({ initial, branches, currentUser, onSave, onCancel }) {
           {AUDIENCE_TYPES.map((a) => <option key={a}>{a}</option>)}
         </select>
       </Field>
-      <div className="border-t border-slate-200 mt-3 pt-3">
-        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2">Customer Portal Login (optional)</div>
-        <div className="grid grid-cols-2 gap-3">
-          <Field label="Portal Username">
-            <input className={inputCls} value={form.portalUsername || ""} onChange={(e) => setForm({ ...form, portalUsername: e.target.value })} />
-          </Field>
-          <Field label="Portal Password">
-            <input className={inputCls} value={form.portalPassword || ""} onChange={(e) => setForm({ ...form, portalPassword: e.target.value })} />
-          </Field>
-        </div>
-      </div>
+      <CrCustomerFields form={form} setForm={setForm} currentUser={currentUser} />
       <div className="flex gap-2 mt-2">
         <Btn onClick={() => form.name.trim() && onSave(form)}>Save Customer</Btn>
         <Btn variant="ghost" onClick={onCancel}>Cancel</Btn>
@@ -3458,6 +3449,7 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
     };
 
     submittingRef.current = true;
+    setTimeout(() => { submittingRef.current = false; }, 900);
     if (isEdit) {
       onSave({
         ...editingInvoice,
@@ -4113,7 +4105,7 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
             currentUser={currentUser}
             nextNumber={nextNumber}
             onCancel={closeForm}
-            onSave={(inv) => {
+            onSave={(inv0) => crGateInvoice(inv0, editingInvoice, { customers, invoices, payments, returns, exchanges, promises, transfers, adjustments }, currentUser, (inv) => {
               if (editingInvoice) {
                 updateInvoice(inv, editingInvoice);
               } else {
@@ -4126,7 +4118,7 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
               }
               setShowForm(false);
               setEditingInvoice(null);
-            }}
+            })}
           />
         </Modal>
       )}
@@ -9357,6 +9349,7 @@ function App() {
   const [cameraOpen, setCameraOpen] = useState(false);
   const [scanFlash, setScanFlash] = useState(false);
   const [hrScan, setHrScan] = useState(null);
+  const [crTick, setCrTick] = useState(0);
   const [prefill, setPrefill] = useState(null);
   const [focusCustomerId, setFocusCustomerId] = useState(null);
   const [focusInvoiceId, setFocusInvoiceId] = useState(null);
@@ -10121,6 +10114,7 @@ function App() {
       commissionAgents, commissionRules, commissionTransactions, commissionPayments, orderTargets,
       vouchers: finState.vouchers, finSettings: finState.settings, cashClosings: finState.closings, cashMoves: finState.moves, costRates: finState.costs,
       employees: finState.employees, attendance: finState.attendance, leaves: finState.leaves, advances: finState.advances, salarySheets: finState.salarySheets,
+      creditState: finState.creditState, creditLog: finState.creditLog, creditRequests: finState.creditRequests,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -10158,7 +10152,8 @@ function App() {
     if (Array.isArray(data.cashClosings)) finMutate("closings", () => data.cashClosings);
     if (Array.isArray(data.cashMoves)) finMutate("moves", () => data.cashMoves);
     if (data.costRates && typeof data.costRates === "object") finMutate("costs", () => data.costRates);
-    ["employees", "attendance", "leaves", "advances", "salarySheets"].forEach((k) => { if (Array.isArray(data[k])) finMutate(k, () => data[k]); });
+    if (data.creditState && typeof data.creditState === "object") finMutate("creditState", () => data.creditState);
+    ["employees", "attendance", "leaves", "advances", "salarySheets", "creditLog", "creditRequests"].forEach((k) => { if (Array.isArray(data[k])) finMutate(k, () => data[k]); });
   }
 
   /* ---------- Commission Management handlers ---------- */
@@ -10290,13 +10285,22 @@ function App() {
     const hrLv = hrOk ? finLive.leaves.filter((l) => l.status === "Pending") : [];
     const hrAdv = hrOk ? finLive.advances.filter((a) => a.status === "Pending") : [];
     const empName = (id) => (finLive.employees.find((e) => e.id === id) || {}).name || "—";
+    const crOk = hrAllow(currentUser, "credit.override");
+    const crPend = crOk ? finLive.creditRequests.filter((r) => r.status === "Pending") : [];
+    const meKey = finUserKey(currentUser);
+    const crMine = finLive.creditRequests.filter((r) => r.createdBy && r.createdBy.key === meKey && r.decision && String(r.decision.at).slice(0, 10) >= finAddDays(today, -2) && r.status !== "Used");
+    const crUnsent = hrPageAllowed(currentUser, "creditControl") ? Object.entries(finLive.creditState).reduce((n, [, s]) => n + ((s && s.warnings) || []).filter((w) => !w.waAt).length, 0) : 0;
     return {
       count: mine.length,
       dueCount: due.length,
       hrCount: hrLv.length + hrAdv.length,
+      crCount: crPend.length + crUnsent,
       portalCount: portalPend.length + portalMsg.length,
       deliveryCount: delToday.length,
       list: [
+        ...crPend.map((r) => ({ id: "cr" + r.id, icon: "shield", tone: "text-rose-400", page: "creditControl", title: `${r.customerName} — ${t("udhaar")} ${fmtMoney(r.amount)}`, sub: `${r.number} · ${t("Credit approval chahiye")}` })),
+        ...crMine.map((r) => ({ id: "cm" + r.id, icon: "shield", tone: r.status === "Approved" ? "text-emerald-400" : "text-rose-400", page: "invoices", title: `${r.number} ${r.customerName}: ${t(r.status)}${r.status === "Approved" ? " · max " + fmtMoney(r.approvedCredit) : ""}`, sub: `${r.decision.by} · ${t("ab invoice dobara Save karein")}` })),
+        ...(crUnsent ? [{ id: "cw", icon: "wa", tone: "text-orange-400", page: "creditControl", title: `${crUnsent} ${t("payment warnings WhatsApp par bhejni hain")}`, sub: t("Credit Control") }] : []),
         ...hrLv.map((l) => ({ id: "hl" + l.id, icon: "note", tone: "text-sky-400", page: "hrRequests", title: `${empName(l.empId)} — ${l.type} leave · ${l.days} din`, sub: `${l.number} · ${fmtDate(l.from)} → ${fmtDate(l.to)}` })),
         ...hrAdv.map((a) => ({ id: "ha" + a.id, icon: "wallet", tone: "text-amber-400", page: "hrRequests", title: `${empName(a.empId)} — Advance ${fmtMoney(a.amount)}`, sub: `${a.number} · ${t("Approval chahiye")}` })),
         ...mine.map((v) => ({ id: "vc" + v.id, icon: "voucher", tone: "text-amber-400", page: "vouchers", title: `${v.number} — ${v.payee} · ${fmtMoney(v.amount)}`, sub: t("Voucher waiting for your approval") })),
@@ -10306,7 +10310,24 @@ function App() {
         ...due.map(({ v, k, idx, n }) => ({ id: "vk" + v.id + k.id, icon: "calendar", tone: k.date < today ? "text-rose-400" : "text-emerald-400", page: "paymentsDue", title: `${v.number}${n > 1 ? ` (${idx + 1}/${n})` : ""} — ${v.payee} · ${fmtMoney(k.amount)}`, sub: k.date < today ? `${t("Overdue")} · ${fmtDate(k.date)}` : t("Payment due today") })),
       ],
     };
-  }, [loading, currentUser, finLive.vouchers, finLive.settings, finLive.portalPay, finLive.portalMsgs, finLive.deliveryPlans, finLive.leaves, finLive.advances, finLive.employees, bookings, invoices, payments]);
+  }, [loading, currentUser, finLive.vouchers, finLive.settings, finLive.portalPay, finLive.portalMsgs, finLive.deliveryPlans, finLive.leaves, finLive.advances, finLive.employees, finLive.creditRequests, finLive.creditState, bookings, invoices, payments]);
+
+  // Credit rules: warnings / Red List / Watch update by themselves (any staff device).
+  useEffect(() => {
+    if (loading || !currentUser || !finIsStaff(currentUser) || !finLive.loaded) return undefined;
+    const tm = setTimeout(async () => {
+      const ctx = { customers, invoices, payments, returns, exchanges, promises, transfers, adjustments };
+      let logs = [];
+      const today = todayISO();
+      try {
+        const probe = crSweep(ctx, finState.settings, finState.creditState, today);
+        if (!probe.logs.length && JSON.stringify(probe.next) === JSON.stringify(finState.creditState)) return;
+        await finMutate("creditState", (cur) => { const r = crSweep(ctx, finState.settings, cur, today); logs = r.logs; return r.next; });
+        if (logs.length) await crLog(logs);
+      } catch (e) { console.error(e); }
+    }, 1200);
+    return () => clearTimeout(tm);
+  }, [loading, currentUser, finLive.loaded, finLive.settings, customers, invoices, payments, promises, crTick]);
 
   // Employee logins: only the pages admin allowed.
   useEffect(() => {
@@ -10366,6 +10387,7 @@ function App() {
     setScanFlash(true);
     setTimeout(() => setScanFlash(false), 900);
     setCameraOpen(false);
+    if (parsed.kind === "w") { setScanOpen(null); setPage("creditControl"); return; }
     if (["e", "l", "a", "s"].includes(parsed.kind)) { setScanOpen(null); setHrScan({ kind: parsed.kind, id: parsed.id, n: Date.now() }); return; }
     if (parsed.kind === "hn") {
       const num = parsed.number;
@@ -10617,6 +10639,7 @@ function App() {
     portalRequests: <PortalRequestsPage currentUser={currentUser} onVerifyPortalPayment={onVerifyPortalPayment} settings={settings} />,
     paymentsDue: <PaymentsDuePage currentUser={currentUser} users={users} branches={branches} payments={visiblePayments} invoices={visibleInvoices} settings={settings} />,
     cashbook: <CashBookPage currentUser={currentUser} invoices={visibleInvoices} payments={visiblePayments} settings={settings} />,
+    creditControl: <CreditControlPage currentUser={currentUser} customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments} settings={settings} />,
     myHr: <MyHrPage currentUser={currentUser} settings={settings} />,
     employees: <EmployeesPage currentUser={currentUser} users={users} customers={customers} branches={branches} settings={settings} saveUser={saveUser} deleteUser={deleteUser} />,
     attendance: <AttendancePage currentUser={currentUser} />,
@@ -10652,7 +10675,7 @@ function App() {
         <Sidebar
           page={page} setPage={goPage} role={currentUser.role} onLogout={handleLogout}
           companyName={settings.companyName} logoUrl={settings.logoUrl}
-          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount, portalRequests: finAlerts.portalCount, deliverySchedule: finAlerts.deliveryCount, hrRequests: finAlerts.hrCount }}
+          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount, portalRequests: finAlerts.portalCount, deliverySchedule: finAlerts.deliveryCount, hrRequests: finAlerts.hrCount, creditControl: finAlerts.crCount }}
         />
         <div className="flex-1 min-w-0 flex flex-col">
           <AppHeader
@@ -10670,6 +10693,7 @@ function App() {
               <VoucherWorkspace key={scanOpen.n} voucherId={scanOpen.id} focusK={scanOpen.k} rev={scanOpen.r}
                 currentUser={currentUser} users={users} branches={branches} company={settings} onClose={() => setScanOpen(null)} />
             )}
+            <CrGateHost />
             {hrScan && <HrScanModal key={hrScan.n} target={hrScan} currentUser={currentUser} company={settings} onClose={() => setHrScan(null)} onOpenVoucher={openVoucherById} />}
           </main>
         </div>
@@ -13805,7 +13829,7 @@ function QrSvg({ text, sizeMm = 20, style }) {
    same time do not overwrite each other's vouchers.
    ============================================================ */
 
-const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets" };
+const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests" };
 
 const FIN_DEFAULT_SETTINGS = {
   categories: [
@@ -13862,7 +13886,7 @@ Object.entries(FIN_URDU).forEach(([en, ur]) => {
 
 /* ---------------- Store ---------------- */
 
-const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [] };
+const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [] };
 const finListeners = new Set();
 let finLoadPromise = null;
 let finChannel = null;
@@ -13883,7 +13907,7 @@ function finNormalizeSettings(s) {
 }
 function finNormalize(name, value) {
   if (name === "settings") return finNormalizeSettings(value);
-  if (name === "costs" || name === "portalProfiles" || name === "deliveryPlans") return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  if (name === "costs" || name === "portalProfiles" || name === "deliveryPlans" || name === "creditState") return value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return Array.isArray(value) ? value : [];
 }
 
@@ -15832,7 +15856,7 @@ function VoucherWorkspace({ voucherId, focusK, rev, currentUser, users, branches
 // What a scanner typed: a voucher / invoice QR link, or a plain voucher / invoice number.
 function finParseScan(text) {
   const s = String(text || "").trim();
-  const m = s.match(/verify=([ivelas])\.([^&\s]+)/);
+  const m = s.match(/verify=([ivelasw])\.([^&\s]+)/);
   if (m) {
     const k = s.match(/[&?]k=(\d+)/);
     const r = s.match(/[&?]r=(\d+)/);
@@ -16792,7 +16816,7 @@ function docVerifyUrl(kind, id) {
 function docVerifyParse() {
   try {
     const h = String(window.location.hash || "");
-    const m = h.match(/verify=([ivelas])\.([^&]+)/);
+    const m = h.match(/verify=([ivelasw])\.([^&]+)/);
     if (!m) return null;
     const k = h.match(/[&?]k=(\d+)/);
     const r = h.match(/[&?]r=(\d+)/);
@@ -16949,6 +16973,7 @@ function DocVerifyPage({ target, invoices, settings, onOpen }) {
     const inv = (invoices || []).find((i) => i.id === target.id) || null;
     return <InvoiceVerifyView invoice={inv} settings={settings} onOpen={onOpen} />;
   }
+  if (target.kind === "w") return <CrVerifyView target={target} settings={settings} onOpen={onOpen} />;
   if (["e", "l", "a", "s"].includes(target.kind)) return <HrVerifyView target={target} settings={settings} onOpen={onOpen} />;
   return <VoucherVerifyView voucherId={target.id} target={target} settings={settings} onOpen={onOpen} />;
 }
@@ -17626,6 +17651,8 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
 
   function placeOrder() {
     if (!cartItems.length) { alert(t("Choose at least one item.")); return; }
+    const crBlock = crPortalBlocked(customer, { invoices, payments, returns, exchanges, promises, transfers, adjustments });
+    if (crBlock) { alert(`${t(crBlock.label)} — ${t("Order abhi nahi ho sakta. Purana udhaar clear karein ya dukaan se rabta karein.")}`); return; }
     const noteParts = [orderInfo.site && `Site: ${orderInfo.site}`, orderInfo.receiver && `Receiver: ${orderInfo.receiver}`, orderInfo.notes, "Portal order"].filter(Boolean).join(" · ");
     const codes = onPortalOrders(cartItems.map(({ p, q }) => ({
       customerId: customer.id, customerName: customer.name, customerPhone: customer.phone || "",
@@ -17697,6 +17724,7 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
 
         {tab === "home" && (
           <>
+            <CrPortalBanner customer={customer} ctx={{ invoices, payments, returns, exchanges, promises, transfers, adjustments }} onPay={() => setSheet({ type: "pay" })} />
             <div className="grid grid-cols-4 gap-2 mx-3.5 mt-3">
               {[["🛒", "Order", () => setTab("order")], ["🔁", "Reorder", () => { setInvFilter("All"); setTab("invoices"); }], ["🏷️", "Today's rates", () => setTab("order")], ["🚚", "Delivery", () => { setInvFilter("All"); setTab("invoices"); }],
                 ["📦", "Booking", () => setSheet({ type: "bookings" })], ["🧮", "Calculator", () => setSheet({ type: "calc" })], ["🤝", "Promise a payment", () => setSheet({ type: "promise" })], ["💬", "Complaint / help", () => setSheet({ type: "help" })]].map(([ic, l, fn]) => (
@@ -18295,6 +18323,9 @@ const HR_ACTIONS = [
   { id: "voucher.approve", label: "Voucher approve karna" },
   { id: "voucher.pay", label: "Voucher pay karna (cashier)" },
   { id: "hr.approve", label: "Leave / advance approve, salary final" },
+  { id: "customer.login", label: "Customer ka portal login banana" },
+  { id: "credit.block", label: "Khata band / chalu, credit status" },
+  { id: "credit.override", label: "Red List / band customer ko udhaar ki ijazat" },
 ];
 const HR_NAV_GROUP = {
   title: "HR",
@@ -18309,11 +18340,11 @@ const HR_NAV_GROUP = {
 const HR_TEMPLATES = {
   manager: {
     label: "Manager", desc: "Invoice check, ledger, voucher approve, leave/advance approve",
-    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "deliverySchedule", "returns", "customers", "ledger", "payments", "promises", "vouchers", "paymentsDue", "reports", "attendance", "hrRequests", "voucher.create", "voucher.approve", "hr.approve"],
+    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "deliverySchedule", "returns", "customers", "ledger", "payments", "promises", "vouchers", "paymentsDue", "reports", "attendance", "hrRequests", "creditControl", "voucher.create", "voucher.approve", "hr.approve", "customer.login", "credit.block", "credit.override"],
   },
   clerk: {
     label: "Clerk", desc: "Invoice banana, payment add, voucher banana",
-    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "customers", "ledger", "payments", "vouchers", "voucher.create"],
+    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "customers", "ledger", "payments", "vouchers", "creditControl", "voucher.create", "customer.login"],
   },
   cashier: {
     label: "Cashier", desc: "Voucher pay, payments due, cash book",
@@ -20079,6 +20110,881 @@ function HrVerifyView({ target, settings, onOpen }) {
       <VerifyRow l="Payment" v={paid ? "Paid" : "Not paid yet"} tone={paid ? "text-emerald-600" : "text-amber-600"} />
       <div className="text-[12px] text-slate-400 mt-3">Salary details are visible to staff only.</div>
     </VerifyShell>
+  );
+}
+
+/* ============================================================
+   CREDIT CONTROL — udhaar rules
+   60 din se purana udhaar → 3 warnings (10 din faasla) → Red List
+   → purana udhaar clear → Watch (har naya udhaar admin approval se).
+   Admin / access wala kisi bhi customer ka khata band / chalu kar sakta hai.
+   Storage:
+     ct-credit-state    { custId: { warnings[], red, watch, block, bounces[], promiseSeen[], promiseCarry } }
+     ct-credit-log      [{ id, customerId, customerName, type, at, by, note }]
+     ct-credit-requests [{ id, number CRQ-0001, customerId, amount, status, decision, ... }]
+   Rules live in the finance settings under "credit".
+   ============================================================ */
+
+const CR_DEFAULTS = {
+  enabled: true, normalDays: 60, remindDay: 45, warnings: 3, gapDays: 10, redAfterDays: 10,
+  cashOnRed: true, watchPayments: 3, newCustomerMode: "auto", bounceWarn: true, bounceRedCount: 2,
+  promiseBreakWarn: 2, noDiscountOnRed: true, passDays: 3,
+};
+function crSettingsOf(s) {
+  const c = (s && s.credit) || {};
+  const out = { ...CR_DEFAULTS, ...c };
+  ["normalDays", "remindDay", "warnings", "gapDays", "redAfterDays", "watchPayments", "bounceRedCount", "promiseBreakWarn", "passDays"].forEach((k) => {
+    const n = Number(out[k]);
+    out[k] = Number.isFinite(n) && n >= 0 ? n : CR_DEFAULTS[k];
+  });
+  out.warnings = Math.max(1, out.warnings);
+  return out;
+}
+const CR_MODES = { auto: "Auto (rules ke mutabiq)", cash: "Sirf cash", approval: "Hamesha approval" };
+
+/* ---------------- Aging ---------------- */
+
+function crCtxKey(ctx) {
+  return [ctx.invoices, ctx.payments, ctx.returns, ctx.exchanges, ctx.promises, ctx.transfers, ctx.adjustments, ctx.customers];
+}
+// Payments clear the oldest bills first, so the unpaid part is the newest bills.
+function crAgingFrom(out, custInvoices, today, normalDays) {
+  let left = Math.max(0, Number(out) || 0);
+  const bills = [];
+  let oldest = 0, overdue = 0;
+  const sorted = [...custInvoices].sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  for (const inv of sorted) {
+    if (left <= 0.5) break;
+    const take = Math.min(left, Number(inv.total) || 0);
+    if (take <= 0) continue;
+    const age = Math.max(0, finDaysBetween(inv.date, today));
+    bills.push({ id: inv.id, number: inv.number, date: inv.date, age, left: roundMoney(take) });
+    oldest = Math.max(oldest, age);
+    if (age >= normalDays) overdue += take;
+    left -= take;
+  }
+  if (left > 0.5) { bills.push({ id: "opening", number: "Opening", date: "", age: 999, left: roundMoney(left) }); oldest = Math.max(oldest, 999); overdue += left; }
+  bills.sort((a, b) => b.age - a.age);
+  return { out: roundMoney(Math.max(0, Number(out) || 0)), oldest, overdue: roundMoney(overdue), bills };
+}
+function crAgingAll(ctx, today, normalDays) {
+  const outById = computeOutstandingByCustomer(ctx.customers || [], ctx.invoices || [], ctx.payments || [], ctx.returns || [], ctx.exchanges || [], ctx.promises || [], ctx.transfers || [], ctx.adjustments || []);
+  const byCust = new Map();
+  (ctx.invoices || []).forEach((i) => {
+    if (isInvoiceCancelled(i) || i.customerType === "Cash") return;
+    if (!byCust.has(i.customerId)) byCust.set(i.customerId, []);
+    byCust.get(i.customerId).push(i);
+  });
+  const res = {};
+  (ctx.customers || []).forEach((c) => { res[c.id] = crAgingFrom(outById[c.id] || 0, byCust.get(c.id) || [], today, normalDays); });
+  return res;
+}
+function crAgingOne(cust, ctx, today, normalDays) {
+  return crAgingAll({ ...ctx, customers: [cust] }, today, normalDays)[cust.id];
+}
+
+/* ---------------- Status ---------------- */
+
+function crBlockActive(b, ag, today) {
+  if (!b) return false;
+  if (b.until && today > b.until) return false;
+  if (b.untilPaid && ag && ag.out <= 0.5) return false;
+  return true;
+}
+const CR_TONE = {
+  green: "bg-emerald-400/15 text-emerald-500", remind: "bg-yellow-400/15 text-yellow-500", warning: "bg-orange-400/15 text-orange-500",
+  red: "bg-rose-500/20 text-rose-500", blocked: "bg-rose-500/20 text-rose-500", watch: "bg-sky-400/15 text-sky-500",
+  cash: "bg-violet-400/15 text-violet-500", approval: "bg-sky-400/15 text-sky-500",
+};
+function crStatusOf(cust, ag, st, cs, today) {
+  st = st || {};
+  ag = ag || { out: 0, oldest: 0, overdue: 0, bills: [] };
+  const ws = st.warnings || [];
+  const mode = cust.creditMode || "auto";
+  const base = { warningsN: ws.length, W: cs.warnings, needApproval: false, blockAll: false, portalBlocked: false, lines: [] };
+  if (crBlockActive(st.block, ag, today)) {
+    const b = st.block;
+    return { ...base, key: "blocked", label: b.mode === "all" ? "Khata band" : "Udhaar band", icon: "🔒", needApproval: true, blockAll: b.mode === "all", portalBlocked: true,
+      lines: [`Band kiya: ${b.by} · ${fmtDate(b.at)}`, `Wajah: ${b.reason}`, b.mode === "all" ? "Koi maal nahi — cash par bhi nahi." : "Udhaar par maal nahi — sirf poora cash.", b.until ? `${fmtDate(b.until)} tak` : b.untilPaid ? "Poori payment aane tak" : ""].filter(Boolean) };
+  }
+  if (st.red) {
+    return { ...base, key: "red", label: "Red List", icon: "⛔", needApproval: true, blockAll: !cs.cashOnRed, portalBlocked: true,
+      lines: [`Udhaar ${fmtMoney(ag.out)} · sab se purana bill ${ag.oldest >= 999 ? "opening" : ag.oldest + " din"} · ${ws.length}/${cs.warnings} warnings`, `Red List se: ${fmtDate(st.red.since)}`, cs.cashOnRed ? "Jab tak purana udhaar clear na ho, udhaar par maal nahi — sirf poora cash." : "Jab tak purana udhaar clear na ho, koi maal nahi."] };
+  }
+  if (mode === "cash") return { ...base, key: "cash", label: "Sirf cash", icon: "💵", needApproval: true, lines: ["Is customer ko sirf cash par maal milta hai (admin setting)."] };
+  if (ws.length > 0) {
+    const last = ws[ws.length - 1];
+    const next = ws.length >= cs.warnings ? `Red List · ${fmtDate(finAddDays(last.date, cs.redAfterDays))}` : `Warning ${ws.length + 1} · ${fmtDate(finAddDays(last.date, cs.gapDays))}`;
+    return { ...base, key: "warning", label: `Warning ${ws.length}/${cs.warnings}`, icon: "⚠", next, lines: [`Udhaar ${fmtMoney(ag.out)} · ${ag.oldest >= 999 ? "opening" : ag.oldest + " din"} purana`, `Agla qadam: ${next}`] };
+  }
+  if (st.watch) return { ...base, key: "watch", label: "Watch", icon: "👁", needApproval: true, lines: [`Red List se nikla: ${fmtDate(st.watch.since)}`, `Har naye udhaar par approval — ${cs.watchPayments} payments time par hone tak.`] };
+  if (mode === "approval") return { ...base, key: "approval", label: "Approval", icon: "✋", needApproval: true, lines: ["Har naye udhaar invoice par admin approval (customer setting)."] };
+  if (ag.out > 0.5 && ag.oldest >= cs.remindDay) return { ...base, key: "remind", label: "Yaad-dihani", icon: "🔔", lines: [`${ag.oldest} din purana udhaar — ${Math.max(0, cs.normalDays - ag.oldest)} din mein warning`] };
+  return { ...base, key: "green", label: "Green", icon: "🟢" };
+}
+function CrPill({ s }) {
+  return <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[11.5px] font-bold whitespace-nowrap ${CR_TONE[s.key] || CR_TONE.green}`}>{s.icon} {t(s.label)}</span>;
+}
+function CrDots({ n, W }) {
+  return <span className="inline-flex gap-1 align-middle">{Array.from({ length: W }).map((_, i) => <i key={i} className={`inline-block w-4 h-2 rounded ${i < n ? "bg-orange-500" : "bg-slate-400/30"}`} />)}</span>;
+}
+// A / B / C from the last 6 months.
+function crGrade(st, ag, logs, today) {
+  const from = finAddDays(today, -180);
+  const recent = (logs || []).filter((l) => String(l.at).slice(0, 10) >= from);
+  const bounces = recent.filter((l) => l.type === "bounce").length;
+  const reds = recent.filter((l) => l.type === "red").length;
+  const warns = recent.filter((l) => l.type === "warning").length;
+  if ((st && (st.red || crBlockActive(st.block, ag, today))) || reds || bounces) return { g: "C", tone: "text-rose-500" };
+  if (warns || (ag && ag.oldest > 30 && ag.out > 0.5)) return { g: "B", tone: "text-amber-500" };
+  return { g: "A", tone: "text-emerald-500" };
+}
+
+/* ---------------- Automatic sweep ---------------- */
+
+function crSweep(ctx, settings, cur, today) {
+  const cs = crSettingsOf(settings);
+  const next = { ...cur };
+  const logs = [];
+  if (!cs.enabled) return { next, logs };
+  const aging = crAgingAll(ctx, today, cs.normalDays);
+  const broken = {};
+  (ctx.promises || []).forEach((p) => {
+    if (p.status === "Deleted") return;
+    if (computePromiseStatus(p) === "Broken Promise") (broken[p.customerId] = broken[p.customerId] || []).push(p.id);
+  });
+  const payCount = {};
+  (ctx.customers || []).forEach((c) => {
+    const ag = aging[c.id];
+    const st0 = cur[c.id] || {};
+    let st = { ...st0 };
+    const add = (type, note) => logs.push({ id: uid("crl"), customerId: c.id, customerName: c.name, type, at: new Date().toISOString(), by: "System", note });
+    if (st.block && !crBlockActive(st.block, ag, today)) { add("unblock", st.block.until && today > st.block.until ? "Muddat khatam" : "Payment aa gayi"); st.block = null; }
+    // Broken promises → warning
+    const ids = broken[c.id] || [];
+    const seen = st.promiseSeen || [];
+    const fresh = ids.filter((id) => !seen.includes(id));
+    if (fresh.length && cs.promiseBreakWarn > 0) {
+      let carry = (Number(st.promiseCarry) || 0) + fresh.length;
+      let ws = [...(st.warnings || [])];
+      while (carry >= cs.promiseBreakWarn) {
+        carry -= cs.promiseBreakWarn;
+        if (!st.red && ws.length < cs.warnings) { ws.push({ id: uid("wrn"), n: ws.length + 1, date: today, kind: "promise", note: `${cs.promiseBreakWarn} wade toote` }); add("warning", `Warning ${ws.length} — wade toote`); }
+      }
+      st = { ...st, warnings: ws, promiseSeen: [...seen, ...fresh], promiseCarry: carry };
+    }
+    if (st.red) {
+      const done = ag.overdue <= 0.5 && (st.red.kind === "auto" || !st.red.kind || ag.out <= 0.5);
+      if (done) { add("unred", "Purana udhaar clear — Watch mein"); st = { ...st, red: null, warnings: [], watch: { since: today } }; }
+    } else {
+      let ws = [...(st.warnings || [])];
+      if (ag.overdue > 0.5) {
+        const last = ws[ws.length - 1];
+        if (ws.length < cs.warnings && (!last || finDaysBetween(last.date, today) >= cs.gapDays)) {
+          ws.push({ id: uid("wrn"), n: ws.length + 1, date: today, kind: "auto" });
+          add("warning", `Warning ${ws.length}/${cs.warnings} · ${ag.oldest >= 999 ? "opening" : ag.oldest + " din"} · ${fmtMoney(ag.out)}`);
+        } else if (ws.length >= cs.warnings && last && finDaysBetween(last.date, today) >= cs.redAfterDays) {
+          st.red = { since: today, kind: "auto" };
+          st.watch = null;
+          add("red", `${cs.warnings} warnings ke baad · ${fmtMoney(ag.out)}`);
+        }
+      } else if (ws.length) {
+        // Old udhaar paid — auto warnings go; bounce / promise warnings stay 60 days.
+        const keep = ws.filter((w) => w.kind !== "auto" && finDaysBetween(w.date, today) < 60);
+        if (keep.length !== ws.length) { add("cleared", "Purana udhaar clear — warnings khatam"); ws = keep.map((w, i) => ({ ...w, n: i + 1 })); }
+      }
+      st.warnings = ws;
+    }
+    if (st.watch && !st.red) {
+      if (payCount[c.id] == null) payCount[c.id] = (ctx.payments || []).filter((p) => p.customerId === c.id && p.date > st.watch.since && (Number(p.amount) || 0) > 0).length;
+      if (payCount[c.id] >= cs.watchPayments && ag.oldest < cs.normalDays) { add("watchEnd", `${payCount[c.id]} payments time par`); st.watch = null; }
+    }
+    const clean = (o) => JSON.stringify({ w: o.warnings || [], r: o.red || null, wa: o.watch || null, b: o.block || null, ps: o.promiseSeen || [], pc: o.promiseCarry || 0 });
+    if (clean(st) !== clean(st0)) next[c.id] = st;
+  });
+  return { next, logs };
+}
+
+/* ---------------- Actions ---------------- */
+
+async function crLog(entries) {
+  if (!entries.length) return;
+  await finMutate("creditLog", (l) => [...l, ...entries].slice(-5000));
+}
+function crLogEntry(cust, type, by, note) {
+  return { id: uid("crl"), customerId: cust.id, customerName: cust.name, type, at: new Date().toISOString(), by, note: note || "" };
+}
+async function crPatchState(custId, fn) {
+  await finMutate("creditState", (s) => ({ ...s, [custId]: fn({ ...(s[custId] || {}) }) }));
+}
+function crFindPass(custId, newCredit, today) {
+  const cs = crSettingsOf(finState.settings);
+  return finState.creditRequests.find((r) => r.customerId === custId && r.status === "Approved"
+    && String(r.decision && r.decision.at).slice(0, 10) >= finAddDays(today, -cs.passDays)
+    && (Number(r.approvedCredit) || 0) + 0.5 >= newCredit) || null;
+}
+function crWarnText(cust, ag, w, cs, company) {
+  const due = finAddDays(w.date, w.n >= cs.warnings ? cs.redAfterDays : cs.gapDays);
+  return [
+    `*${company.companyName}*`,
+    `Assalam o Alaikum ${cust.name},`,
+    `⚠ Payment Warning ${w.n}/${cs.warnings}`,
+    `Aap ka udhaar *${fmtMoney(ag.out)}* hai${ag.oldest < 999 ? ` — sab se purana bill ${ag.oldest} din purana` : ""}.`,
+    `Meharbani kar ke *${fmtDate(due)}* tak payment karein.`,
+    w.n >= cs.warnings ? "Ye aakhri warning hai — is ke baad naya maal udhaar par band ho jayega." : `${cs.warnings} warnings ke baad naya maal udhaar par band ho jayega.`,
+    company.companyPhone ? `Rabta: ${company.companyPhone}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+/* ---------------- Invoice gate ---------------- */
+
+let crGateSetter = null;
+function CrGateHost() {
+  const [g, setG] = useState(null);
+  useEffect(() => { crGateSetter = setG; return () => { crGateSetter = null; }; }, []);
+  if (!g) return null;
+  return <CrGateModal g={g} onClose={() => setG(null)} />;
+}
+function crGateInvoice(inv, editing, ctx, currentUser, proceed) {
+  if (editing || !inv || inv.customerType === "Cash") return proceed(inv);
+  const cs = crSettingsOf(finState.settings);
+  if (!cs.enabled) return proceed(inv);
+  const cust = (ctx.customers || []).find((c) => c.id === inv.customerId);
+  if (!cust) return proceed(inv);
+  const today = todayISO();
+  const ag = crAgingOne(cust, ctx, today, cs.normalDays);
+  const st = finState.creditState[cust.id] || {};
+  const s = crStatusOf(cust, ag, st, cs, today);
+  const newCredit = roundMoney(Math.max(0, Number(inv.balanceDue) || 0));
+  const limit = Number(cust.creditLimit) || 0;
+  const overLimit = limit > 0 && newCredit > 0.5 && ag.out + newCredit > limit + 0.5;
+  const discountBlocked = cs.noDiscountOnRed && (s.key === "red" || s.key === "blocked") && Number(inv.discount) > 0;
+  const needs = s.blockAll || discountBlocked || (newCredit > 0.5 && (s.needApproval || overLimit));
+  if (!needs) return proceed(inv);
+  const pass = crFindPass(cust.id, newCredit, today);
+  if (pass) {
+    finMutate("creditRequests", (l) => l.map((r) => (r.id === pass.id ? { ...r, status: "Used", usedInvoice: inv.number, usedAt: new Date().toISOString() } : r)));
+    crLog([crLogEntry(cust, "used", currentUser.name || currentUser.username, `${pass.number} → ${inv.number}`)]);
+    return proceed({ ...inv, creditApproval: { by: pass.decision.by, at: pass.decision.at, ref: pass.number, credit: newCredit } });
+  }
+  if (!crGateSetter) { alert(`${cust.name}: ${s.label}. ${s.lines.join(" ")}`); return undefined; }
+  crGateSetter({ inv, cust, ag, s, cs, newCredit, overLimit, limit, discountBlocked, proceed, currentUser });
+  return undefined;
+}
+
+function CrGateModal({ g, onClose }) {
+  useLanguage();
+  const fin = useFin();
+  const { inv, cust, ag, s, cs, newCredit, overLimit, limit, discountBlocked, proceed, currentUser } = g;
+  const [reason, setReason] = useState("");
+  const [sent, setSent] = useState(null);
+  const canOverride = hrAllow(currentUser, "credit.override");
+  const actor = finActor(currentUser);
+  const today = todayISO();
+  const mine = fin.creditRequests.filter((r) => r.customerId === cust.id && String(r.createdAt).slice(0, 10) >= finAddDays(today, -cs.passDays)).sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+  const lastReq = mine[0];
+  const cashOk = !s.blockAll && !discountBlocked && newCredit > 0.5;
+  const title = s.key === "green" || s.key === "remind" || s.key === "warning" ? (overLimit ? "Credit limit se zyada" : s.label) : s.label;
+  function asCash() {
+    onClose();
+    proceed({ ...inv, paymentReceived: roundMoney((Number(inv.paymentReceived) || 0) + newCredit), balanceDue: 0, status: "Paid" });
+  }
+  async function override() {
+    if (!reason.trim()) { alert(t("Wajah likhein.")); return; }
+    await crLog([crLogEntry(cust, "override", actor.name, `${inv.number} · udhaar ${fmtMoney(newCredit)} · ${reason.trim()}`)]);
+    onClose();
+    proceed({ ...inv, creditApproval: { by: actor.name, at: new Date().toISOString(), ref: "Override", credit: newCredit, note: reason.trim() } });
+  }
+  async function request() {
+    if (!reason.trim()) { alert(t("Wajah likhein.")); return; }
+    let rec = null;
+    await finMutate("creditRequests", (l) => {
+      rec = {
+        id: uid("crq"), number: hrNextNo(l, "CRQ"), customerId: cust.id, customerName: cust.name, amount: newCredit, total: Number(inv.total) || 0,
+        items: (inv.items || []).map((it) => `${fmtQty(it.qty)} ${it.unit || ""} ${it.name}`).join(", "), discount: Number(inv.discount) || 0,
+        statusKey: s.key, statusLabel: s.label, out: ag.out, oldest: ag.oldest, overLimit, reason: reason.trim(), status: "Pending",
+        createdBy: actor, createdAt: new Date().toISOString(),
+      };
+      return [...l, rec];
+    });
+    await crLog([crLogEntry(cust, "request", actor.name, `${rec.number} · ${fmtMoney(newCredit)} · ${reason.trim()}`)]);
+    setSent(rec);
+  }
+  return (
+    <Modal title={`${t("Credit check")} — ${cust.name}`} onClose={onClose}>
+      <div className="rounded-2xl p-4 bg-rose-500/10 border border-rose-500/30">
+        <div className="text-[17px] font-black text-rose-500">{s.icon} {cust.name} — {t(title)}</div>
+        <div className="text-[13px] ct-t2 mt-1 space-y-0.5">
+          {s.lines.map((l, i) => <div key={i}>{l}</div>)}
+          {overLimit && <div>{t("Credit limit")} {fmtMoney(limit)} · {t("pehle")} {fmtMoney(ag.out)} + {t("naya")} {fmtMoney(newCredit)}</div>}
+          {discountBlocked && <div className="font-bold">{t("Red List / band khate par discount nahi diya ja sakta.")}</div>}
+          <div>{t("Is invoice ka udhaar")}: <b className="ct-h">{fmtMoney(newCredit)}</b></div>
+        </div>
+      </div>
+      {lastReq && !sent && (
+        <div className={`mt-3 rounded-xl px-3 py-2.5 text-[13px] font-semibold ${lastReq.status === "Approved" ? "bg-emerald-400/10 text-emerald-600" : lastReq.status === "Pending" ? "bg-amber-400/10 text-amber-600" : "bg-slate-400/10 ct-t2"}`}>
+          {lastReq.number}: {t(lastReq.status)}
+          {lastReq.status === "Approved" && ` — ${t("max udhaar")} ${fmtMoney(lastReq.approvedCredit)}. ${t("Payment Received mein kam az kam")} ${fmtMoney(Math.max(0, newCredit - lastReq.approvedCredit))} ${t("aur likhein")}.`}
+          {lastReq.status === "Rejected" && lastReq.decision && ` — ${lastReq.decision.by}${lastReq.decision.note ? ": " + lastReq.decision.note : ""}`}
+        </div>
+      )}
+      {sent ? (
+        <div className="mt-4 rounded-xl bg-emerald-400/10 text-emerald-600 px-3 py-3 text-[13.5px] font-semibold">
+          ✓ {sent.number} {t("bhej di.")} {t("Approve hone par isi invoice ko dobara “Save” karein.")}
+          <div className="flex justify-end mt-3"><Btn onClick={onClose}>{t("Theek hai")}</Btn></div>
+        </div>
+      ) : (
+        <>
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-4 mb-2">{t("Ab kya karein?")}</div>
+          {cashOk && <button type="button" onClick={asCash} className="w-full text-start rounded-xl ct-chip px-4 py-3 mb-2 font-bold ct-h">💵 {t("Poora cash le kar do")} <span className="font-normal ct-t2 text-[12.5px]">— {t("payment")} {fmtMoney((Number(inv.paymentReceived) || 0) + newCredit)}, {t("udhaar 0")}</span></button>}
+          <Field label={canOverride ? "Wajah (zaroori) — aap ke paas ijazat ki access hai" : "Wajah (admin ko jayegi)"}>
+            <input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} placeholder={t("e.g. 15 tareekh ko payment ka wada")} />
+          </Field>
+          <div className="flex flex-wrap gap-2 justify-end">
+            <Btn variant="ghost" onClick={onClose}>{t("Wapis jao")}</Btn>
+            {canOverride ? <Btn onClick={override}>✓ {t("Meri ijazat se de do")}</Btn> : <Btn onClick={request}>📩 {t("Admin se ijazat maango")}</Btn>}
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+/* ---------------- Modals: block, pass, bounce, decide ---------------- */
+
+function CrBlockModal({ cust, currentUser, company, unblock, onClose }) {
+  const [f, setF] = useState({ mode: "credit", untilKind: "open", until: finAddDays(todayISO(), 30), reason: "", notify: true, portalView: true });
+  const actor = finActor(currentUser);
+  async function save() {
+    if (!f.reason.trim()) { alert(t("Wajah likhein.")); return; }
+    if (unblock) {
+      await crPatchState(cust.id, (s) => ({ ...s, block: null }));
+      await crLog([crLogEntry(cust, "unblock", actor.name, f.reason.trim())]);
+    } else {
+      const block = { mode: f.mode, until: f.untilKind === "date" ? f.until : "", untilPaid: f.untilKind === "paid", reason: f.reason.trim(), by: actor.name, byKey: actor.key, at: new Date().toISOString(), portalView: f.portalView };
+      await crPatchState(cust.id, (s) => ({ ...s, block }));
+      await crLog([crLogEntry(cust, "block", actor.name, `${f.mode === "all" ? "Poora khata" : "Udhaar"} band · ${f.reason.trim()}`)]);
+      if (f.notify && cust.phone) {
+        const msg = [`*${company.companyName}*`, `${cust.name}, aap ka khata ${f.mode === "all" ? "band" : "udhaar ke liye band"} kar diya gaya hai.`, `Wajah: ${f.reason.trim()}`, company.companyPhone ? `Rabta: ${company.companyPhone}` : ""].filter(Boolean).join("\n");
+        try { window.open(waLink(cust.phone, msg), "_blank"); } catch {}
+      }
+    }
+    onClose();
+  }
+  const seg = (val, cur, label, set) => <button key={val} type="button" onClick={() => set(val)} className={`flex-1 rounded-xl px-3 py-2.5 text-[13px] font-bold border-2 text-start ${cur === val ? "border-emerald-500 bg-emerald-500/10 ct-h" : "border-transparent ct-chip ct-t2"}`}>{label}</button>;
+  return (
+    <Modal title={unblock ? `🔓 ${t("Khata kholo")} — ${cust.name}` : `🔒 ${t("Khata band karein")} — ${cust.name}`} onClose={onClose}>
+      {!unblock && (
+        <>
+          <div className="text-[12.5px] font-semibold text-slate-600 mb-1.5">{t("Kya band karna hai?")}</div>
+          <div className="flex flex-col gap-1.5 mb-4">
+            {seg("credit", f.mode, `⛔ ${t("Sirf udhaar band — cash par maal mil sakta hai")}`, (v) => setF({ ...f, mode: v }))}
+            {seg("all", f.mode, `🚫 ${t("Poora khata band — koi maal nahi (cash bhi nahi)")}`, (v) => setF({ ...f, mode: v }))}
+          </div>
+          <div className="text-[12.5px] font-semibold text-slate-600 mb-1.5">{t("Kab tak?")}</div>
+          <div className="flex gap-1.5 mb-3">
+            {seg("open", f.untilKind, t("Jab tak khud na kholein"), (v) => setF({ ...f, untilKind: v }))}
+            {seg("date", f.untilKind, t("Date tak"), (v) => setF({ ...f, untilKind: v }))}
+            {seg("paid", f.untilKind, t("Payment aane tak"), (v) => setF({ ...f, untilKind: v }))}
+          </div>
+          {f.untilKind === "date" && <Field label="Date"><input type="date" className={inputCls} value={f.until} onChange={(e) => setF({ ...f, until: e.target.value })} /></Field>}
+        </>
+      )}
+      <Field label="Wajah (zaroori)"><input className={inputCls} value={f.reason} onChange={(e) => setF({ ...f, reason: e.target.value })} /></Field>
+      {!unblock && <label className="flex items-center gap-2 text-[13px] ct-t2 mb-1"><input type="checkbox" checked={f.notify} onChange={(e) => setF({ ...f, notify: e.target.checked })} />{t("Customer ko WhatsApp par batao")}</label>}
+      {!unblock && <div className="text-[12px] ct-t3 mb-2">{t("Portal par customer apna hisaab dekh sakega, order / booking band rahegi.")}</div>}
+      <div className="flex gap-2 justify-end mt-3"><Btn variant="ghost" onClick={onClose}>Cancel</Btn>{unblock ? <Btn onClick={save}>🔓 {t("Khata kholo")}</Btn> : <Btn variant="danger" onClick={save}>🔒 {t("Khata band karo")}</Btn>}</div>
+    </Modal>
+  );
+}
+
+function CrPassModal({ cust, currentUser, onClose }) {
+  const [amt, setAmt] = useState("");
+  const [reason, setReason] = useState("");
+  const actor = finActor(currentUser);
+  async function save() {
+    if (!reason.trim()) { alert(t("Wajah likhein.")); return; }
+    const a = roundMoney(Number(amt) || 0);
+    let rec = null;
+    await finMutate("creditRequests", (l) => {
+      rec = { id: uid("crq"), number: hrNextNo(l, "CRQ"), customerId: cust.id, customerName: cust.name, amount: a, approvedCredit: a, reason: reason.trim(), status: "Approved", createdBy: actor, createdAt: new Date().toISOString(), decision: { by: actor.name, key: actor.key, at: new Date().toISOString(), kind: "pass", note: reason.trim() } };
+      return [...l, rec];
+    });
+    await crLog([crLogEntry(cust, "approve", actor.name, `${rec.number} · Is baar de do · max ${fmtMoney(a)} · ${reason.trim()}`)]);
+    onClose();
+  }
+  return (
+    <Modal title={`🔓 ${t("Is baar de do")} — ${cust.name}`} onClose={onClose}>
+      <div className="text-[13px] ct-t2 mb-3">{t("Agle ek invoice ke liye ijazat (kuch din ke andar). Clerk invoice Save karega to khud lag jayegi.")}</div>
+      <Field label="Zyada se zyada udhaar (Rs)"><input type="number" className={inputCls} value={amt} onChange={(e) => setAmt(e.target.value)} placeholder="0 = sirf cash par maal" /></Field>
+      <Field label="Wajah (zaroori)"><input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+      <div className="flex gap-2 justify-end"><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={save}>✓ {t("Ijazat do")}</Btn></div>
+    </Modal>
+  );
+}
+
+function CrBounceModal({ cust, currentUser, onClose }) {
+  const [f, setF] = useState({ date: todayISO(), amount: "", chequeNo: "", note: "" });
+  const actor = finActor(currentUser);
+  async function save() {
+    const cs = crSettingsOf(finState.settings);
+    const today = todayISO();
+    const logs = [crLogEntry(cust, "bounce", actor.name, `Cheque ${f.chequeNo || ""} · ${fmtMoney(Number(f.amount) || 0)}${f.note ? " · " + f.note : ""}`)];
+    await crPatchState(cust.id, (s) => {
+      const bounces = [...(s.bounces || []), { date: f.date, amount: Number(f.amount) || 0, chequeNo: f.chequeNo, note: f.note, by: actor.name }];
+      const recent = bounces.filter((b) => b.date >= finAddDays(today, -180)).length;
+      let ws = [...(s.warnings || [])];
+      let red = s.red;
+      if (cs.bounceRedCount > 0 && recent >= cs.bounceRedCount && !red) { red = { since: today, kind: "bounce" }; logs.push(crLogEntry(cust, "red", "System", `${recent} cheque bounce`)); }
+      else if (cs.bounceWarn && !red && ws.length < cs.warnings) { ws.push({ id: uid("wrn"), n: ws.length + 1, date: today, kind: "bounce", note: "Cheque bounce" }); logs.push(crLogEntry(cust, "warning", "System", `Warning ${ws.length} — cheque bounce`)); }
+      return { ...s, bounces, warnings: ws, red, watch: red ? null : s.watch };
+    });
+    await crLog(logs);
+    onClose();
+  }
+  return (
+    <Modal title={`↩ ${t("Cheque bounce")} — ${cust.name}`} onClose={onClose}>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Date"><input type="date" className={inputCls} value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} /></Field>
+        <Field label="Amount"><input type="number" className={inputCls} value={f.amount} onChange={(e) => setF({ ...f, amount: e.target.value })} /></Field>
+        <Field label="Cheque no"><input className={inputCls} value={f.chequeNo} onChange={(e) => setF({ ...f, chequeNo: e.target.value })} /></Field>
+        <Field label="Note"><input className={inputCls} value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} /></Field>
+      </div>
+      <div className="text-[12px] ct-t3 -mt-2 mb-3">{t("Bounce par ek warning; 6 mahine mein 2 bounce = Red List (settings se badal sakte hain). Payment ka record Payments page se theek karein.")}</div>
+      <div className="flex gap-2 justify-end"><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn variant="danger" onClick={save}>{t("Bounce darj karo")}</Btn></div>
+    </Modal>
+  );
+}
+
+function CrUnredModal({ cust, currentUser, onClose }) {
+  const [reason, setReason] = useState("");
+  const actor = finActor(currentUser);
+  async function save() {
+    if (!reason.trim()) { alert(t("Wajah likhein.")); return; }
+    await crPatchState(cust.id, (s) => ({ ...s, red: null, warnings: [], watch: { since: todayISO() } }));
+    await crLog([crLogEntry(cust, "unred", actor.name, `Haath se · ${reason.trim()}`)]);
+    onClose();
+  }
+  return (
+    <Modal title={`${t("Red List se nikalo")} — ${cust.name}`} onClose={onClose}>
+      <div className="text-[13px] ct-t2 mb-3">{t("Customer Watch mein chala jayega — har naye udhaar par approval.")}</div>
+      <Field label="Wajah (zaroori)"><input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} /></Field>
+      <div className="flex gap-2 justify-end"><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={save}>{t("Nikalo")}</Btn></div>
+    </Modal>
+  );
+}
+
+function CrDecideModal({ req, currentUser, onClose }) {
+  const fin = useFin();
+  const [note, setNote] = useState("");
+  const actor = finActor(currentUser);
+  const logs = fin.creditLog.filter((l) => l.customerId === req.customerId);
+  async function decide(kind) {
+    const cur = finState.creditRequests.find((r) => r.id === req.id);
+    if (!cur || cur.status !== "Pending") { alert(`${t("Already")} ${t(cur ? cur.status : "")}`); onClose(); return; }
+    const approved = kind === "credit" ? req.amount : kind === "half" ? roundMoney(req.amount / 2) : 0;
+    const status = kind === "reject" ? "Rejected" : "Approved";
+    await finMutate("creditRequests", (l) => l.map((r) => (r.id === req.id ? { ...r, status, approvedCredit: approved, decision: { by: actor.name, key: actor.key, at: new Date().toISOString(), kind, note: note.trim() } } : r)));
+    const label = { credit: "Udhaar de do", half: "Aadha cash, aadha udhaar", cash: "Sirf cash", reject: "Mana" }[kind];
+    await crLog([{ id: uid("crl"), customerId: req.customerId, customerName: req.customerName, type: kind === "reject" ? "reject" : "approve", at: new Date().toISOString(), by: actor.name, note: `${req.number} · ${label}${note.trim() ? " · " + note.trim() : ""}` }]);
+    onClose();
+  }
+  const row = (l, v, tone) => <div className="flex justify-between gap-3 py-1.5 border-b border-slate-200/60 text-[13.5px]"><span className="ct-t2">{t(l)}</span><b className={tone || "ct-h"}>{v}</b></div>;
+  return (
+    <Modal title={`${t("Credit approval")} — ${req.number}`} onClose={onClose}>
+      {row("Customer", `${req.customerName} · ${req.statusLabel || ""}`)}
+      {row("Naya maal", `${req.items || "—"} · ${fmtMoney(req.total)}`)}
+      {row("Is invoice ka udhaar", fmtMoney(req.amount), "text-rose-500")}
+      {row("Pehle se udhaar", `${fmtMoney(req.out)} (${req.oldest >= 999 ? "opening" : req.oldest + " din"})`)}
+      {req.discount > 0 && row("Discount", fmtMoney(req.discount))}
+      {row("Pichle 6 mahine", `${logs.filter((l) => l.type === "warning").length} warnings · ${logs.filter((l) => l.type === "bounce").length} bounce · ${logs.filter((l) => l.type === "red").length} red`)}
+      {row("Clerk", `${req.createdBy ? req.createdBy.name : "—"} · "${req.reason}"`)}
+      <Field label="Note (optional)"><input className={`${inputCls} mt-3`} value={note} onChange={(e) => setNote(e.target.value)} /></Field>
+      <div className="flex flex-wrap gap-2 justify-end">
+        <Btn onClick={() => decide("credit")}>✓ {t("Udhaar de do")}</Btn>
+        <Btn variant="ghost" onClick={() => decide("half")}>½ {t("Aadha cash, aadha udhaar")}</Btn>
+        <Btn variant="ghost" onClick={() => decide("cash")}>💵 {t("Sirf cash")}</Btn>
+        <Btn variant="danger" onClick={() => decide("reject")}>✕ {t("Mana")}</Btn>
+      </div>
+      <div className="text-[12px] ct-t3 mt-3">{t("Ijazat sirf ek invoice ke liye hai. Faisla, naam aur waqt log mein save hota hai.")}</div>
+    </Modal>
+  );
+}
+
+/* ---------------- Warning letter ---------------- */
+
+function crFindWarning(fin, id) {
+  const [cid, wid] = String(id).split("~");
+  const st = fin.creditState[cid] || {};
+  const w = (st.warnings || []).find((x) => x.id === wid) || null;
+  const logs = fin.creditLog.filter((l) => l.customerId === cid);
+  return { cid, st, w, name: logs.length ? logs[logs.length - 1].customerName : "" };
+}
+function CrLetterDoc({ cust, ag, w, cs, company, size, fit }) {
+  const due = finAddDays(w.date, w.n >= cs.warnings ? cs.redAfterDays : cs.gapDays);
+  return (
+    <div style={{ ...printDocStyle(size, false, fit), fontFamily: "Inter, Arial, sans-serif" }}>
+      <FinDocHeader company={company} qrText={docVerifyUrl("w", `${cust.id}~${w.id}`)} title={`Payment Warning — ${w.n} / ${cs.warnings}`} sub={fmtDate(w.date)} />
+      <div style={{ fontSize: ".98em", lineHeight: 1.65 }}>
+        Janab <b>{cust.name}</b>{cust.phone ? ` (${cust.phone})` : ""},<br />
+        Aap ka udhaar <b>Rs {finMoney2(ag.out)}</b> hai.{ag.oldest < 999 ? <> Sab se purana bill <b>{ag.oldest} din</b> purana hai.</> : null}{w.kind === "bounce" ? " Aap ka cheque bounce hua hai." : w.kind === "promise" ? " Aap ke payment ke wade poore nahi hue." : ""}<br />
+        Meharbani kar ke <b>{fmtDate(due)}</b> tak payment karein. {w.n >= cs.warnings
+          ? <b style={{ color: "#be123c" }}>Ye aakhri warning hai — is ke baad naya maal udhaar par band ho jayega.</b>
+          : <>{cs.warnings} warnings ke baad <b style={{ color: "#be123c" }}>naya maal udhaar par band</b> ho jayega.</>}
+      </div>
+      {ag.bills.length > 0 && (
+        <table style={{ width: "100%", borderCollapse: "collapse", tableLayout: "fixed", fontSize: ".88em", marginTop: "2.5mm" }}>
+          <thead><tr><th style={FIN_HEAD}>Bill</th><th style={FIN_HEAD}>Date</th><th style={{ ...FIN_HEAD, width: "16%" }}>Din</th><th style={FIN_HEAD}>Baqi</th></tr></thead>
+          <tbody>{ag.bills.slice(0, 10).map((b) => (
+            <tr key={b.id}><td style={FIN_CELL}>{b.number}</td><td style={FIN_CELL}>{b.date ? fmtDate(b.date) : "—"}</td><td style={{ ...FIN_CELL, textAlign: "center" }}>{b.age >= 999 ? "—" : b.age}</td><td style={{ ...FIN_CELL, ...FIN_NUM }}>{finMoney2(b.left)}</td></tr>
+          ))}</tbody>
+        </table>
+      )}
+      <FinSignRow items={[{ label: "Customer" }, { label: "Manager" }]} />
+      <HrDocFoot note="QR scan karke warning check karein" />
+    </div>
+  );
+}
+function CrLetterPrintDialog({ cust, ag, w, cs, company, onClose }) {
+  return (
+    <PrintDialog kind="crletter" title="Print Warning Letter" subtitle={`${cust.name} · Warning ${w.n}/${cs.warnings}`} includeDefs={[]}
+      sizeOrder={["v5", "t80"]} defaultSize="v5" copyLabels={[[1, "1 Copy"], [2, "2 Copies (Customer + Office)"]]}
+      fileName={`Warning-${w.n}-${cust.name}`} onClose={onClose}
+      renderDoc={(p) => (PRINT_SIZES[p.size].thermal
+        ? <HrThermalDoc company={company} title={`PAYMENT WARNING ${w.n}/${cs.warnings}`} qrText={docVerifyUrl("w", `${cust.id}~${w.id}`)} size={p.size} copies={p.copies}
+            lines={[["Customer", cust.name, true], ["Date", fmtDate(w.date)], "-", ["Udhaar", `Rs ${finMoney2(ag.out)}`, true, true], ["Purana", ag.oldest >= 999 ? "opening" : `${ag.oldest} din`], ["Pay by", fmtDate(finAddDays(w.date, w.n >= cs.warnings ? cs.redAfterDays : cs.gapDays)), true]]} />
+        : <CrLetterDoc cust={cust} ag={ag} w={w} cs={cs} company={company} size={p.size} fit={p.fit} />)} />
+  );
+}
+function CrVerifyView({ target, settings, onOpen }) {
+  const fin = useFin();
+  if (!fin.loaded) return <VerifyShell settings={settings} tone="warn" title="Checking…" sub="Loading"><div className="h-10" /></VerifyShell>;
+  const { st, w, name } = crFindWarning(fin, target.id);
+  const cs = crSettingsOf(fin.settings);
+  if (!w && !name) return <VerifyShell settings={settings} tone="bad" title="Warning letter not found" sub="This QR code does not match our records." onOpen={onOpen}><div className="text-[14px] text-slate-600">The letter may be old or not from this shop.</div></VerifyShell>;
+  const now = st.red ? "Red List — udhaar par maal band" : w ? `Warning ${(st.warnings || []).length}/${cs.warnings}` : "Is warning ke baad payment aa gayi";
+  return (
+    <VerifyShell settings={settings} tone={st.red ? "bad" : w ? "warn" : "ok"} title={w ? `Genuine payment warning ${w.n}/${cs.warnings}` : "Warning resolved"} sub={name} onOpen={onOpen}>
+      {w && <VerifyRow l="Letter date" v={fmtDate(w.date)} />}
+      <VerifyRow l="Current status" v={now} strong tone={st.red ? "text-rose-600" : w ? "text-amber-600" : "text-emerald-600"} />
+      <div className="text-[12px] text-slate-400 mt-3">Amounts are visible to staff only.</div>
+    </VerifyShell>
+  );
+}
+
+/* ---------------- Customer account fields (Customers form) ---------------- */
+
+function CrCustomerFields({ form, setForm, currentUser, company }) {
+  const fin = useFin();
+  const cs = crSettingsOf(fin.settings);
+  const canLogin = hrAllow(currentUser, "customer.login");
+  const canMode = hrAllow(currentUser, "credit.block");
+  useEffect(() => { if (!form.id && !form.creditMode) setForm((f) => ({ ...f, creditMode: cs.newCustomerMode || "auto" })); }, []);
+  const loginMsg = form.portalUsername && form.portalPassword ? [`*${(company && company.companyName) || ""}*`, `Assalam o Alaikum ${form.name || ""},`, "Aap ka customer portal account:", `Username: ${form.portalUsername}`, `Password: ${form.portalPassword}`, `Link: ${(() => { try { return window.location.origin + window.location.pathname; } catch { return ""; } })()}`].join("\n") : "";
+  return (
+    <div className="border-t border-slate-200 mt-3 pt-3">
+      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2">{t("Customer Portal Login")}</div>
+      {canLogin ? (
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Portal Username"><input className={inputCls} value={form.portalUsername || ""} onChange={(e) => setForm({ ...form, portalUsername: e.target.value.replace(/\s/g, "") })} /></Field>
+          <Field label="Portal Password"><input className={inputCls} value={form.portalPassword || ""} onChange={(e) => setForm({ ...form, portalPassword: e.target.value })} /></Field>
+        </div>
+      ) : (
+        <div className="text-[12.5px] ct-t3 mb-3">{form.portalUsername ? `${t("Login bana hua hai")}: ${form.portalUsername}` : t("Portal login sirf admin / access wala bana sakta hai.")}</div>
+      )}
+      {canLogin && loginMsg && form.phone && <a href={waLink(form.phone, loginMsg)} target="_blank" rel="noreferrer" className="inline-block text-[12.5px] font-bold text-emerald-600 mb-3">💬 {t("WhatsApp par login bhejo")}</a>}
+      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2 mt-1">{t("Credit status")}</div>
+      {canMode ? (
+        <div className="flex gap-1.5 mb-3">
+          {Object.entries(CR_MODES).map(([k, l]) => (
+            <button key={k} type="button" onClick={() => setForm({ ...form, creditMode: k })}
+              className={`flex-1 rounded-xl px-2 py-2 text-[12.5px] font-bold border-2 ${(form.creditMode || "auto") === k ? "border-emerald-500 bg-emerald-500/10 ct-h" : "border-transparent ct-chip ct-t2"}`}>{t(l)}</button>
+          ))}
+        </div>
+      ) : <div className="text-[12.5px] ct-t2 mb-3">{t(CR_MODES[form.creditMode || "auto"])}</div>}
+    </div>
+  );
+}
+
+/* ---------------- Portal banner ---------------- */
+
+function CrPortalBanner({ customer, ctx, onPay }) {
+  const fin = useFin();
+  const cs = crSettingsOf(fin.settings);
+  if (!cs.enabled || !fin.loaded) return null;
+  const today = todayISO();
+  const ag = crAgingOne(customer, ctx, today, cs.normalDays);
+  const s = crStatusOf(customer, ag, fin.creditState[customer.id], cs, today);
+  if (!["warning", "red", "blocked", "remind"].includes(s.key)) return null;
+  const st = fin.creditState[customer.id] || {};
+  const ws = st.warnings || [];
+  const last = ws[ws.length - 1];
+  const due = last ? finAddDays(last.date, ws.length >= cs.warnings ? cs.redAfterDays : cs.gapDays) : "";
+  const red = s.key === "red" || s.key === "blocked";
+  return (
+    <div className={`mx-3.5 mt-3 rounded-2xl p-4 border ${red ? "bg-rose-50 border-rose-200" : s.key === "remind" ? "bg-amber-50 border-amber-200" : "bg-orange-50 border-orange-200"}`}>
+      <div className={`font-black ${red ? "text-rose-700" : "text-orange-700"}`}>{s.icon} {s.key === "blocked" ? t(s.label) : s.key === "red" ? t("Udhaar par maal band") : s.key === "remind" ? t("Yaad-dihani") : `${t("Warning")} ${ws.length}/${cs.warnings}`}</div>
+      <div className={`text-[12.5px] mt-1 ${red ? "text-rose-800" : "text-orange-800"}`}>
+        {fmtMoney(ag.out)} {t("udhaar")}
+        {s.key === "warning" && due ? ` · ${fmtDate(due)} ${t("tak payment karein, warna naya maal udhaar par band.")}` : ""}
+        {s.key === "red" ? ` · ${t("Purana udhaar clear karein — phir order ho sakega.")}` : ""}
+        {s.key === "blocked" ? ` · ${t("Order / booking band hai. Dukaan se rabta karein.")}` : ""}
+        {s.key === "remind" ? ` · ${ag.oldest} ${t("din purana — jald payment karein.")}` : ""}
+      </div>
+      {ag.out > 0.5 && <button type="button" onClick={onPay} className={`mt-2.5 w-full rounded-xl py-2.5 font-bold text-white ${red ? "bg-rose-700" : "bg-orange-600"}`}>💳 {t("Abhi pay karein")}</button>}
+    </div>
+  );
+}
+function crPortalBlocked(customer, ctx) {
+  const cs = crSettingsOf(finState.settings);
+  if (!cs.enabled) return null;
+  const today = todayISO();
+  const ag = crAgingOne(customer, ctx, today, cs.normalDays);
+  const s = crStatusOf(customer, ag, finState.creditState[customer.id], cs, today);
+  return s.portalBlocked ? s : null;
+}
+
+/* ---------------- Credit Control page ---------------- */
+
+function CreditSettingsPanel() {
+  const fin = useFin();
+  const cs = crSettingsOf(fin.settings);
+  const [f, setF] = useState(cs);
+  const [saved, setSaved] = useState(false);
+  async function save() {
+    await finMutate("settings", (s) => ({ ...s, credit: { ...f } }));
+    setSaved(true); setTimeout(() => setSaved(false), 1500);
+  }
+  const num = (k, l) => <Field key={k} label={l}><input type="number" className={inputCls} value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} /></Field>;
+  const chk = (k, l) => <label key={k} className="flex items-center gap-2 text-[13.5px] ct-h mb-2.5"><input type="checkbox" checked={!!f[k]} onChange={(e) => setF({ ...f, [k]: e.target.checked })} />{t(l)}</label>;
+  return (
+    <section className="ct-card p-4 sm:p-5 max-w-3xl">
+      {chk("enabled", "Credit rules chalu hain")}
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 mt-2">
+        {num("normalDays", "Udhaar kitne din tak normal")}
+        {num("remindDay", "Yaad-dihani kitne din par")}
+        {num("warnings", "Warnings kitni")}
+        {num("gapDays", "Warnings ka faasla (din)")}
+        {num("redAfterDays", "Aakhri warning ke baad Red List (din)")}
+        {num("watchPayments", "Watch khatam: kitni payments")}
+        {num("bounceRedCount", "Kitne cheque bounce = Red List (6 mahine)")}
+        {num("promiseBreakWarn", "Kitne toote wade = 1 warning")}
+        {num("passDays", "Ijazat kitne din valid")}
+      </div>
+      {chk("cashOnRed", "Red List par poore cash mein maal de sakte hain")}
+      {chk("bounceWarn", "Cheque bounce par warning")}
+      {chk("noDiscountOnRed", "Red List / band khate par discount nahi")}
+      <Field label="Naye customer ka credit status">
+        <select className={inputCls} value={f.newCustomerMode} onChange={(e) => setF({ ...f, newCustomerMode: e.target.value })}>
+          {Object.entries(CR_MODES).map(([k, l]) => <option key={k} value={k}>{t(l)}</option>)}
+        </select>
+      </Field>
+      <div className="flex justify-end"><Btn onClick={save}>{saved ? "✓ " + t("Saved") : t("Save rules")}</Btn></div>
+    </section>
+  );
+}
+
+function CrCustomerModal({ cust, ag, st, s, cs, logs, currentUser, company, onAction, onClose }) {
+  const ws = st.warnings || [];
+  const g = crGrade(st, ag, logs, todayISO());
+  const canBlock = hrAllow(currentUser, "credit.block");
+  const canOverride = hrAllow(currentUser, "credit.override");
+  const blocked = crBlockActive(st.block, ag, todayISO());
+  const limit = Number(cust.creditLimit) || 0;
+  return (
+    <Modal title={cust.name} onClose={onClose} wide>
+      <div className="flex flex-wrap items-center gap-2 -mt-1 mb-3">
+        <CrPill s={s} /><span className={`font-black text-[15px] ${g.tone}`}>{t("Grade")} {g.g}</span>
+        <span className="text-[13px] ct-t2">{cust.phone || ""} · {t(CR_MODES[cust.creditMode || "auto"])}</span>
+      </div>
+      {g.g === "A" && limit > 0 && ag.out >= 0.8 * limit && <div className="mb-3 rounded-xl bg-emerald-400/10 text-emerald-600 px-3 py-2 text-[13px] font-semibold">💡 {t("Achha customer, limit ke qareeb — limit barhane ka mashwara")}</div>}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+        <FinKpi label="Udhaar" value={fmtMoney(ag.out)} tone="text-rose-500" />
+        <FinKpi label="Sab se purana" value={ag.oldest >= 999 ? t("Opening") : `${ag.oldest} ${t("din")}`} />
+        <FinKpi label={`${cs.normalDays}+ ${t("din")}`} value={fmtMoney(ag.overdue)} tone="text-orange-500" />
+        <FinKpi label="Credit limit" value={limit ? fmtMoney(limit) : "—"} />
+      </div>
+      {s.lines.length > 0 && <div className="rounded-xl ct-chip p-3 text-[13px] ct-t2 mb-3">{s.lines.map((l, i) => <div key={i}>{l}</div>)}</div>}
+      <div className="flex flex-wrap gap-1.5 mb-4">
+        {canBlock && (blocked ? <Btn small onClick={() => onAction("unblock", cust)}>🔓 {t("Khata kholo")}</Btn> : <Btn small variant="danger" onClick={() => onAction("block", cust)}>🔒 {t("Khata band")}</Btn>)}
+        {canOverride && <Btn small variant="ghost" onClick={() => onAction("pass", cust)}>🔓 {t("Is baar de do")}</Btn>}
+        {canOverride && st.red && <Btn small variant="ghost" onClick={() => onAction("unred", cust)}>{t("Red se nikalo")}</Btn>}
+        {canBlock && <Btn small variant="ghost" onClick={() => onAction("bounce", cust)}>↩ {t("Cheque bounce")}</Btn>}
+      </div>
+      {ws.length > 0 && (
+        <div className="mb-4">
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-1.5">{t("Warnings")}</div>
+          {ws.map((w) => (
+            <div key={w.id} className="flex flex-wrap items-center gap-2 py-1.5 border-b border-slate-200/60 text-[13px]">
+              <b className="text-orange-500">{w.n}/{cs.warnings}</b><span className="ct-h">{fmtDate(w.date)}</span><span className="ct-t3">{w.kind === "auto" ? t("udhaar purana") : w.note || w.kind}</span>
+              <span className={`ms-auto text-[11.5px] font-bold ${w.waAt ? "text-emerald-500" : "text-amber-500"}`}>{w.waAt ? `✓ WhatsApp ${fmtDate(w.waAt)}` : t("WhatsApp nahi gaya")}</span>
+              <Btn small variant="ghost" onClick={() => onAction("wa", cust, w)}>💬</Btn>
+              <Btn small variant="ghost" onClick={() => onAction("letter", cust, w)}>🖨</Btn>
+            </div>
+          ))}
+        </div>
+      )}
+      {ag.bills.length > 0 && (
+        <div className="mb-4">
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-1.5">{t("Baqi bills")}</div>
+          <div className="flex flex-wrap gap-1.5">{ag.bills.slice(0, 12).map((b) => <span key={b.id} className={`rounded-lg px-2 py-1 text-[12px] font-semibold ${b.age >= cs.normalDays ? "bg-rose-400/15 text-rose-500" : "ct-chip ct-t2"}`}>{b.number} · {b.age >= 999 ? "—" : b.age + "d"} · {fmtMoney(b.left)}</span>)}</div>
+        </div>
+      )}
+      <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-1.5">{t("History")}</div>
+      <div className="max-h-56 overflow-y-auto ct-scroll">
+        {logs.length === 0 && <div className="text-[13px] ct-t3">—</div>}
+        {[...logs].reverse().slice(0, 60).map((l) => (
+          <div key={l.id} className="py-1.5 border-b border-slate-200/60 text-[12.5px]"><b className="ct-h">{t(CR_LOG_LABEL[l.type] || l.type)}</b> <span className="ct-t2">· {l.note}</span><span className="ct-t3"> · {l.by} · {fmtDateTime(l.at)}</span></div>
+        ))}
+      </div>
+    </Modal>
+  );
+}
+const CR_LOG_LABEL = { warning: "⚠ Warning", red: "⛔ Red List", unred: "✓ Red se nikla", block: "🔒 Khata band", unblock: "🔓 Khata khula", override: "✓ Ijazat (khud)", request: "📩 Request", approve: "✓ Approve", reject: "✕ Mana", used: "🧾 Ijazat istemal", bounce: "↩ Cheque bounce", cleared: "✓ Warnings khatam", watchEnd: "✓ Watch khatam", wa: "💬 WhatsApp" };
+
+function CreditControlPage({ currentUser, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, settings }) {
+  useLanguage();
+  const fin = useFin();
+  const [tab, setTab] = useState("warning");
+  const [q, setQ] = useState("");
+  const [modal, setModal] = useState(null);
+  const [month, setMonth] = useState(todayISO().slice(0, 7));
+  const today = todayISO();
+  const cs = crSettingsOf(fin.settings);
+  const aging = useMemo(() => crAgingAll({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments }, today, cs.normalDays),
+    [customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, today, cs.normalDays]);
+  const logsBy = useMemo(() => { const m = {}; fin.creditLog.forEach((l) => { (m[l.customerId] = m[l.customerId] || []).push(l); }); return m; }, [fin.creditLog]);
+  if (!fin.loaded) return <div className="ct-card p-10 text-center ct-t2">{t("Loading…")}</div>;
+  const rows = (customers || []).map((c) => {
+    const ag = aging[c.id] || { out: 0, oldest: 0, overdue: 0, bills: [] };
+    const st = fin.creditState[c.id] || {};
+    return { c, ag, st, s: crStatusOf(c, ag, st, cs, today) };
+  });
+  const by = (k) => rows.filter((r) => r.s.key === k);
+  const pending = fin.creditRequests.filter((r) => r.status === "Pending");
+  const canOverride = hrAllow(currentUser, "credit.override");
+  const ql = q.trim().toLowerCase();
+  const tabRows = {
+    warning: [...by("warning"), ...by("remind")], red: by("red"), blocked: by("blocked"), watch: [...by("watch"), ...by("approval"), ...by("cash")],
+    all: rows.filter((r) => r.ag.out > 0.5 || r.s.key !== "green"),
+  }[tab] || [];
+  const shown = tabRows.filter((r) => !ql || [r.c.name, r.c.phone].some((x) => String(x || "").toLowerCase().includes(ql)))
+    .sort((a, b) => b.ag.oldest - a.ag.oldest || b.ag.out - a.ag.out);
+  const actor = finActor(currentUser);
+  async function sendWa(cust, w) {
+    const ag = aging[cust.id];
+    if (cust.phone) window.open(waLink(cust.phone, crWarnText(cust, ag, w, cs, settings)), "_blank");
+    else alert(t("Customer ka phone number save nahi."));
+    await crPatchState(cust.id, (s) => ({ ...s, warnings: (s.warnings || []).map((x) => (x.id === w.id ? { ...x, waAt: new Date().toISOString(), waBy: actor.name } : x)) }));
+  }
+  function onAction(kind, cust, w) {
+    if (kind === "wa") return sendWa(cust, w);
+    setModal({ kind, cust, w });
+  }
+  const unsent = rows.reduce((n, r) => n + (r.st.warnings || []).filter((w) => !w.waAt).length, 0);
+  const monthLogs = fin.creditLog.filter((l) => String(l.at).slice(0, 7) === month);
+  const cnt = (ty) => monthLogs.filter((l) => l.type === ty).length;
+  return (
+    <div>
+      <FinPageHead title="Credit Control" sub={`${t("Udhaar")} ${cs.normalDays} ${t("din")} → ${cs.warnings} ${t("warnings")} (${cs.gapDays} ${t("din faasla")}) → Red List`} />
+      {!cs.enabled && <div className="mb-3 rounded-xl bg-amber-400/10 text-amber-600 px-3 py-2 text-[13px] font-semibold">{t("Credit rules band hain (Settings tab).")}</div>}
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-4">
+        <FinKpi label="Green" value={by("green").length} tone="text-emerald-500" />
+        <FinKpi label="Warning" value={by("warning").length} tone="text-orange-500" sub={fmtMoney(by("warning").reduce((x, r) => x + r.ag.out, 0))} />
+        <FinKpi label="Red List" value={by("red").length} tone="text-rose-500" sub={fmtMoney(by("red").reduce((x, r) => x + r.ag.out, 0))} />
+        <FinKpi label="Khata band" value={by("blocked").length} tone="text-rose-500" />
+        <FinKpi label="Approval chahiye" value={pending.length} tone="text-sky-500" sub={unsent ? `${unsent} ${t("WhatsApp baqi")}` : ""} />
+      </div>
+      <div className="flex flex-wrap gap-2 items-center mb-3">
+        <FinTabs value={tab} onChange={setTab} tabs={[
+          { id: "warning", label: "Warning", count: by("warning").length }, { id: "red", label: "Red List", count: by("red").length },
+          { id: "blocked", label: "Khata band", count: by("blocked").length }, { id: "watch", label: "Watch / approval" }, { id: "approvals", label: "Approvals", count: pending.length },
+          { id: "all", label: "Sab customers" }, { id: "report", label: "Report" }, ...(currentUser.role === "admin" ? [{ id: "settings", label: "Settings" }] : []),
+        ]} />
+      </div>
+      {["warning", "red", "blocked", "watch", "all"].includes(tab) && (
+        <>
+          <div className="mb-3 relative max-w-md">
+            <UiIcon name="search" className="w-4 h-4 absolute start-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input className={`${inputCls} !ps-9`} value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("Search customer…")} />
+          </div>
+          <section className="ct-card p-3 sm:p-4 overflow-x-auto">
+            {shown.length === 0 && <FinEmpty text="Is list mein koi customer nahi." />}
+            {shown.length > 0 && (
+              <table className="w-full text-[13px] min-w-[860px]">
+                <thead><tr className="ct-t3 text-[11px] uppercase">{["Customer", "Udhaar", "Sab se purana", "Warnings", "Status / agla qadam", ""].map((h, i) => <th key={i} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+                <tbody>
+                  {shown.map(({ c, ag, st, s }) => {
+                    const ws = st.warnings || [];
+                    const lastW = ws[ws.length - 1];
+                    const g = crGrade(st, ag, logsBy[c.id], today);
+                    return (
+                      <tr key={c.id} className={`border-t border-slate-200/60 ${s.key === "red" || s.key === "blocked" ? "bg-rose-500/5" : ""}`}>
+                        <td className="py-2.5 pe-3"><button type="button" className="text-start" onClick={() => setModal({ kind: "detail", cust: c })}><b className="ct-h">{c.name}</b> <span className={`text-[11px] font-black ${g.tone}`}>{g.g}</span><div className="text-[11.5px] ct-t3">{c.phone || "—"}</div></button></td>
+                        <td className="py-2.5 pe-3 font-bold ct-h">{fmtMoney(ag.out)}</td>
+                        <td className="py-2.5 pe-3">{ag.bills[0] ? <>{ag.bills[0].number} · <b className={ag.oldest >= cs.normalDays ? "text-orange-500" : "ct-t2"}>{ag.oldest >= 999 ? t("opening") : `${ag.oldest} ${t("din")}`}</b></> : "—"}</td>
+                        <td className="py-2.5 pe-3"><CrDots n={ws.length} W={cs.warnings} /> <span className="text-[12px] ct-t2">{ws.length}/{cs.warnings}</span></td>
+                        <td className="py-2.5 pe-3"><CrPill s={s} />{s.next && <div className="text-[11.5px] ct-t3 mt-0.5">{s.next}</div>}</td>
+                        <td className="py-2.5 whitespace-nowrap text-end">
+                          {lastW && <Btn small variant="ghost" onClick={() => sendWa(c, lastW)}>💬{lastW.waAt ? "" : " !"}</Btn>}{" "}
+                          {lastW && <Btn small variant="ghost" onClick={() => setModal({ kind: "letter", cust: c, w: lastW })}>🖨</Btn>}{" "}
+                          {canOverride && (s.key === "red" || s.key === "blocked") && <Btn small variant="ghost" onClick={() => setModal({ kind: "pass", cust: c })}>🔓 {t("Is baar")}</Btn>}{" "}
+                          <Btn small variant="ghost" onClick={() => setModal({ kind: "detail", cust: c })}>{t("Detail")}</Btn>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </section>
+        </>
+      )}
+      {tab === "approvals" && (
+        <section className="ct-card p-4 sm:p-5">
+          {fin.creditRequests.length === 0 && <FinEmpty text="Koi request nahi." />}
+          <div className="divide-y divide-slate-200/60">
+            {[...fin.creditRequests].sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt))).sort((a, b) => (b.status === "Pending") - (a.status === "Pending")).slice(0, 80).map((r) => (
+              <div key={r.id} className="py-2.5 flex flex-wrap items-center gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-[13.5px] font-semibold ct-h">{r.customerName} · {t("udhaar")} {fmtMoney(r.amount)}{r.statusLabel ? ` · ${r.statusLabel}` : ""}</div>
+                  <div className="text-[12px] ct-t3">{r.number} · {r.createdBy ? r.createdBy.name : ""} · {fmtDateTime(r.createdAt)} · "{r.reason}"{r.decision ? ` · ${r.decision.by}${r.status === "Approved" ? ` → max ${fmtMoney(r.approvedCredit)}` : ""}` : ""}{r.usedInvoice ? ` · ${r.usedInvoice}` : ""}</div>
+                </div>
+                <span className={`rounded-full px-2.5 py-0.5 text-[11.5px] font-bold ${{ Pending: "bg-amber-400/15 text-amber-500", Approved: "bg-emerald-400/15 text-emerald-500", Used: "bg-slate-400/15 ct-t2", Rejected: "bg-rose-400/15 text-rose-500" }[r.status] || ""}`}>{t(r.status)}</span>
+                {r.status === "Pending" && canOverride && <Btn small onClick={() => setModal({ kind: "decide", req: r })}>{t("Faisla")}</Btn>}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+      {tab === "report" && (
+        <section className="ct-card p-4 sm:p-5">
+          <div className="flex items-center gap-2 mb-3"><input type="month" className={`${inputCls} !w-auto`} value={month} onChange={(e) => setMonth(e.target.value || month)} /><span className="text-[13px] ct-t2">{hrMonthLabel(month)}</span></div>
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-2 mb-4">
+            {[["Warnings", cnt("warning"), "text-orange-500"], ["Red List", cnt("red"), "text-rose-500"], ["Red se nikle", cnt("unred"), "text-emerald-500"], ["Khata band", cnt("block"), "text-rose-500"], ["Ijazat (is baar)", cnt("override") + cnt("approve"), "text-sky-500"], ["Cheque bounce", cnt("bounce"), "text-rose-500"]].map(([l, v, tone]) => (
+              <div key={l} className="rounded-xl ct-chip px-3 py-2.5"><div className="text-[10.5px] font-bold uppercase ct-t3">{t(l)}</div><div className={`font-black text-[20px] ${tone}`}>{v}</div></div>
+            ))}
+          </div>
+          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-1.5">{t("Kis ne ijazat di / khata band kiya")}</div>
+          {monthLogs.filter((l) => ["override", "approve", "reject", "block", "unblock", "unred"].includes(l.type)).length === 0 && <FinEmpty text="Is mahine kuch nahi." />}
+          {monthLogs.filter((l) => ["override", "approve", "reject", "block", "unblock", "unred"].includes(l.type)).reverse().map((l) => (
+            <div key={l.id} className="py-1.5 border-b border-slate-200/60 text-[13px]"><b className="ct-h">{t(CR_LOG_LABEL[l.type] || l.type)}</b> · {l.customerName} <span className="ct-t2">· {l.note}</span><span className="ct-t3"> · {l.by} · {fmtDateTime(l.at)}</span></div>
+          ))}
+        </section>
+      )}
+      {tab === "settings" && currentUser.role === "admin" && <CreditSettingsPanel />}
+      {modal && modal.kind === "detail" && (() => {
+        const r = rows.find((x) => x.c.id === modal.cust.id);
+        return r ? <CrCustomerModal cust={r.c} ag={r.ag} st={r.st} s={r.s} cs={cs} logs={logsBy[r.c.id] || []} currentUser={currentUser} company={settings} onAction={onAction} onClose={() => setModal(null)} /> : null;
+      })()}
+      {modal && modal.kind === "block" && <CrBlockModal cust={modal.cust} currentUser={currentUser} company={settings} onClose={() => setModal({ kind: "detail", cust: modal.cust })} />}
+      {modal && modal.kind === "unblock" && <CrBlockModal unblock cust={modal.cust} currentUser={currentUser} company={settings} onClose={() => setModal({ kind: "detail", cust: modal.cust })} />}
+      {modal && modal.kind === "pass" && <CrPassModal cust={modal.cust} currentUser={currentUser} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "bounce" && <CrBounceModal cust={modal.cust} currentUser={currentUser} onClose={() => setModal({ kind: "detail", cust: modal.cust })} />}
+      {modal && modal.kind === "unred" && <CrUnredModal cust={modal.cust} currentUser={currentUser} onClose={() => setModal({ kind: "detail", cust: modal.cust })} />}
+      {modal && modal.kind === "decide" && <CrDecideModal req={modal.req} currentUser={currentUser} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "letter" && <CrLetterPrintDialog cust={modal.cust} ag={aging[modal.cust.id]} w={modal.w} cs={cs} company={settings} onClose={() => setModal(null)} />}
+    </div>
   );
 }
 
