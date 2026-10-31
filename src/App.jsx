@@ -637,6 +637,7 @@ function LanguageSwitcher({ compact = false }) {
  */
 function I18nDomBridge() {
   const { language } = useLanguage();
+  const urDictV = useUrduDictVersion();
 
   useEffect(() => {
     if (typeof document === "undefined") return undefined;
@@ -669,7 +670,7 @@ function I18nDomBridge() {
     const shouldSkip = (node) => {
       const el = node.parentElement;
       if (!el) return true;
-      if (el.closest && el.closest(".ct-paper")) return true;
+      if (el.closest && el.closest(".ct-paper, .ct-noxl")) return true;
       const tag = el.tagName;
       return ["SCRIPT", "STYLE", "TEXTAREA"].includes(tag) ||
         (tag === "INPUT" && !["button", "submit"].includes((el.type || "").toLowerCase()));
@@ -744,7 +745,7 @@ function I18nDomBridge() {
       if (frame) cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [language]);
+  }, [language, urDictV]);
 
   return null;
 }
@@ -1234,6 +1235,7 @@ const NAV_GROUPS = [
     { id: "insights", label: "Business Insights", icon: "trend" },
     { id: "assistant", label: "Sales Assistant", icon: "chat" },
     { id: "estimator", label: "Cement Estimator", icon: "calc" },
+    { id: "urduTranslate", label: "Urdu Translation", icon: "spark" },
     { id: "settings", label: "Settings", icon: "settings", adminOnly: true },
   ]},
 ];
@@ -10114,7 +10116,7 @@ function App() {
       commissionAgents, commissionRules, commissionTransactions, commissionPayments, orderTargets,
       vouchers: finState.vouchers, finSettings: finState.settings, cashClosings: finState.closings, cashMoves: finState.moves, costRates: finState.costs,
       employees: finState.employees, attendance: finState.attendance, leaves: finState.leaves, advances: finState.advances, salarySheets: finState.salarySheets,
-      creditState: finState.creditState, creditLog: finState.creditLog, creditRequests: finState.creditRequests,
+      creditState: finState.creditState, creditLog: finState.creditLog, creditRequests: finState.creditRequests, urduDict: finState.urduDict,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -10152,6 +10154,7 @@ function App() {
     if (Array.isArray(data.cashClosings)) finMutate("closings", () => data.cashClosings);
     if (Array.isArray(data.cashMoves)) finMutate("moves", () => data.cashMoves);
     if (data.costRates && typeof data.costRates === "object") finMutate("costs", () => data.costRates);
+    if (data.urduDict && typeof data.urduDict === "object") finMutate("urduDict", () => data.urduDict);
     if (data.creditState && typeof data.creditState === "object") finMutate("creditState", () => data.creditState);
     ["employees", "attendance", "leaves", "advances", "salarySheets", "creditLog", "creditRequests"].forEach((k) => { if (Array.isArray(data[k])) finMutate(k, () => data[k]); });
   }
@@ -10328,6 +10331,13 @@ function App() {
     }, 1200);
     return () => clearTimeout(tm);
   }, [loading, currentUser, finLive.loaded, finLive.settings, customers, invoices, payments, promises, crTick]);
+
+  // Urdu: new English names get an Urdu version automatically.
+  useEffect(() => {
+    if (!currentUser || !finIsStaff(currentUser) || !finLive.loaded) return undefined;
+    const tm = setTimeout(() => { urAutoFill({ customers, products, drivers, branches, settings }).catch(() => {}); }, 2500);
+    return () => clearTimeout(tm);
+  }, [currentUser, finLive.loaded, customers, products, drivers, branches, settings, finLive.employees, finLive.vouchers, finLive.settings]);
 
   // Employee logins: only the pages admin allowed.
   useEffect(() => {
@@ -10640,6 +10650,7 @@ function App() {
     paymentsDue: <PaymentsDuePage currentUser={currentUser} users={users} branches={branches} payments={visiblePayments} invoices={visibleInvoices} settings={settings} />,
     cashbook: <CashBookPage currentUser={currentUser} invoices={visibleInvoices} payments={visiblePayments} settings={settings} />,
     creditControl: <CreditControlPage currentUser={currentUser} customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments} settings={settings} />,
+    urduTranslate: <UrduTranslatePage currentUser={currentUser} customers={customers} products={products} drivers={drivers} branches={branches} settings={settings} />,
     myHr: <MyHrPage currentUser={currentUser} settings={settings} />,
     employees: <EmployeesPage currentUser={currentUser} users={users} customers={customers} branches={branches} settings={settings} saveUser={saveUser} deleteUser={deleteUser} />,
     attendance: <AttendancePage currentUser={currentUser} />,
@@ -13829,7 +13840,7 @@ function QrSvg({ text, sizeMm = 20, style }) {
    same time do not overwrite each other's vouchers.
    ============================================================ */
 
-const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests" };
+const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests", urduDict: "ct-urdu-dict" };
 
 const FIN_DEFAULT_SETTINGS = {
   categories: [
@@ -13886,7 +13897,7 @@ Object.entries(FIN_URDU).forEach(([en, ur]) => {
 
 /* ---------------- Store ---------------- */
 
-const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [] };
+const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [], urduDict: {} };
 const finListeners = new Set();
 let finLoadPromise = null;
 let finChannel = null;
@@ -13907,7 +13918,7 @@ function finNormalizeSettings(s) {
 }
 function finNormalize(name, value) {
   if (name === "settings") return finNormalizeSettings(value);
-  if (name === "costs" || name === "portalProfiles" || name === "deliveryPlans" || name === "creditState") return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  if (name === "costs" || name === "portalProfiles" || name === "deliveryPlans" || name === "creditState" || name === "urduDict") return value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return Array.isArray(value) ? value : [];
 }
 
@@ -18355,7 +18366,7 @@ const HR_TEMPLATES = {
   custom: { label: "Custom", desc: "Khud tick karein", perms: [] },
 };
 // Pages a plain (old) staff login cannot open — only admin or given access.
-const HR_MANAGE_PAGES = ["employees", "salarySheet"];
+const HR_MANAGE_PAGES = ["employees", "salarySheet", "urduTranslate"];
 
 function hrEmployeeOf(user) {
   if (!user || !user.employeeId) return null;
@@ -20223,7 +20234,7 @@ function crStatusOf(cust, ag, st, cs, today) {
   return { ...base, key: "green", label: "Green", icon: "🟢" };
 }
 function CrPill({ s }) {
-  return <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[11.5px] font-bold whitespace-nowrap ${CR_TONE[s.key] || CR_TONE.green}`}>{s.icon} {t(s.label)}</span>;
+  return <span className={`inline-flex rounded-full px-2.5 py-0.5 text-[11.5px] font-bold whitespace-nowrap ${CR_TONE[s.key] || CR_TONE.green}`}>{s.icon} {s.key === "warning" ? <>{t("Warning")} {s.warningsN}/{s.W}</> : t(s.label)}</span>;
 }
 function CrDots({ n, W }) {
   return <span className="inline-flex gap-1 align-middle">{Array.from({ length: W }).map((_, i) => <i key={i} className={`inline-block w-4 h-2 rounded ${i < n ? "bg-orange-500" : "bg-slate-400/30"}`} />)}</span>;
@@ -20984,6 +20995,936 @@ function CreditControlPage({ currentUser, customers, invoices, payments, returns
       {modal && modal.kind === "unred" && <CrUnredModal cust={modal.cust} currentUser={currentUser} onClose={() => setModal({ kind: "detail", cust: modal.cust })} />}
       {modal && modal.kind === "decide" && <CrDecideModal req={modal.req} currentUser={currentUser} onClose={() => setModal(null)} />}
       {modal && modal.kind === "letter" && <CrLetterPrintDialog cust={modal.cust} ag={aging[modal.cust.id]} w={modal.w} cs={cs} company={settings} onClose={() => setModal(null)} />}
+    </div>
+  );
+}
+
+/* Urdu text for the newer screens (HR, vouchers, credit, portal, profit …). */
+const URDU_UI_EXTRA = {
+"0 = no limit": "0 = کوئی حد نہیں",
+"A4 width (210 mm), and the page ends right after the invoice — no blank space. In the print window keep Margins: None.": "A4 چوڑائی (210 ملی میٹر)، اور صفحہ انوائس کے فوراً بعد ختم — کوئی خالی جگہ نہیں۔ پرنٹ ونڈو میں Margins: None رکھیں۔",
+"ALREADY PAID": "پہلے ہی ادا شدہ",
+"APPROVED": "منظور شدہ",
+"Aadha cash, aadha udhaar": "آدھا کیش، آدھا ادھار",
+"Aap ka employee record nahi mila.": "آپ کا ملازم ریکارڈ نہیں ملا۔",
+"Ab kya karein?": "اب کیا کریں؟",
+"Abhi change ho sakti hai": "ابھی تبدیل ہو سکتی ہے",
+"Abhi check-in nahi kiya": "ابھی چیک اِن نہیں کیا",
+"Abhi pay karein": "ابھی ادائیگی کریں",
+"About": "بارے میں",
+"Absent counting starts from": "غیر حاضری کی گنتی اس تاریخ سے",
+"Access": "رسائی",
+"Access template": "رسائی ٹیمپلیٹ",
+"Account Statement": "اکاؤنٹ اسٹیٹمنٹ",
+"Account name": "اکاؤنٹ کا نام",
+"Account not found — please contact the shop.": "اکاؤنٹ نہیں ملا — براہ کرم دکان سے رابطہ کریں۔",
+"Account number": "اکاؤنٹ نمبر",
+"Account title": "اکاؤنٹ ٹائٹل",
+"Achha customer, limit ke qareeb — limit barhane ka mashwara": "اچھا کسٹمر، حد کے قریب — حد بڑھانے کا مشورہ",
+"Active staff": "فعال عملہ",
+"Add a bank account in Vouchers → Voucher Settings first.": "پہلے Vouchers → Voucher Settings میں بینک اکاؤنٹ شامل کریں۔",
+"Add account": "اکاؤنٹ شامل کریں",
+"Add at least one kisht.": "کم از کم ایک قسط شامل کریں۔",
+"Add delivery": "ڈیلیوری شامل کریں",
+"Add kisht": "قسط شامل کریں",
+"Add products first (Business → Products).": "پہلے پروڈکٹس شامل کریں (Business → Products)۔",
+"Admin login: sab pages aur sab actions.": "ایڈمن لاگ اِن: تمام صفحات اور تمام کام۔",
+"Admin ne aap ko is page ki access nahi di.": "ایڈمن نے آپ کو اس صفحے کی رسائی نہیں دی۔",
+"Admin se ijazat maango": "ایڈمن سے اجازت مانگیں",
+"Admin will approve": "ایڈمن منظور کرے گا",
+"Advance Salary Request": "ایڈوانس تنخواہ کی درخواست",
+"Advance Salary Slip": "ایڈوانس تنخواہ سلپ",
+"Advance Slip": "ایڈوانس سلپ",
+"Advance request": "ایڈوانس کی درخواست",
+"After approving, sign the paper voucher by hand in “Approved By”. The system saves your name and the time.": "منظوری کے بعد کاغذی واؤچر پر “Approved By” میں ہاتھ سے دستخط کریں۔ سسٹم آپ کا نام اور وقت محفوظ کر لیتا ہے۔",
+"After placing the order you can send the payment screenshot. Or pay on delivery.": "آرڈر کے بعد آپ ادائیگی کا اسکرین شاٹ بھیج سکتے ہیں۔ یا ڈیلیوری پر ادائیگی کریں۔",
+"After saving, this voucher goes back for approval. Paid kishts stay as they are. Print it again — the old paper shows as outdated when scanned.": "محفوظ کرنے کے بعد یہ واؤچر دوبارہ منظوری کے لیے جائے گا۔ ادا شدہ قسطیں ویسی ہی رہیں گی۔ دوبارہ پرنٹ کریں — اسکین پر پرانا کاغذ پرانا دکھائے گا۔",
+"Agle ek invoice ke liye ijazat (kuch din ke andar). Clerk invoice Save karega to khud lag jayegi.": "اگلی ایک انوائس کے لیے اجازت (چند دن کے اندر)۔ کلرک انوائس محفوظ کرے گا تو خود لگ جائے گی۔",
+"All / main": "تمام / مین",
+"All accounts": "تمام اکاؤنٹس",
+"All cards": "تمام کارڈ",
+"All slips": "تمام سلپس",
+"Allow early": "پہلے اجازت",
+"Already": "پہلے ہی",
+"Already paid": "پہلے ہی ادا شدہ",
+"Amount cannot be less than what is already paid": "رقم پہلے سے ادا شدہ سے کم نہیں ہو سکتی",
+"Approval": "منظوری",
+"Approval chahiye": "منظوری چاہیے",
+"Approval ka intezar": "منظوری کا انتظار",
+"Approvals": "منظوریاں",
+"Approve + make voucher": "منظور + واؤچر بنائیں",
+"Approve / Reject": "منظور / مسترد",
+"Approve Voucher": "واؤچر منظور کریں",
+"Approve as is": "جیسا ہے منظور",
+"Approve hone par isi invoice ko dobara “Save” karein.": "منظوری کے بعد اسی انوائس کو دوبارہ “Save” کریں۔",
+"Approve karte hi Payment Voucher ban jayega (approved). Cashier slip/voucher scan karke pay karega.": "منظور کرتے ہی پیمنٹ واؤچر بن جائے گا (منظور شدہ)۔ کیشیئر سلپ/واؤچر اسکین کر کے ادائیگی کرے گا۔",
+"Approve with changes": "تبدیلی کے ساتھ منظور",
+"Approved / Scheduled": "منظور / شیڈول",
+"Approved vouchers — which kisht to pay, when, and how": "منظور شدہ واؤچر — کون سی قسط، کب اور کیسے ادا کرنی ہے",
+"Approved — pay karne ke liye tayyar": "منظور — ادائیگی کے لیے تیار",
+"Approver signature": "منظور کنندہ کے دستخط",
+"Ask the shop for the account number.": "اکاؤنٹ نمبر دکان سے پوچھیں۔",
+"Assalam o Alaikum": "السلام علیکم",
+"Attendance": "حاضری",
+"Bank (not set)": "بینک (سیٹ نہیں)",
+"Bank limit": "بینک حد",
+"Bank name": "بینک کا نام",
+"Bank transfer up to (Rs)": "بینک ٹرانسفر کی حد (روپے)",
+"Baqi bills": "باقی بل",
+"Before paying": "ادائیگی سے پہلے",
+"Best margin": "سب سے زیادہ مارجن",
+"Bill / receipt number (optional)": "بل / رسید نمبر (اختیاری)",
+"Bill photo": "بل کی تصویر",
+"Bought this year": "اس سال کی خریداری",
+"Bounce darj karo": "باؤنس درج کریں",
+"Bounce par ek warning; 6 mahine mein 2 bounce = Red List (settings se badal sakte hain). Payment ka record Payments page se theek karein.": "باؤنس پر ایک وارننگ؛ 6 ماہ میں 2 باؤنس = ریڈ لسٹ (سیٹنگز سے بدل سکتے ہیں)۔ ادائیگی کا ریکارڈ Payments صفحے سے درست کریں۔",
+"Bronze": "برانز",
+"Business is in loss": "کاروبار نقصان میں ہے",
+"Business is in profit": "کاروبار منافع میں ہے",
+"CANCELLED": "منسوخ",
+"CNIC": "شناختی کارڈ",
+"Call": "کال",
+"Camera permission was not given.": "کیمرے کی اجازت نہیں دی گئی۔",
+"Can approve": "منظور کر سکتا ہے",
+"Cancel this transfer?": "یہ ٹرانسفر منسوخ کریں؟",
+"Card QR scanner par scan karein = check-in, dobara scan = check-out": "کارڈ کا QR اسکینر پر اسکین کریں = چیک اِن، دوبارہ اسکین = چیک آؤٹ",
+"Cash allowed up to (Rs)": "کیش کی حد (روپے)",
+"Cash given at the shop / to the rider": "دکان پر / رائیڈر کو دیا گیا کیش",
+"Cash in drawer now": "دراز میں موجود کیش",
+"Cash limit": "کیش حد",
+"Cashier": "کیشیئر",
+"Cashier must tick the paper signatures before paying": "ادائیگی سے پہلے کیشیئر کاغذ کے دستخط ٹِک کرے",
+"Cashier → approver (scan + approve + sign) → cashier (scan + pay)": "کیشیئر → منظور کنندہ (اسکین + منظور + دستخط) → کیشیئر (اسکین + ادائیگی)",
+"Cashier's plan — keep it or change it": "کیشیئر کا پلان — رکھیں یا بدلیں",
+"Change photo": "تصویر بدلیں",
+"Changed": "تبدیل شدہ",
+"Check": "چیک",
+"Check that the money really arrived in the account before verifying. Verifying adds the payment to the customer's ledger.": "تصدیق سے پہلے دیکھیں کہ رقم واقعی اکاؤنٹ میں آئی ہے۔ تصدیق سے ادائیگی کسٹمر کے کھاتے میں شامل ہو جاتی ہے۔",
+"Check the plan, then approve or reject.": "پلان دیکھیں، پھر منظور یا مسترد کریں۔",
+"Check-in": "چیک اِن",
+"Check-in khali kar ke save karein to us din ki hazri hat jayegi.": "چیک اِن خالی کر کے محفوظ کریں تو اس دن کی حاضری ہٹ جائے گی۔",
+"Check-out": "چیک آؤٹ",
+"Checking…": "چیک ہو رہا ہے…",
+"Cheque No (can add at payment)": "چیک نمبر (ادائیگی پر بھی لکھ سکتے ہیں)",
+"Cheque bounce": "چیک باؤنس",
+"Cheque no": "چیک نمبر",
+"Choose at least one item.": "کم از کم ایک آئٹم منتخب کریں۔",
+"Choose two different accounts and an amount.": "دو مختلف اکاؤنٹس اور رقم منتخب کریں۔",
+"Choose…": "منتخب کریں…",
+"Cleared": "کلیئر",
+"Clerk": "کلرک",
+"Close menu": "مینو بند کریں",
+"Code": "کوڈ",
+"Complaints": "شکایات",
+"Contact the shop": "دکان سے رابطہ کریں",
+"Could not save. Check your internet connection and try again.": "محفوظ نہیں ہو سکا۔ انٹرنیٹ چیک کریں اور دوبارہ کوشش کریں۔",
+"Could not send. Check your internet connection and try again.": "بھیجا نہیں جا سکا۔ انٹرنیٹ چیک کریں اور دوبارہ کوشش کریں۔",
+"Count the notes in the drawer.": "دراز کے نوٹ گنیں۔",
+"Counted": "گنا گیا",
+"Credit Control": "کریڈٹ کنٹرول",
+"Credit approval": "کریڈٹ منظوری",
+"Credit check": "کریڈٹ چیک",
+"Credit rules band hain (Settings tab).": "کریڈٹ قواعد بند ہیں (Settings ٹیب)۔",
+"Credit status": "کریڈٹ اسٹیٹس",
+"Current balance": "موجودہ بیلنس",
+"Current password": "موجودہ پاس ورڈ",
+"Current password is wrong.": "موجودہ پاس ورڈ غلط ہے۔",
+"Custom": "کسٹم",
+"Customer Portal Login": "کسٹمر پورٹل لاگ اِن",
+"Customer Watch mein chala jayega — har naye udhaar par approval.": "کسٹمر واچ میں چلا جائے گا — ہر نئے ادھار پر منظوری۔",
+"Customer bank / cheque payments come into this account": "کسٹمر کی بینک / چیک ادائیگیاں اس اکاؤنٹ میں آتی ہیں",
+"Customer ka phone number save nahi.": "کسٹمر کا فون نمبر محفوظ نہیں۔",
+"Customer ka portal login banana": "کسٹمر کا پورٹل لاگ اِن بنانا",
+"Customer ko WhatsApp par batao": "کسٹمر کو واٹس ایپ پر بتائیں",
+"Customer level": "کسٹمر لیول",
+"Customer orders go straight to Daily Orders (marked “Portal order”). Promises go to Promise To Pay.": "کسٹمر کے آرڈر سیدھے Daily Orders میں جاتے ہیں (“Portal order” کے نشان کے ساتھ)۔ وعدے Promise To Pay میں جاتے ہیں۔",
+"Customer payments go to: Cash → cash account, Bank Transfer / Cheque → the bank marked to receive, Easypaisa / JazzCash → wallet.": "کسٹمر ادائیگیاں: کیش → کیش اکاؤنٹ، بینک ٹرانسفر / چیک → وصولی والا بینک، ایزی پیسہ / جاز کیش → والٹ۔",
+"Cut": "کٹوتی",
+"Cut starts from": "کٹوتی شروع",
+"Cuts": "کٹوتیاں",
+"Date tak": "تاریخ تک",
+"Dates theek karein.": "تاریخیں درست کریں۔",
+"Day Book": "روزنامچہ",
+"Default duty end": "ڈیوٹی ختم (طے شدہ)",
+"Default duty start": "ڈیوٹی شروع (طے شدہ)",
+"Deliveries due today / late": "آج / تاخیر والی ڈیلیوریاں",
+"Delivery Schedule": "ڈیلیوری شیڈول",
+"Delivery schedule": "ڈیلیوری شیڈول",
+"Detail": "تفصیل",
+"Drawer should have": "دراز میں ہونا چاہیے",
+"Due now": "ابھی واجب",
+"Due on this invoice": "اس انوائس پر واجب",
+"Duty": "ڈیوٹی",
+"Duty end": "ڈیوٹی ختم",
+"Duty start": "ڈیوٹی شروع",
+"Each approver adds their own signature from “My Signature” on the Vouchers page.": "ہر منظور کنندہ Vouchers صفحے کے “My Signature” سے اپنے دستخط شامل کرے۔",
+"Edit Employee": "ملازم میں ترمیم",
+"Edit a day": "کسی دن میں ترمیم",
+"Edit attendance": "حاضری میں ترمیم",
+"Edit schedule": "شیڈول میں ترمیم",
+"Emergency number": "ایمرجنسی نمبر",
+"Employee": "ملازم",
+"Employee choose karein.": "ملازم منتخب کریں۔",
+"Employees": "ملازمین",
+"Enter the cheque number": "چیک نمبر لکھیں",
+"Estimated total": "اندازاً کل",
+"Every invoice uses the purchase rate valid on its date, so old profit does not change when you change a rate. Invoices before the first saved rate use that first rate (estimate).": "ہر انوائس اپنی تاریخ کا خریداری ریٹ استعمال کرتی ہے، اس لیے ریٹ بدلنے سے پرانا منافع نہیں بدلتا۔ پہلے محفوظ ریٹ سے پہلے کی انوائسز وہی پہلا ریٹ استعمال کرتی ہیں (اندازہ)۔",
+"Every kisht needs a date.": "ہر قسط کی تاریخ ضروری ہے۔",
+"Every kisht needs an amount.": "ہر قسط کی رقم ضروری ہے۔",
+"Every month": "ہر مہینے",
+"Every row needs a date and a quantity.": "ہر قطار میں تاریخ اور مقدار ضروری ہے۔",
+"Expense": "خرچہ",
+"Expenses by category": "زمرے کے حساب سے اخراجات",
+"FULLY PAID": "مکمل ادا شدہ",
+"Faisla": "فیصلہ",
+"Final + vouchers": "فائنل + واؤچر",
+"Final bill is made by the shop (rate / delivery may change).": "اصل بل دکان بنائے گی (ریٹ / ڈیلیوری بدل سکتی ہے)۔",
+"First / payment date": "پہلی / ادائیگی کی تاریخ",
+"For my approval": "میری منظوری کے لیے",
+"Free from cash limit": "کیش حد سے آزاد",
+"Full": "مکمل",
+"Give approval rights to anyone. A voucher above someone's limit goes to a person with a higher limit. Admin can always approve.": "کسی کو بھی منظوری کا اختیار دیں۔ کسی کی حد سے زیادہ والا واؤچر زیادہ حد والے کے پاس جاتا ہے۔ ایڈمن ہمیشہ منظور کر سکتا ہے۔",
+"Gold": "گولڈ",
+"Grade": "گریڈ",
+"Green": "گرین",
+"Gross profit": "مجموعی منافع",
+"Gross salary": "کل تنخواہ",
+"HR / Admin": "ایچ آر / ایڈمن",
+"HR Settings": "ایچ آر سیٹنگز",
+"Hold the voucher or invoice QR inside the green box.": "واؤچر یا انوائس کا QR سبز خانے کے اندر رکھیں۔",
+"How many kishts": "کتنی قسطیں",
+"How much?": "کتنا؟",
+"How the approver signs the voucher.": "منظور کنندہ واؤچر پر کیسے دستخط کرے۔",
+"ID Card": "شناختی کارڈ",
+"Ijazat do": "اجازت دیں",
+"Ijazat sirf ek invoice ke liye hai. Faisla, naam aur waqt log mein save hota hai.": "اجازت صرف ایک انوائس کے لیے ہے۔ فیصلہ، نام اور وقت لاگ میں محفوظ ہوتا ہے۔",
+"In": "اِن",
+"In dates mein koi working day nahi.": "ان تاریخوں میں کوئی کام کا دن نہیں۔",
+"Invoice made": "انوائس بن گئی",
+"Invoice not found": "انوائس نہیں ملی",
+"Is baar": "اس بار",
+"Is baar de do": "اس بار دے دیں",
+"Is date se pehle ke din absent nahi gine jayenge.": "اس تاریخ سے پہلے کے دن غیر حاضر نہیں گنے جائیں گے۔",
+"Is invoice ka udhaar": "اس انوائس کا ادھار",
+"Is list mein koi customer nahi.": "اس فہرست میں کوئی کسٹمر نہیں۔",
+"Is mahine kuch nahi.": "اس مہینے کچھ نہیں۔",
+"Is mahine leave": "اس مہینے چھٹی",
+"Jab tak khud na kholein": "جب تک خود نہ کھولیں",
+"Join date": "شمولیت کی تاریخ",
+"Kab tak?": "کب تک؟",
+"Khata band": "کھاتہ بند",
+"Khata band / chalu, credit status": "کھاتہ بند / چالو، کریڈٹ اسٹیٹس",
+"Khata band karein": "کھاتہ بند کریں",
+"Khata band karo": "کھاتہ بند کرو",
+"Khata kholo": "کھاتہ کھولو",
+"Kis ne ijazat di / khata band kiya": "کس نے اجازت دی / کھاتہ بند کیا",
+"Kisht": "قسط",
+"Kisht schedule": "قسطوں کا شیڈول",
+"Kisht total": "قسطوں کا کل",
+"Kishtein": "قسطیں",
+"Koi request nahi.": "کوئی درخواست نہیں۔",
+"Kuch salary pay ho chuki hai — sheet dobara nahi khul sakti.": "کچھ تنخواہ ادا ہو چکی ہے — شیٹ دوبارہ نہیں کھل سکتی۔",
+"Kya band karna hai?": "کیا بند کرنا ہے؟",
+"Last 6 months": "پچھلے 6 ماہ",
+"Late": "لیٹ",
+"Late after (minutes grace)": "لیٹ (منٹ رعایت کے بعد)",
+"Later": "بعد میں",
+"Leave": "چھٹی",
+"Leave & Advance": "چھٹی اور ایڈوانس",
+"Leave / advance approve, salary final": "چھٹی / ایڈوانس منظور، تنخواہ فائنل",
+"Leave Request": "چھٹی کی درخواست",
+"Leave Slip": "چھٹی سلپ",
+"Leave limit per month": "ماہانہ چھٹی کی حد",
+"Leave request": "چھٹی کی درخواست",
+"Leave type": "چھٹی کی قسم",
+"Left": "چھوڑ گیا",
+"Left (job chhor di)": "چھوڑ گیا (نوکری چھوڑ دی)",
+"Length ft": "لمبائی فٹ",
+"Limit": "حد",
+"Limit (Rs)": "حد (روپے)",
+"Loading": "لوڈ ہو رہا ہے",
+"Loading screenshot…": "اسکرین شاٹ لوڈ ہو رہا ہے…",
+"Loading the voucher": "واؤچر لوڈ ہو رہا ہے",
+"Loading…": "لوڈ ہو رہا ہے…",
+"Login & Access": "لاگ اِن اور رسائی",
+"Login bana hua hai": "لاگ اِن بنا ہوا ہے",
+"Login ke liye password likhein.": "لاگ اِن کے لیے پاس ورڈ لکھیں۔",
+"Login username": "لاگ اِن یوزر نیم",
+"Maaf": "معاف",
+"Make invoice": "انوائس بنائیں",
+"Mana": "منع",
+"Manager": "مینیجر",
+"Matched": "مل گیا",
+"Menu": "مینو",
+"Meri ijazat se de do": "میری اجازت سے دے دیں",
+"Money in (customer payments) and out (paid vouchers) — every account": "رقم آئی (کسٹمر ادائیگیاں) اور گئی (ادا شدہ واؤچر) — ہر اکاؤنٹ",
+"Monthly salaries": "ماہانہ تنخواہیں",
+"Monthly salary (Rs)": "ماہانہ تنخواہ (روپے)",
+"Monthly sheet": "ماہانہ شیٹ",
+"Most profit": "سب سے زیادہ منافع",
+"My Attendance": "میری حاضری",
+"My advances": "میرے ایڈوانس",
+"My calendar": "میرا کیلنڈر",
+"My leaves": "میری چھٹیاں",
+"My messages": "میرے پیغامات",
+"NOT APPROVED — send it to the admin": "منظور نہیں — ایڈمن کو بھیجیں",
+"Naam likhein.": "نام لکھیں۔",
+"Name — employee, supplier, anyone": "نام — ملازم، سپلائر، کوئی بھی",
+"Naye customer ka credit status": "نئے کسٹمر کا کریڈٹ اسٹیٹس",
+"Needed today (incl. overdue)": "آج درکار (واجب الادا سمیت)",
+"Net": "خالص",
+"Net payable": "قابلِ ادائیگی خالص",
+"Net profit": "خالص منافع",
+"New Employee": "نیا ملازم",
+"New category": "نیا زمرہ",
+"New category name": "نئے زمرے کا نام",
+"New invoice": "نئی انوائس",
+"New password (min 4)": "نیا پاس ورڈ (کم از کم 4)",
+"New password again": "نیا پاس ورڈ دوبارہ",
+"New password is too short.": "نیا پاس ورڈ بہت چھوٹا ہے۔",
+"New rate valid from": "نیا ریٹ اس تاریخ سے",
+"Nikalo": "نکالیں",
+"No access": "رسائی نہیں",
+"No active bookings.": "کوئی فعال بکنگ نہیں۔",
+"No advance requests.": "کوئی ایڈوانس درخواست نہیں۔",
+"No approval": "منظوری نہیں",
+"No approval rights": "منظوری کا اختیار نہیں",
+"No bookings.": "کوئی بکنگ نہیں۔",
+"No cheques yet.": "ابھی کوئی چیک نہیں۔",
+"No closing saved yet.": "ابھی کوئی کلوزنگ محفوظ نہیں۔",
+"No complaints.": "کوئی شکایت نہیں۔",
+"No customer in this group.": "اس گروپ میں کوئی کسٹمر نہیں۔",
+"No employees for this month.": "اس مہینے کوئی ملازم نہیں۔",
+"No employees yet.": "ابھی کوئی ملازم نہیں۔",
+"No entries on this day.": "اس دن کوئی اندراج نہیں۔",
+"No expense vouchers paid in this period.": "اس مدت میں کوئی خرچہ واؤچر ادا نہیں ہوا۔",
+"No invoices yet.": "ابھی کوئی انوائس نہیں۔",
+"No leave requests.": "کوئی چھٹی کی درخواست نہیں۔",
+"No messages.": "کوئی پیغام نہیں۔",
+"No orders yet.": "ابھی کوئی آرڈر نہیں۔",
+"No paid vouchers in this period.": "اس مدت میں کوئی ادا شدہ واؤچر نہیں۔",
+"No payment requests yet.": "ابھی کوئی ادائیگی درخواست نہیں۔",
+"No phone": "فون نہیں",
+"No products yet.": "ابھی کوئی پروڈکٹ نہیں۔",
+"No salary slips yet.": "ابھی کوئی تنخواہ سلپ نہیں۔",
+"No sales in this period.": "اس مدت میں کوئی فروخت نہیں۔",
+"No schedule yet.": "ابھی کوئی شیڈول نہیں۔",
+"No transfers yet.": "ابھی کوئی ٹرانسفر نہیں۔",
+"No vouchers here.": "یہاں کوئی واؤچر نہیں۔",
+"Not added": "شامل نہیں",
+"Not cleared": "کلیئر نہیں",
+"Not in yet": "ابھی نہیں آیا",
+"Not set": "سیٹ نہیں",
+"Note (rickshaw, site…)": "نوٹ (رکشہ، سائٹ…)",
+"Nothing due today.": "آج کچھ واجب نہیں۔",
+"Nothing here.": "یہاں کچھ نہیں۔",
+"Nothing new.": "کچھ نیا نہیں۔",
+"Nothing to pay — all approved vouchers are paid.": "ادا کرنے کو کچھ نہیں — تمام منظور شدہ واؤچر ادا ہو چکے۔",
+"On leave": "چھٹی پر",
+"On leave today": "آج چھٹی پر",
+"On the rickshaw": "رکشے پر",
+"One payment": "ایک ادائیگی",
+"Opening balance (Rs)": "ابتدائی بیلنس (روپے)",
+"Order / booking band hai. Dukaan se rabta karein.": "آرڈر / بکنگ بند ہے۔ دکان سے رابطہ کریں۔",
+"Order abhi nahi ho sakta. Purana udhaar clear karein ya dukaan se rabta karein.": "آرڈر ابھی نہیں ہو سکتا۔ پرانا ادھار کلیئر کریں یا دکان سے رابطہ کریں۔",
+"Order sent — the shop will confirm it.": "آرڈر بھیج دیا — دکان تصدیق کرے گی۔",
+"Order this": "یہ آرڈر کریں",
+"Other bank (type name)": "دوسرا بینک (نام لکھیں)",
+"Out": "آؤٹ",
+"Overdue": "واجب الادا",
+"Owner drawing": "مالک کی نکاسی",
+"Owner drawings (not an expense)": "مالک کی نکاسی (خرچہ نہیں)",
+"Paid By (Cashier)": "ادا کنندہ (کیشیئر)",
+"Paid on": "ادائیگی کی تاریخ",
+"Paid this month": "اس مہینے ادا",
+"Part of this period's sale": "اس مدت کی فروخت کا حصہ",
+"Pay": "ادائیگی",
+"Pay in advance (optional)": "پیشگی ادائیگی (اختیاری)",
+"Pay is locked": "ادائیگی بند ہے",
+"Pay is locked until then": "اس وقت تک ادائیگی بند ہے",
+"Pay kisht": "قسط ادا کریں",
+"Pay later": "بعد میں ادائیگی",
+"Payee (who is paid)": "وصول کنندہ (جسے ادائیگی ہو)",
+"Payment Received mein kam az kam": "Payment Received میں کم از کم",
+"Payment aane tak": "ادائیگی آنے تک",
+"Payment plan — when and how": "ادائیگی کا پلان — کب اور کیسے",
+"Payment received": "ادائیگی وصول ہوئی",
+"Payment request": "ادائیگی کی درخواست",
+"Payment sent for verification": "ادائیگی تصدیق کے لیے بھیج دی",
+"Payments Due": "واجب ادائیگیاں",
+"Payments being verified": "ادائیگیاں تصدیق میں",
+"Payments, complaints and orders sent by customers from their portal": "کسٹمرز کے پورٹل سے بھیجی گئی ادائیگیاں، شکایات اور آرڈر",
+"Pehle se advance baqi hai": "پہلے سے ایڈوانس باقی ہے",
+"Pending approval": "منظوری کا انتظار",
+"Per month (Rs)": "ماہانہ (روپے)",
+"Photo load nahi hui.": "تصویر لوڈ نہیں ہوئی۔",
+"Photo of signed paper (optional)": "دستخط شدہ کاغذ کی تصویر (اختیاری)",
+"Plan delivery": "ڈیلیوری پلان کریں",
+"Planned": "طے شدہ",
+"Please add the payment screenshot.": "براہ کرم ادائیگی کا اسکرین شاٹ شامل کریں۔",
+"Please add your signature first.": "براہ کرم پہلے اپنے دستخط شامل کریں۔",
+"Please choose a category.": "براہ کرم زمرہ منتخب کریں۔",
+"Please count the cash first.": "براہ کرم پہلے کیش گنیں۔",
+"Please enter a name.": "براہ کرم نام لکھیں۔",
+"Please enter a valid amount.": "براہ کرم درست رقم لکھیں۔",
+"Please enter the bank name.": "براہ کرم بینک کا نام لکھیں۔",
+"Please enter who is being paid.": "براہ کرم لکھیں کہ ادائیگی کس کو ہو رہی ہے۔",
+"Poora cash le kar do": "پورا کیش لے کر دیں",
+"Poora khata band — koi maal nahi (cash bhi nahi)": "پورا کھاتہ بند — کوئی مال نہیں (کیش بھی نہیں)",
+"Portal Requests": "پورٹل درخواستیں",
+"Portal login sirf admin / access wala bana sakta hai.": "پورٹل لاگ اِن صرف ایڈمن / رسائی والا بنا سکتا ہے۔",
+"Portal par customer apna hisaab dekh sakega, order / booking band rahegi.": "پورٹل پر کسٹمر اپنا حساب دیکھ سکے گا، آرڈر / بکنگ بند رہے گی۔",
+"Post / designation": "عہدہ",
+"Post / designation likhein.": "عہدہ لکھیں۔",
+"Present today": "آج حاضر",
+"Print Advance Slip": "ایڈوانس سلپ پرنٹ کریں",
+"Print Daily Closing": "ڈیلی کلوزنگ پرنٹ کریں",
+"Print ID Card": "شناختی کارڈ پرنٹ کریں",
+"Print Leave Slip": "چھٹی سلپ پرنٹ کریں",
+"Print Payment Slip": "پیمنٹ سلپ پرنٹ کریں",
+"Print Voucher": "واؤچر پرنٹ کریں",
+"Print Warning Letter": "وارننگ لیٹر پرنٹ کریں",
+"Print voucher": "واؤچر پرنٹ کریں",
+"Profit Calculator": "منافع کیلکولیٹر",
+"Profit by product": "پروڈکٹ کے حساب سے منافع",
+"Profit margin": "منافع کی شرح",
+"Profit report": "منافع رپورٹ",
+"Promise": "وعدہ",
+"Purana udhaar clear karein — phir order ho sakega.": "پرانا ادھار کلیئر کریں — پھر آرڈر ہو سکے گا۔",
+"Purchase rate (cost) of each product": "ہر پروڈکٹ کا خریداری ریٹ (لاگت)",
+"Purchase rates & setup": "خریداری ریٹ اور سیٹ اپ",
+"Purchase rates are not set yet — profit cannot be calculated. Tap here to add them.": "خریداری ریٹ ابھی سیٹ نہیں — منافع نہیں نکل سکتا۔ شامل کرنے کے لیے یہاں دبائیں۔",
+"QR Code": "QR کوڈ",
+"QR code": "QR کوڈ",
+"REJECTED": "مسترد",
+"Raqam ek mahine ki salary se zyada hai": "رقم ایک مہینے کی تنخواہ سے زیادہ ہے",
+"Reason for rejecting": "مسترد کرنے کی وجہ",
+"Received By (Employee)": "وصول کنندہ (ملازم)",
+"Received By (Payee)": "وصول کنندہ (ادا شدہ)",
+"Receiver account number": "وصول کنندہ اکاؤنٹ نمبر",
+"Receiver bank": "وصول کنندہ بینک",
+"Receiving photo": "وصولی کی تصویر",
+"Red List": "ریڈ لسٹ",
+"Red List / band customer ko udhaar ki ijazat": "ریڈ لسٹ / بند کسٹمر کو ادھار کی اجازت",
+"Red List / band khate par discount nahi diya ja sakta.": "ریڈ لسٹ / بند کھاتے پر ڈسکاؤنٹ نہیں دیا جا سکتا۔",
+"Red List se nikalo": "ریڈ لسٹ سے نکالیں",
+"Red se nikalo": "ریڈ سے نکالیں",
+"Reject Voucher": "واؤچر مسترد کریں",
+"Remove this account?": "یہ اکاؤنٹ ہٹائیں؟",
+"Reopen": "دوبارہ کھولیں",
+"Reply & close": "جواب دیں اور بند کریں",
+"Reply to the customer": "کسٹمر کو جواب دیں",
+"Report": "رپورٹ",
+"Requests approve / reject karein, slips print karein": "درخواستیں منظور / مسترد کریں، سلپس پرنٹ کریں",
+"Review": "جائزہ",
+"Rickshaw + delivery": "رکشہ + ڈیلیوری",
+"Rough estimate only — the real need depends on the design.": "صرف اندازہ — اصل ضرورت ڈیزائن پر منحصر ہے۔",
+"Rows turn “Delivered” by themselves when invoices are made from this booking. The customer sees this schedule in the portal.": "اس بکنگ سے انوائس بنتے ہی قطاریں خود “Delivered” ہو جاتی ہیں۔ کسٹمر یہ شیڈول پورٹل میں دیکھتا ہے۔",
+"Rupees": "روپے",
+"SCHEDULED — not yet": "شیڈول — ابھی نہیں",
+"Sab customers": "تمام کسٹمرز",
+"Sab se purana": "سب سے پرانا",
+"Salary": "تنخواہ",
+"Salary Sheet": "تنخواہ شیٹ",
+"Salary Slip": "تنخواہ سلپ",
+"Salary paid": "تنخواہ ادا ہو گئی",
+"Salary slips": "تنخواہ سلپس",
+"Sale": "فروخت",
+"Sale vs net profit — last 6 months": "فروخت بمقابلہ خالص منافع — پچھلے 6 ماہ",
+"Sales vs collection chart": "فروخت بمقابلہ وصولی چارٹ",
+"Same as cashier": "کیشیئر جیسا",
+"Save & send for approval": "محفوظ کریں اور منظوری کے لیے بھیجیں",
+"Save closing": "کلوزنگ محفوظ کریں",
+"Save employee": "ملازم محفوظ کریں",
+"Save rules": "قواعد محفوظ کریں",
+"Saved": "محفوظ ہو گیا",
+"Saved closings": "محفوظ کلوزنگز",
+"Saving…": "محفوظ ہو رہا ہے…",
+"Scan": "اسکین",
+"Scan QR with camera": "کیمرے سے QR اسکین کریں",
+"Scanner ready": "اسکینر تیار",
+"Scanner ready — scan a voucher / invoice QR, or tap to use the camera": "اسکینر تیار — واؤچر / انوائس کا QR اسکین کریں، یا کیمرے کے لیے دبائیں",
+"Scheduled": "شیڈول شدہ",
+"Search booking, customer…": "بکنگ، کسٹمر تلاش کریں…",
+"Search customer…": "کسٹمر تلاش کریں…",
+"Search name, EMP no, CNIC…": "نام، EMP نمبر، شناختی کارڈ تلاش کریں…",
+"Search voucher, payee, cheque…": "واؤچر، وصول کنندہ، چیک تلاش کریں…",
+"Send": "بھیجیں",
+"Send for approval + Print": "منظوری کے لیے بھیجیں + پرنٹ",
+"Send request": "درخواست بھیجیں",
+"Sending…": "بھیجا جا رہا ہے…",
+"Share": "شیئر",
+"Share of sales": "فروخت میں حصہ",
+"Sheet dobara kholein? Is mahine ke salary vouchers cancel ho jayenge.": "شیٹ دوبارہ کھولیں؟ اس مہینے کے تنخواہ واؤچر منسوخ ہو جائیں گے۔",
+"Shop replied": "دکان نے جواب دیا",
+"Show this account to customers in their portal (for payment)": "یہ اکاؤنٹ کسٹمرز کو ان کے پورٹل میں دکھائیں (ادائیگی کے لیے)",
+"Sign with your finger or mouse inside the box.": "خانے کے اندر انگلی یا ماؤس سے دستخط کریں۔",
+"Silver": "سلور",
+"Sirf cash": "صرف کیش",
+"Sirf udhaar band — cash par maal mil sakta hai": "صرف ادھار بند — کیش پر مال مل سکتا ہے",
+"Site / address": "سائٹ / پتہ",
+"Skip": "چھوڑیں",
+"Slip": "سلپ",
+"Slip nahi mili.": "سلپ نہیں ملی۔",
+"Some kishts are already paid. Cancelling reverses them in the Cash Book.": "کچھ قسطیں ادا ہو چکی ہیں۔ منسوخی انہیں کیش بک میں واپس کر دے گی۔",
+"Some products have no purchase rate": "کچھ پروڈکٹس کا خریداری ریٹ نہیں",
+"Split a booking into deliveries — e.g. 100 bags tomorrow, the rest after 4 days": "بکنگ کو ڈیلیوریوں میں بانٹیں — مثلاً کل 100 بوری، باقی 4 دن بعد",
+"Staff record, ID card, login aur access": "عملے کا ریکارڈ، شناختی کارڈ، لاگ اِن اور رسائی",
+"Still in": "ابھی اندر",
+"Stock in godown will show here once stock tracking is added.": "اسٹاک ٹریکنگ شامل ہونے پر گودام کا اسٹاک یہاں دکھے گا۔",
+"Stock purchase": "اسٹاک خریداری",
+"Take photo": "تصویر لیں",
+"Tap to add the screenshot / receipt photo": "اسکرین شاٹ / رسید کی تصویر شامل کرنے کے لیے دبائیں",
+"Tell the shop when you will pay. You will get a reminder on that date.": "دکان کو بتائیں آپ کب ادائیگی کریں گے۔ اس تاریخ کو یاد دہانی ملے گی۔",
+"Thank you! The shop has your promise.": "شکریہ! دکان کو آپ کا وعدہ مل گیا۔",
+"The shop verifies it → your balance goes down → you get the receipt.": "دکان تصدیق کرے گی → آپ کا بیلنس کم ہوگا → آپ کو رسید ملے گی۔",
+"The shop will check it. After that your balance goes down by itself.": "دکان چیک کرے گی۔ اس کے بعد آپ کا بیلنس خود کم ہو جائے گا۔",
+"The two new passwords are not the same.": "دونوں نئے پاس ورڈ ایک جیسے نہیں۔",
+"The voucher was changed after this paper was printed. Print a new one.": "یہ کاغذ پرنٹ ہونے کے بعد واؤچر بدلا گیا۔ نیا پرنٹ کریں۔",
+"Theek hai": "ٹھیک ہے",
+"Their profit is shown as the full sale. Tap here to add.": "ان کا منافع پوری فروخت دکھایا گیا ہے۔ شامل کرنے کے لیے یہاں دبائیں۔",
+"Thickness in": "موٹائی انچ",
+"This QR code does not match any invoice.": "یہ QR کوڈ کسی انوائس سے میل نہیں کھاتا۔",
+"This QR code does not match any voucher.": "یہ QR کوڈ کسی واؤچر سے میل نہیں کھاتا۔",
+"This QR code does not match our records.": "یہ QR کوڈ ہمارے ریکارڈ سے میل نہیں کھاتا۔",
+"This browser cannot scan with the camera. Use the scanner, or open the phone's camera app and scan the QR.": "یہ براؤزر کیمرے سے اسکین نہیں کر سکتا۔ اسکینر استعمال کریں، یا فون کی کیمرہ ایپ سے QR اسکین کریں۔",
+"This order": "یہ آرڈر",
+"This paper is outdated": "یہ کاغذ پرانا ہے",
+"This signature is printed on every voucher you approve.": "یہ دستخط آپ کے منظور کردہ ہر واؤچر پر پرنٹ ہوتے ہیں۔",
+"This voucher was already updated by someone else": "یہ واؤچر پہلے ہی کسی اور نے اپ ڈیٹ کر دیا",
+"This week": "اس ہفتے",
+"Tick all boxes to enable Pay": "ادائیگی کے لیے تمام خانے ٹِک کریں",
+"Top customers by purchase": "خریداری کے لحاظ سے بڑے کسٹمر",
+"Top products": "بڑی پروڈکٹس",
+"Total sale": "کل فروخت",
+"Total udhaar": "کل ادھار",
+"Transaction / reference ID": "ٹرانزیکشن / ریفرنس آئی ڈی",
+"Transaction ID (optional)": "ٹرانزیکشن آئی ڈی (اختیاری)",
+"Transfer between accounts": "اکاؤنٹس کے درمیان ٹرانسفر",
+"Type (for profit)": "قسم (منافع کے لیے)",
+"Udhaar": "ادھار",
+"Udhaar Aging & Reminders": "ادھار کی عمر اور یاد دہانیاں",
+"Udhaar de do": "ادھار دے دیں",
+"Udhaar par maal band": "ادھار پر مال بند",
+"Up to a limit": "حد تک",
+"Upload photo": "تصویر اپ لوڈ کریں",
+"Username khali ho to employee login nahi kar sakega (sirf card se hazri).": "یوزر نیم خالی ہو تو ملازم لاگ اِن نہیں کر سکے گا (صرف کارڈ سے حاضری)۔",
+"Verify — add payment": "تصدیق — ادائیگی شامل کریں",
+"Voucher approve karna": "واؤچر منظور کرنا",
+"Voucher approve limit (0 = unlimited)": "واؤچر منظوری کی حد (0 = لامحدود)",
+"Voucher banana": "واؤچر بنانا",
+"Voucher category type": "واؤچر زمرہ کی قسم",
+"Voucher not found": "واؤچر نہیں ملا",
+"Voucher not found — the QR is not from this shop, or the voucher was deleted.": "واؤچر نہیں ملا — QR اس دکان کا نہیں، یا واؤچر حذف ہو گیا۔",
+"Voucher pay karna (cashier)": "واؤچر ادا کرنا (کیشیئر)",
+"Waiting": "انتظار",
+"Waiting for approval": "منظوری کا انتظار",
+"Waiting for your approval": "آپ کی منظوری کا انتظار",
+"Wajah (zaroori)": "وجہ (ضروری)",
+"Wajah likhein.": "وجہ لکھیں۔",
+"Wall area sq.ft": "دیوار کا رقبہ مربع فٹ",
+"Want to pay now (advance)? Send to any account below and add the screenshot.": "ابھی ادائیگی کرنا چاہتے ہیں (پیشگی)؟ نیچے کسی بھی اکاؤنٹ میں بھیجیں اور اسکرین شاٹ شامل کریں۔",
+"Wapis": "واپس",
+"Wapis jao": "واپس جائیں",
+"Wapsi (months)": "واپسی (مہینے)",
+"Wapsi kitne mahine mein?": "واپسی کتنے مہینوں میں؟",
+"Warning": "وارننگ",
+"Warning letter not found": "وارننگ لیٹر نہیں ملا",
+"Warnings": "وارننگز",
+"Watch": "واچ",
+"Watch / approval": "واچ / منظوری",
+"Weekly off (chhutti ka din)": "ہفتہ وار چھٹی",
+"WhatsApp baqi": "واٹس ایپ باقی",
+"WhatsApp nahi gaya": "واٹس ایپ نہیں گیا",
+"WhatsApp par login bhejo": "واٹس ایپ پر لاگ اِن بھیجیں",
+"Where is the money?": "رقم کہاں ہے؟",
+"Who buys the most, who pays on time, and who needs a reminder": "کون سب سے زیادہ خریدتا ہے، کون وقت پر ادا کرتا ہے، اور کسے یاد دہانی چاہیے",
+"Who will receive the material": "مال کون وصول کرے گا",
+"Width ft": "چوڑائی فٹ",
+"Write my own": "خود لکھیں",
+"Write to the shop": "دکان کو لکھیں",
+"Write your problem / request": "اپنا مسئلہ / درخواست لکھیں",
+"Yaad-dihani": "یاد دہانی",
+"Ye card is system ka nahi": "یہ کارڈ اس سسٹم کا نہیں",
+"Ye username pehle se kisi aur ka hai.": "یہ یوزر نیم پہلے سے کسی اور کا ہے۔",
+"Your promise": "آپ کا وعدہ",
+"Your signature": "آپ کے دستخط",
+"Zyada se zyada udhaar (Rs)": "زیادہ سے زیادہ ادھار (روپے)",
+"absent": "غیر حاضر",
+"any amount": "کوئی بھی رقم",
+"aur likhein": "اور لکھیں",
+"bags": "بوریاں",
+"baqi": "باقی",
+"bhej di.": "بھیج دی۔",
+"booked": "بُک شدہ",
+"din": "دن",
+"din extra — salary se cut ho sakte hain": "دن اضافی — تنخواہ سے کٹ سکتے ہیں",
+"din extra → salary se cut (Salary Sheet mein “Maaf” kar sakte hain)": "دن اضافی → تنخواہ سے کٹوتی (تنخواہ شیٹ میں “معاف” کر سکتے ہیں)",
+"din faasla": "دن فاصلہ",
+"din purana — jald payment karein.": "دن پرانا — جلد ادائیگی کریں۔",
+"discount": "ڈسکاؤنٹ",
+"dobara pay na karein": "دوبارہ ادائیگی نہ کریں",
+"dobara thori der baad scan karein (check-out)": "تھوڑی دیر بعد دوبارہ اسکین کریں (چیک آؤٹ)",
+"due": "واجب",
+"due now": "ابھی واجب",
+"e.g. 15 tareekh ko payment ka wada": "مثلاً 15 تاریخ کو ادائیگی کا وعدہ",
+"e.g. Gulshan Colony plot 14": "مثلاً گلشن کالونی پلاٹ 14",
+"e.g. Munshi Akram 0301-…": "مثلاً منشی اکرم 0301-…",
+"e.g. October salary / 20 bags cement bill": "مثلاً اکتوبر تنخواہ / 20 بوری سیمنٹ بل",
+"e.g. ali": "مثلاً علی",
+"e.g. cash deposited in bank, or cash taken out of bank.": "مثلاً بینک میں جمع کیش، یا بینک سے نکالا کیش۔",
+"early allowed": "پہلے اجازت",
+"equal kishts": "برابر قسطیں",
+"expenses": "اخراجات",
+"expiry": "میعاد",
+"extra": "اضافی",
+"from customers": "کسٹمرز سے",
+"har mahine salary se cut": "ہر مہینے تنخواہ سے کٹوتی",
+"hazri, leave cut, advance cut — har line par Cut / Maaf": "حاضری، چھٹی کٹوتی، ایڈوانس کٹوتی — ہر لائن پر کٹوتی / معاف",
+"incl. delivery": "ڈیلیوری سمیت",
+"invoices": "انوائسز",
+"is before the first saved purchase rate, so its cost is an estimate.": "پہلے محفوظ خریداری ریٹ سے پہلے کی ہے، اس لیے اس کی لاگت اندازہ ہے۔",
+"ki salary sheet final karein? Har employee ka salary voucher ban jayega.": "کی تنخواہ شیٹ فائنل کریں؟ ہر ملازم کا تنخواہ واؤچر بن جائے گا۔",
+"kisht": "قسط",
+"late": "لیٹ",
+"left": "باقی",
+"limit ke andar": "حد کے اندر",
+"make it smaller or choose Bank / Cheque": "کم کریں یا بینک / چیک منتخب کریں",
+"max udhaar": "زیادہ سے زیادہ ادھار",
+"me": "میں",
+"min": "منٹ",
+"month": "مہینہ",
+"more than this cannot be paid in cash at once. Split it into monthly kishts, or choose Account / Cheque.": "اس سے زیادہ ایک بار میں کیش ادا نہیں ہو سکتا۔ ماہانہ قسطوں میں بانٹیں، یا اکاؤنٹ / چیک منتخب کریں۔",
+"naya": "نیا",
+"new in this period": "اس مدت میں نئے",
+"next": "اگلا",
+"no login": "لاگ اِن نہیں",
+"no rate": "ریٹ نہیں",
+"not in": "نہیں آئے",
+"nothing more to pay": "مزید کچھ ادا نہیں کرنا",
+"of sale": "فروخت کا",
+"oldest": "سب سے پرانا",
+"only option above": "اوپر والا ہی آپشن",
+"opening": "ابتدائی",
+"overdue": "واجب الادا",
+"paid": "ادا شدہ",
+"paid vouchers (expense type)": "ادا شدہ واؤچر (خرچہ قسم)",
+"payment": "ادائیگی",
+"pehle": "پہلے",
+"pehle li": "پہلے لی",
+"plan by": "پلان بنایا",
+"present": "حاضر",
+"purchase cost of what was sold": "فروخت شدہ مال کی خریداری لاگت",
+"receives customer bank payments": "کسٹمر کی بینک ادائیگیاں وصول کرتا ہے",
+"se": "سے",
+"short": "کم",
+"signs the paper by hand": "ہاتھ سے کاغذ پر دستخط",
+"stock": "اسٹاک",
+"system sign": "سسٹم دستخط",
+"tak payment karein, warna naya maal udhaar par band.": "تک ادائیگی کریں، ورنہ نیا مال ادھار پر بند۔",
+"to pay": "ادا کرنا",
+"udhaar": "ادھار",
+"udhaar 0": "ادھار 0",
+"udhaar purana": "ادھار پرانا",
+"up to": "تک",
+"used": "استعمال شدہ",
+"voucher amount": "واؤچر کی رقم",
+"vouchers": "واؤچرز",
+"warnings": "وارننگز",
+"“Final” dabane par har employee ka approved salary voucher banega — cashier Payments Due se pay karega. Final ke baad slips print karein.": "“Final” دبانے پر ہر ملازم کا منظور شدہ تنخواہ واؤچر بنے گا — کیشیئر Payments Due سے ادائیگی کرے گا۔ فائنل کے بعد سلپس پرنٹ کریں۔",
+"“Stock purchase” is not counted as an expense — it is already in the cost of goods. “Owner drawing” is also not an expense.": "“Stock purchase” خرچہ نہیں گنا جاتا — یہ پہلے ہی مال کی لاگت میں ہے۔ “Owner drawing” بھی خرچہ نہیں۔",
+"Urdu Translation": "اردو ترجمہ",
+"HR": "ایچ آر"
+};
+
+/* ============================================================
+   URDU TRANSLATION
+   1) All screens: the extra Urdu dictionary (URDU_UI_EXTRA) is
+      added to the app's translations.
+   2) Saved data (customer / product / employee names, posts,
+      categories, accounts, payees …) written in English gets an
+      Urdu version automatically (word dictionary + sound-based
+      transliteration). Admin can correct any word on the
+      “Urdu Translation” page. Stored in ct-urdu-dict:
+        { "Malik Builders": { u: "ملک بلڈرز", m: true|false } }
+   ============================================================ */
+
+Object.assign(URDU_UI_EXTRA, {
+  "English mein save hone wale naam aur alfaaz Urdu mode mein Urdu mein dikhenge": "انگریزی میں محفوظ نام اور الفاظ اردو موڈ میں اردو میں دکھیں گے",
+  "Naye naam khud Urdu mein": "نئے نام خود اردو میں", "Sab ka Urdu banao": "سب کا اردو بنائیں", "Auto dobara": "آٹو دوبارہ", "dekhein": "دیکھیں",
+  "Try karein": "آزمائیں", "Theek kiye": "درست کیے", "Theek kiya": "درست کیا", "Urdu nahi": "اردو نہیں", "Kahan": "کہاں", "Auto": "آٹو",
+  "Galat Urdu ho to box mein theek likh kar Save / Enter dabayein. Print aur invoice ke andar ka text waise hi rehta hai.": "اردو غلط ہو تو خانے میں درست لکھ کر Save / Enter دبائیں۔ پرنٹ اور انوائس کے اندر کا متن ویسا ہی رہتا ہے۔",
+  "Sirf auto wale dobara banenge — jo aap ne khud theek kiye woh nahi badlenge. Theek?": "صرف آٹو والے دوبارہ بنیں گے — جو آپ نے خود درست کیے وہ نہیں بدلیں گے۔ ٹھیک ہے؟",
+  "Customer": "کسٹمر", "Product": "پروڈکٹ", "Unit": "یونٹ", "Driver": "ڈرائیور", "Vehicle": "گاڑی", "Branch": "برانچ", "Company": "کمپنی",
+  "Address": "پتہ", "Post": "عہدہ", "Category": "زمرہ", "Account": "اکاؤنٹ", "Bank": "بینک", "Payee": "وصول کنندہ", "Other": "دیگر", "Search…": "تلاش…", "Status / agla qadam": "اسٹیٹس / اگلا قدم", "Khata band": "کھاتہ بند", "Watch / approval": "واچ / منظوری",
+});
+const UR_UI_KEYS = new Set();
+(function urInstallUi() {
+  try {
+    Object.keys(translations.ur || {}).forEach((k) => UR_UI_KEYS.add(k));
+    Object.keys(statusTranslations || {}).forEach((k) => UR_UI_KEYS.add(k));
+    Object.entries(URDU_UI_EXTRA).forEach(([k, v]) => { if (!translations.ur[k]) translations.ur[k] = v; UR_UI_KEYS.add(k); });
+  } catch {}
+})();
+
+const UR_WORDS = {
+  // business words
+  traders: "ٹریڈرز", trader: "ٹریڈر", trading: "ٹریڈنگ", builders: "بلڈرز", builder: "بلڈر", construction: "کنسٹرکشن", constructions: "کنسٹرکشنز",
+  contractor: "کنٹریکٹر", contractors: "کنٹریکٹرز", developers: "ڈویلپرز", developer: "ڈویلپر", housing: "ہاؤسنگ", society: "سوسائٹی",
+  company: "کمپنی", enterprises: "انٹرپرائزز", enterprise: "انٹرپرائز", store: "سٹور", stores: "سٹورز", hardware: "ہارڈ ویئر", sanitary: "سینیٹری",
+  associates: "ایسوسی ایٹس", group: "گروپ", industries: "انڈسٹریز", estate: "اسٹیٹ", real: "رئیل", properties: "پراپرٹیز", property: "پراپرٹی",
+  sons: "سنز", brothers: "برادرز", and: "اینڈ", co: "کو", ltd: "لمیٹڈ", pvt: "پرائیویٹ", private: "پرائیویٹ", limited: "لمیٹڈ", agency: "ایجنسی",
+  cement: "سیمنٹ", steel: "سٹیل", iron: "لوہا", bricks: "اینٹیں", brick: "اینٹ", sand: "ریت", crush: "کرش", bajri: "بجری", gravel: "بجری",
+  grade: "گریڈ", bag: "بوری", bags: "بوریاں", piece: "پیس", pieces: "پیس", kg: "کلو", trip: "ٹرپ", trips: "ٹرپس", feet: "فٹ", ft: "فٹ",
+  ton: "ٹن", meter: "میٹر", liter: "لیٹر", litre: "لیٹر", block: "بلاک", blocks: "بلاکس", tiles: "ٹائلیں", tile: "ٹائل", pipe: "پائپ", pipes: "پائپ",
+  paint: "پینٹ", marble: "ماربل", stone: "پتھر", wood: "لکڑی", sariya: "سریا", rod: "سریا", rods: "سریا", bar: "بار", wire: "تار", mixer: "مکسر",
+  plot: "پلاٹ", colony: "کالونی", town: "ٹاؤن", road: "روڈ", market: "مارکیٹ", phase: "فیز", street: "گلی", city: "سٹی", house: "ہاؤس",
+  sector: "سیکٹر", scheme: "سکیم", garden: "گارڈن", park: "پارک", chowk: "چوک", bazar: "بازار", bazaar: "بازار", near: "نزد", village: "گاؤں",
+  pakistan: "پاکستان", lahore: "لاہور", karachi: "کراچی", islamabad: "اسلام آباد", rawalpindi: "راولپنڈی", faisalabad: "فیصل آباد",
+  multan: "ملتان", gujranwala: "گوجرانوالہ", sialkot: "سیالکوٹ", sheikhupura: "شیخوپورہ", kasur: "قصور", okara: "اوکاڑہ", sargodha: "سرگودھا",
+  peshawar: "پشاور", quetta: "کوئٹہ", gujrat: "گجرات", sahiwal: "ساہیوال", bahawalpur: "بہاولپور", hyderabad: "حیدرآباد", johar: "جوہر",
+  dha: "ڈی ایچ اے", bahria: "بحریہ", gulberg: "گلبرگ", model: "ماڈل", defence: "ڈیفنس", cantt: "کینٹ", green: "گرین", valley: "ویلی", view: "ویو",
+  main: "مین", branch: "برانچ", head: "ہیڈ", office: "آفس", shop: "دکان", godown: "گودام", warehouse: "گودام", site: "سائٹ",
+  manager: "مینیجر", clerk: "کلرک", cashier: "کیشیئر", driver: "ڈرائیور", helper: "ہیلپر", accountant: "اکاؤنٹنٹ", salesman: "سیلز مین",
+  guard: "گارڈ", labour: "مزدور", labor: "مزدور", munshi: "منشی", supervisor: "سپروائزر", owner: "مالک", partner: "پارٹنر", rider: "رائیڈر",
+  salary: "تنخواہ", rent: "کرایہ", electricity: "بجلی", utility: "یوٹیلیٹی", fuel: "فیول", diesel: "ڈیزل", petrol: "پٹرول", purchase: "خریداری",
+  repair: "مرمت", maintenance: "مرمت", tea: "چائے", food: "کھانا", misc: "متفرق", miscellaneous: "متفرق", other: "دیگر", others: "دیگر",
+  cash: "کیش", bank: "بینک", in: "ان", hand: "ہینڈ", account: "اکاؤنٹ", wallet: "والٹ", easypaisa: "ایزی پیسہ", jazzcash: "جاز کیش",
+  meezan: "میزان", hbl: "ایچ بی ایل", ubl: "یو بی ایل", mcb: "ایم سی بی", allied: "الائیڈ", alfalah: "الفلاح", habib: "حبیب", national: "نیشنل",
+  rickshaw: "رکشہ", truck: "ٹرک", loader: "لوڈر", tractor: "ٹریکٹر", trolley: "ٹرالی", suzuki: "سوزوکی", mazda: "مزدا", van: "وین",
+  bestway: "بیسٹ وے", lucky: "لکی", maple: "میپل", leaf: "لیف", fauji: "فوجی", askari: "عسکری", power: "پاور", pioneer: "پائنیئر",
+  cherat: "چراٹ", kohat: "کوہاٹ", margalla: "مارگلہ", awal: "اوّل", amreli: "امریلی", ittefaq: "اتفاق", mughal: "مغل", dewan: "دیوان",
+  flying: "فلائنگ", paidar: "پائیدار", falcon: "فالکن", star: "سٹار", gold: "گولڈ", super: "سپر", new: "نیو", old: "اولڈ",
+  cash_customer: "کیش کسٹمر", customer: "کسٹمر", walk: "واک", walkin: "واک اِن",
+  // names
+  ali: "علی", raza: "رضا", usman: "عثمان", osman: "عثمان", malik: "ملک", hamza: "حمزہ", bilal: "بلال", ahmed: "احمد", ahmad: "احمد",
+  muhammad: "محمد", mohammad: "محمد", mohammed: "محمد", muhammed: "محمد", khan: "خان", hassan: "حسن", hasan: "حسن", hussain: "حسین", husain: "حسین",
+  imran: "عمران", kamran: "کامران", asif: "آصف", arif: "عارف", tariq: "طارق", umar: "عمر", omar: "عمر", abdul: "عبد", abdullah: "عبداللہ",
+  rehman: "رحمان", rahman: "رحمان", iqbal: "اقبال", akram: "اکرم", aslam: "اسلم", shahid: "شاہد", zahid: "زاہد", rashid: "راشد", khalid: "خالد",
+  nadeem: "ندیم", naveed: "نوید", waqas: "وقاص", saad: "سعد", faisal: "فیصل", farooq: "فاروق", javed: "جاوید", javaid: "جاوید", junaid: "جنید",
+  yasir: "یاسر", zubair: "زبیر", irfan: "عرفان", adnan: "عدنان", noor: "نور", nur: "نور", al: "ال", chaudhary: "چوہدری", chaudhry: "چوہدری",
+  choudhary: "چوہدری", ch: "چ", sheikh: "شیخ", shaikh: "شیخ", butt: "بٹ", awan: "اعوان", jutt: "جٹ", jatt: "جٹ", gondal: "گوندل", qureshi: "قریشی",
+  siddiqui: "صدیقی", ansari: "انصاری", mirza: "مرزا", syed: "سید", sayed: "سید", shah: "شاہ", bhatti: "بھٹی", cheema: "چیمہ", bajwa: "باجوہ",
+  rana: "رانا", mian: "میاں", haji: "حاجی", hafiz: "حافظ", sufi: "صوفی", rao: "راؤ", gill: "گل", sandhu: "سندھو", warraich: "وڑائچ",
+  ashraf: "اشرف", anwar: "انور", akhtar: "اختر", amjad: "امجد", azhar: "اظہر", babar: "بابر", danish: "دانش", ehsan: "احسان", fahad: "فہد",
+  fahd: "فہد", farhan: "فرحان", ghulam: "غلام", haider: "حیدر", hameed: "حمید", hamid: "حامد", haroon: "ہارون", ijaz: "اعجاز", ilyas: "الیاس",
+  ismail: "اسماعیل", jamil: "جمیل", jameel: "جمیل", kashif: "کاشف", latif: "لطیف", mahmood: "محمود", mehmood: "محمود", majid: "ماجد",
+  mansoor: "منصور", masood: "مسعود", mubashir: "مبشر", mudassar: "مدثر", mujahid: "مجاہد", munir: "منیر", mushtaq: "مشتاق", nasir: "ناصر",
+  nawaz: "نواز", qasim: "قاسم", rafiq: "رفیق", rauf: "رؤف", riaz: "ریاض", rizwan: "رضوان", sajid: "ساجد", saleem: "سلیم", salim: "سلیم",
+  sami: "سمیع", sarfraz: "سرفراز", shafiq: "شفیق", shakeel: "شکیل", shakil: "شکیل", shan: "شان", sohail: "سہیل", suleman: "سلیمان",
+  sultan: "سلطان", talha: "طلحہ", tahir: "طاہر", tanveer: "تنویر", tayyab: "طیب", waseem: "وسیم", wasim: "وسیم", yousaf: "یوسف",
+  yusuf: "یوسف", zafar: "ظفر", zain: "زین", zeeshan: "ذیشان", abbas: "عباس", ahsan: "احسن", ameer: "امیر", amir: "عامر", asad: "اسد",
+  atif: "عاطف", awais: "اویس", aziz: "عزیز", fazal: "فضل", ghafoor: "غفور", hanif: "حنیف", ibrahim: "ابراہیم", idrees: "ادریس",
+  ishaq: "اسحاق", jahangir: "جہانگیر", karim: "کریم", kareem: "کریم", naeem: "نعیم", nisar: "نثار", rasheed: "رشید", sadiq: "صادق",
+  shabbir: "شبیر", shafi: "شفیع", shahzad: "شہزاد", sharif: "شریف", shoaib: "شعیب", usama: "اسامہ", wajid: "واجد", waleed: "ولید",
+  fatima: "فاطمہ", ayesha: "عائشہ", aisha: "عائشہ", maryam: "مریم", sana: "ثنا", hina: "حنا", amna: "آمنہ", zainab: "زینب", bibi: "بی بی",
+  begum: "بیگم", rafique: "رفیق", akbar: "اکبر", azam: "اعظم", aslam_: "اسلم", nazir: "نذیر", bashir: "بشیر", siddique: "صدیق",
+};
+
+// Sound-based fallback for words not in the list (good enough; admin can fix).
+function urTranslitWord(w) {
+  const s = w.toLowerCase();
+  if (UR_WORDS[s]) return UR_WORDS[s];
+  if (/^\d+$/.test(s)) return w;
+  let out = "";
+  let i = 0;
+  const n = s.length;
+  const isV = (c) => "aeiou".includes(c);
+  while (i < n) {
+    const c = s[i], c2 = s.slice(i, i + 2), c3 = s.slice(i, i + 3), first = i === 0, last2 = i + 2 >= n, last = i === n - 1;
+    if (c3 === "sch") { out += "شک"; i += 3; continue; }
+    if (c3 === "tch") { out += "چ"; i += 3; continue; }
+    if (c3 === "aye" || c3 === "aay") { out += first ? "اے" : "ائے"; i += 3; continue; }
+    const di = {
+      sh: "ش", ch: "چ", kh: "خ", gh: "غ", th: "تھ", ph: "ف", bh: "بھ", dh: "دھ", jh: "جھ", kk: "ک", ck: "ک", ss: "س", ll: "ل", tt: "ٹ", dd: "ڈ",
+      pp: "پ", ff: "ف", mm: "م", nn: "ن", rr: "ر", zz: "ز", qu: "کو", ng: "نگ",
+    }[c2];
+    if (di) { out += di; i += 2; continue; }
+    if (c2 === "aa") { out += first ? "آ" : "ا"; i += 2; continue; }
+    if (c2 === "ee" || c2 === "ea" || c2 === "ie") { out += first ? "ای" : "ی"; i += 2; continue; }
+    if (c2 === "oo" || c2 === "ou" || c2 === "ow") { out += first ? "او" : "و"; i += 2; continue; }
+    if (c2 === "ai" || c2 === "ay" || c2 === "ei" || c2 === "ey") { out += first ? "اے" : last2 ? "ے" : "ی"; i += 2; continue; }
+    if (c2 === "au" || c2 === "aw") { out += first ? "او" : "ا"; i += 2; continue; }
+    if (c2 === "oa" || c2 === "oe") { out += first ? "او" : "و"; i += 2; continue; }
+    if (isV(c)) {
+      if (first) out += c === "a" ? "ا" : c === "e" ? "ای" : c === "i" ? "ا" : "او";
+      else if (last) out += c === "a" ? "ا" : c === "e" ? "" : c === "i" ? "ی" : "و";
+      else if (c === "i") out += "ی";
+      else if (c === "o" || c === "u") out += "و";
+      else if (c === "e" && s[i + 1] === "r" && i + 2 === n) out += "";
+      // short a / e inside a word: no letter in Urdu
+      i += 1;
+      continue;
+    }
+    const one = {
+      b: "ب", c: "ک", d: "ڈ", f: "ف", g: "گ", h: "ہ", j: "ج", k: "ک", l: "ل", m: "م", n: "ن", p: "پ", q: "ق", r: "ر", s: "س", t: "ٹ",
+      v: "و", w: "و", x: "کس", y: first ? "ی" : last ? "ی" : "ی", z: "ز",
+    }[c];
+    if (c === "c" && "eiy".includes(s[i + 1] || "")) out += "س";
+    else if (one) out += one;
+    else out += c;
+    i += 1;
+  }
+  return out || w;
+}
+function urTranslit(text) {
+  const src = String(text || "").trim();
+  if (!src) return "";
+  return src.split(/(\s+|[-/&,.()·+]+)/).map((part) => {
+    if (!part || /^\s+$/.test(part)) return part;
+    if (/^[-/&,.()·+]+$/.test(part)) return part === "&" ? " اینڈ " : part.replace(/,/g, "،");
+    if (!/[A-Za-z]/.test(part)) return part;
+    // keep short codes like CT-0001, EMP-0002, KG-60 as they are
+    if (/^[A-Z]{2,5}$/.test(part) && !UR_WORDS[part.toLowerCase()]) return part.split("").map((ch) => UR_LETTER[ch] || ch).join(" ");
+    return urTranslitWord(part);
+  }).join("").replace(/\s+/g, " ").trim();
+}
+const UR_LETTER = { A: "اے", B: "بی", C: "سی", D: "ڈی", E: "ای", F: "ایف", G: "جی", H: "ایچ", I: "آئی", J: "جے", K: "کے", L: "ایل", M: "ایم", N: "این", O: "او", P: "پی", Q: "کیو", R: "آر", S: "ایس", T: "ٹی", U: "یو", V: "وی", W: "ڈبلیو", X: "ایکس", Y: "وائی", Z: "زیڈ" };
+
+/* ---- keep the data dictionary inside the app translations ---- */
+let urDictApplied = null;
+let urDictVer = 0;
+const urDictListeners = new Set();
+function urApplyDict() {
+  const d = finState.urduDict;
+  if (d === urDictApplied) return;
+  const prev = urDictApplied || {};
+  Object.keys(prev).forEach((k) => { if (!UR_UI_KEYS.has(k)) delete translations.ur[k]; });
+  Object.entries(d || {}).forEach(([k, v]) => { const u = v && (v.u || v); if (u && typeof u === "string" && !UR_UI_KEYS.has(k)) translations.ur[k] = u; });
+  urDictApplied = d;
+  urDictVer += 1;
+  urDictListeners.forEach((l) => l(urDictVer));
+}
+finListeners.add(urApplyDict);
+function useUrduDictVersion() {
+  const [v, setV] = useState(urDictVer);
+  useEffect(() => { urDictListeners.add(setV); return () => { urDictListeners.delete(setV); }; }, []);
+  return v;
+}
+
+// Every English text that people type and save (names, posts, categories …).
+function urCollect({ customers, products, drivers, branches, settings }) {
+  const out = new Map();
+  const add = (v, where) => {
+    const s = String(v || "").trim();
+    if (!s || s.length > 80 || !/[A-Za-z]{2}/.test(s) || /[؀-ۿ]/.test(s) || UR_UI_KEYS.has(s)) return;
+    if (/^(CT|INV|EMP|LV|ADV|CPV|CRQ|ORD|BK|PTP|DRV)-?\d/i.test(s)) return;
+    if (!out.has(s)) out.set(s, where);
+  };
+  (customers || []).forEach((c) => { add(c.name, "Customer"); add(c.address, "Address"); });
+  (products || []).forEach((p) => { add(p.name, "Product"); add(p.unit, "Unit"); });
+  (drivers || []).forEach((d) => { add(d.name, "Driver"); add(d.vehicleType, "Vehicle"); });
+  (branches || []).forEach((b) => add(b.name, "Branch"));
+  if (settings) { add(settings.companyName, "Company"); add(settings.companyAddress, "Address"); }
+  finState.employees.forEach((e) => { add(e.name, "Employee"); add(e.post, "Post"); });
+  (finState.settings.categories || []).forEach((c) => add(c.name, "Category"));
+  (finState.settings.accounts || []).forEach((a) => { add(a.name, "Account"); add(a.bankName, "Bank"); });
+  finState.vouchers.forEach((v) => add(v.payee, "Payee"));
+  return out;
+}
+async function urAutoFill(data) {
+  const s = (finState.settings && finState.settings.urdu) || {};
+  if (s.auto === false) return 0;
+  const all = urCollect(data);
+  const missing = [...all.keys()].filter((k) => !finState.urduDict[k]);
+  if (!missing.length) return 0;
+  await finMutate("urduDict", (d) => {
+    const next = { ...d };
+    missing.forEach((k) => { if (!next[k]) next[k] = { u: urTranslit(k), m: false }; });
+    return next;
+  });
+  return missing.length;
+}
+
+function UrduTranslatePage({ currentUser, customers, products, drivers, branches, settings }) {
+  useLanguage();
+  const fin = useFin();
+  const [q, setQ] = useState("");
+  const [show, setShow] = useState("all");
+  const [edit, setEdit] = useState({});
+  const [test, setTest] = useState("");
+  if (!fin.loaded) return <div className="ct-card p-10 text-center ct-t2">{t("Loading…")}</div>;
+  const all = urCollect({ customers, products, drivers, branches, settings });
+  const auto = ((fin.settings.urdu || {}).auto) !== false;
+  const rows = [...all.entries()].map(([en, where]) => ({ en, where, rec: fin.urduDict[en] || null }));
+  Object.keys(fin.urduDict).forEach((en) => { if (!all.has(en)) rows.push({ en, where: "Other", rec: fin.urduDict[en] }); });
+  const ql = q.trim().toLowerCase();
+  const shown = rows.filter((r) => (show === "all" || (show === "auto" ? r.rec && !r.rec.m : show === "fixed" ? r.rec && r.rec.m : !r.rec))
+    && (!ql || r.en.toLowerCase().includes(ql) || (r.rec && String(r.rec.u).includes(q.trim()))))
+    .sort((a, b) => a.where.localeCompare(b.where) || a.en.localeCompare(b.en));
+  async function save(en, u) {
+    const val = String(u || "").trim();
+    await finMutate("urduDict", (d) => { const n = { ...d }; if (val) n[en] = { u: val, m: true }; else delete n[en]; return n; });
+    setEdit((e) => { const x = { ...e }; delete x[en]; return x; });
+  }
+  async function fillAll() {
+    await finMutate("urduDict", (d) => {
+      const n = { ...d };
+      rows.forEach((r) => { if (!n[r.en]) n[r.en] = { u: urTranslit(r.en), m: false }; });
+      return n;
+    });
+  }
+  async function redoAuto() {
+    if (!confirm(t("Sirf auto wale dobara banenge — jo aap ne khud theek kiye woh nahi badlenge. Theek?"))) return;
+    await finMutate("urduDict", (d) => { const n = { ...d }; Object.keys(n).forEach((k) => { if (!n[k].m) n[k] = { u: urTranslit(k), m: false }; }); return n; });
+  }
+  const cnt = { all: rows.length, auto: rows.filter((r) => r.rec && !r.rec.m).length, fixed: rows.filter((r) => r.rec && r.rec.m).length, none: rows.filter((r) => !r.rec).length };
+  return (
+    <div>
+      <FinPageHead title="Urdu Translation" sub={t("English mein save hone wale naam aur alfaaz Urdu mode mein Urdu mein dikhenge")} right={
+        <div className="flex flex-wrap gap-2 items-center">
+          <label className="flex items-center gap-2 text-[13px] ct-h font-semibold ct-chip rounded-xl px-3 py-2">
+            <input type="checkbox" checked={auto} onChange={(e) => finMutate("settings", (s) => ({ ...s, urdu: { ...(s.urdu || {}), auto: e.target.checked } }))} />
+            {t("Naye naam khud Urdu mein")}
+          </label>
+          {cnt.none > 0 && <Btn onClick={fillAll}>✨ {t("Sab ka Urdu banao")} ({cnt.none})</Btn>}
+          <Btn variant="ghost" onClick={redoAuto}>↻ {t("Auto dobara")}</Btn>
+          <Btn variant="ghost" onClick={() => setLanguage(languageState === "ur" ? "en" : "ur")}>{languageState === "ur" ? "English" : "اردو"} {t("dekhein")}</Btn>
+        </div>
+      } />
+      <section className="ct-card p-4 mb-4">
+        <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{t("Try karein")}</div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 items-center">
+          <input className={inputCls} value={test} onChange={(e) => setTest(e.target.value)} placeholder="e.g. Malik Builders, Gulberg Lahore" />
+          <div className="text-[20px] font-bold ct-h" dir="rtl" style={{ fontFamily: '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif' }}>{urTranslit(test) || "—"}</div>
+        </div>
+      </section>
+      <div className="flex flex-wrap gap-2 items-center mb-3">
+        <div className="relative flex-1 min-w-[200px] max-w-md">
+          <UiIcon name="search" className="w-4 h-4 absolute start-3 top-1/2 -translate-y-1/2 text-slate-400" />
+          <input className={`${inputCls} !ps-9`} value={q} onChange={(e) => setQ(e.target.value)} placeholder={t("Search…")} />
+        </div>
+        <FinTabs value={show} onChange={setShow} tabs={[{ id: "all", label: "All", count: cnt.all }, { id: "auto", label: "Auto", count: cnt.auto }, { id: "fixed", label: "Theek kiye", count: cnt.fixed }, { id: "none", label: "Urdu nahi", count: cnt.none }]} />
+      </div>
+      <section className="ct-card p-3 sm:p-4 overflow-x-auto">
+        {shown.length === 0 && <FinEmpty text="Nothing here." />}
+        {shown.length > 0 && (
+          <table className="w-full text-[13.5px] min-w-[720px]">
+            <thead><tr className="ct-t3 text-[11px] uppercase">{["Kahan", "English", "Urdu", ""].map((h, i) => <th key={i} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+            <tbody>
+              {shown.slice(0, 400).map((r) => {
+                const val = edit[r.en] != null ? edit[r.en] : r.rec ? r.rec.u : urTranslit(r.en);
+                const dirty = edit[r.en] != null && edit[r.en] !== (r.rec ? r.rec.u : "");
+                return (
+                  <tr key={r.en} className="border-t border-slate-200/60">
+                    <td className="py-2 pe-3 text-[12px] ct-t3 whitespace-nowrap">{t(r.where)}</td>
+                    <td className="py-2 pe-3 ct-h font-semibold ct-noxl" dir="ltr">{r.en}</td>
+                    <td className="py-2 pe-3">
+                      <input dir="rtl" className={`${inputCls} !py-1.5 text-[16px]`} style={{ fontFamily: '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif' }}
+                        value={val} onChange={(e) => setEdit({ ...edit, [r.en]: e.target.value })} onKeyDown={(e) => { if (e.key === "Enter") save(r.en, val); }} />
+                    </td>
+                    <td className="py-2 whitespace-nowrap">
+                      {dirty || !r.rec ? <Btn small onClick={() => save(r.en, val)}>{t("Save")}</Btn>
+                        : <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${r.rec.m ? "bg-emerald-400/15 text-emerald-500" : "bg-sky-400/15 text-sky-500"}`}>{r.rec.m ? t("Theek kiya") : t("Auto")}</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+      <div className="text-[12px] ct-t3 mt-2">{t("Galat Urdu ho to box mein theek likh kar Save / Enter dabayein. Print aur invoice ke andar ka text waise hi rehta hai.")}</div>
     </div>
   );
 }
