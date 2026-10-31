@@ -13271,24 +13271,42 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
       }`;
     document.head.appendChild(style);
     document.body.classList.add("ct-doc-printing");
-    const prevTitle = document.title;
-    document.title = printFileName(fileName, size, prefs.include);
+    const prevTitle = document.title || "Chaudhary Traders — ERP";
+    const fileTitle = printFileName(fileName, size, prefs.include);
+    document.title = fileTitle;
+    // The PDF file name comes from the page title. Windows asks for the name only
+    // when "Save" is pressed, so the title must stay until the print is really done.
+    let titleBack = false;
+    const restoreTitle = () => {
+      if (titleBack) return;
+      titleBack = true;
+      if (document.title === fileTitle) document.title = prevTitle;
+      window.removeEventListener("pointerdown", restoreTitle, true);
+      window.removeEventListener("keydown", restoreTitle, true);
+    };
     let cleaned = false;
     const cleanup = () => {
       if (cleaned) return;
       cleaned = true;
       document.body.classList.remove("ct-doc-printing");
       style.remove();
-      document.title = prevTitle;
-      window.removeEventListener("afterprint", cleanup);
+      window.removeEventListener("afterprint", onAfter);
       setBusy("");
     };
-    window.addEventListener("afterprint", cleanup);
+    const onAfter = () => { cleanup(); restoreTitle(); };
+    window.addEventListener("afterprint", onAfter);
     try {
       window.print();
     } finally {
-      // Some mobile browsers return from print() before printing and never fire afterprint.
+      // Some browsers return from print() early and never fire afterprint:
+      // free the screen after a moment, but keep the file name until the
+      // user is back in the app (next click / key) or a few minutes pass.
       setTimeout(cleanup, 1500);
+      setTimeout(() => {
+        window.addEventListener("pointerdown", restoreTitle, true);
+        window.addEventListener("keydown", restoreTitle, true);
+      }, 1500);
+      setTimeout(restoreTitle, 5 * 60 * 1000);
     }
   }
 
