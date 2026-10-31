@@ -2938,7 +2938,7 @@ function Customers({ customers, invoices, payments, returns, exchanges, promises
 
 /* ---------------- Ledger view ---------------- */
 
-function LedgerView({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, focusId, setFocusId, settings, currentUser, onCreateAdjustment, onUpdateAdjustment, onReverseAdjustment }) {
+function LedgerView({ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, focusId, setFocusId, settings, currentUser, onCreateAdjustment, onUpdateAdjustment, onReverseAdjustment, bookings }) {
   const customer = customers.find((c) => c.id === focusId) || customers[0];
   const [showAdjForm, setShowAdjForm] = useState(false);
   const [editingAdj, setEditingAdj] = useState(null);
@@ -2950,6 +2950,8 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
   // output to that single month, with the Opening Balance row showing the
   // true running balance carried forward from just before that month.
   const [monthFilter, setMonthFilter] = useState("");
+  const [stmtOpen, setStmtOpen] = useState(null);
+  const ledgerUrdu = false;
 
   if (!customer) return <div className="text-slate-400">Pehle koi customer add karein.</div>;
   const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
@@ -2970,11 +2972,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
       })()
     : Number(customer.openingBalance) || 0;
 
-  const [ledgerUrdu, setLedgerUrdu] = useState(false);
-  function downloadPDF(urdu = false) {
-    setLedgerUrdu(!!urdu);
-    setTimeout(() => window.print(), 120);
-  }
+  function downloadPDF(urdu = false) { setStmtOpen({ urdu: !!urdu }); }
 
   function confirmReverseAdj() {
     if (!adjReverseReason.trim()) { alert("Reverse ki wajah likhein."); return; }
@@ -3167,6 +3165,11 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
           visible by the @media print rule in <PrintStyles/> via the
           "print-area" class, so window.print() outputs ONLY this clean
           template instead of the sidebar/app chrome around it. */}
+      {stmtOpen && (
+        <LedgerStatementDialog customer={customer} entries={entries} outstanding={outstanding} monthFilter={monthFilter} monthLabel={fmtMonthLabel(monthFilter)}
+          invoices={invoices} payments={payments} promises={promises} bookings={bookings} settings={settings} currentUser={currentUser}
+          urdu={stmtOpen.urdu} onClose={() => setStmtOpen(null)} />
+      )}
       <div id="print-ledger" className="print-area ct-noxl" style={{ display: "none" }}>
         <div className="bg-white" dir={ledgerUrdu ? "rtl" : "ltr"} style={ledgerUrdu ? { fontFamily: '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif', lineHeight: 1.7 } : undefined}>
           <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
@@ -10401,6 +10404,7 @@ function App() {
     setTimeout(() => setScanFlash(false), 900);
     setCameraOpen(false);
     if (parsed.kind === "w") { setScanOpen(null); setPage("creditControl"); return; }
+    if (parsed.kind === "c") { setScanOpen(null); setFocusCustomerId(parsed.id); setPage("ledger"); return; }
     if (["e", "l", "a", "s"].includes(parsed.kind)) { setScanOpen(null); setHrScan({ kind: parsed.kind, id: parsed.id, n: Date.now() }); return; }
     if (parsed.kind === "hn") {
       const num = parsed.number;
@@ -10481,7 +10485,8 @@ function App() {
     return (
       <>
         <ThemeStyles />
-        <DocVerifyPage target={verifyTarget} invoices={invoices} settings={settings} onOpen={() => {
+        <DocVerifyPage target={verifyTarget} invoices={invoices} settings={settings}
+          ledgerData={{ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments }} onOpen={() => {
           // Staff login first; after login the same document opens inside the app.
           setVerifyDeferred(true);
           applyThemeClass(themeState);
@@ -10567,7 +10572,7 @@ function App() {
         customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
         promises={promises} transfers={transfers} adjustments={adjustments}
         focusId={focusCustomerId || visibleCustomers[0]?.id} setFocusId={setFocusCustomerId}
-        settings={settings} currentUser={currentUser}
+        settings={settings} currentUser={currentUser} bookings={bookings}
         onCreateAdjustment={onCreateAdjustment} onUpdateAdjustment={onUpdateAdjustment} onReverseAdjustment={onReverseAdjustment}
       />
     ),
@@ -12564,7 +12569,7 @@ const PRINT_SIZES = {
   t80: { label: "Thermal 80mm", sub: "Recommended", desc: "Shop counter printer", widthMm: 80, padMm: 4, thermal: true, font: 12 },
   a5: { label: "A5", sub: "Invoice page", desc: "148 × 210 mm", widthMm: 148, heightMm: 210, padMm: 9, thermal: false, font: 12 },
   v5: { label: "A5 Voucher", sub: "Half page", desc: "148 mm · no blank space", widthMm: 148, heightMm: 210, padMm: 8, thermal: false, fitHeight: true, font: 11.5 },
-  full: { label: "A4", sub: "Full width invoice", desc: "210 mm wide · ends after the invoice", widthMm: 210, heightMm: 297, padMm: 12, thermal: false, fitHeight: true, font: 16 },
+  full: { label: "A4", sub: "Full page invoice", desc: "210 × 297 mm · poora page", widthMm: 210, heightMm: 297, padMm: 12, thermal: false, font: 16 },
   card: { label: "ID Card", sub: "CR80 · 86 × 54 mm", desc: "Card printer / PVC card", widthMm: 92, heightMm: 120, padMm: 3, thermal: false, fitHeight: true, font: 10 },
   a4: { label: "A4", sub: "Full page", desc: "210 × 297 mm", widthMm: 210, heightMm: 297, padMm: 14, thermal: false, font: 14.5 },
 };
@@ -12682,6 +12687,18 @@ Object.entries({
   "Transfer Out": "ٹرانسفر روانگی", "Exchange": "تبادلہ", "Booking Advance": "بکنگ ایڈوانس", "Booking Refund": "بکنگ ریفنڈ", "Exchange (Even Swap)": "تبادلہ (برابر)", "Exchange (Extra Charge)": "تبادلہ (اضافی رقم)",
   "Exchange (Refund Credit)": "تبادلہ (ریفنڈ کریڈٹ)", "Outstanding Transfer In": "بقایا ٹرانسفر آمد", "Outstanding Transfer Out": "بقایا ٹرانسفر روانگی",
   "Payment Against Promise": "وعدے کے مطابق ادائیگی", "Promise Created": "وعدہ کیا گیا", "Pending": "زیر التوا", "Completed": "مکمل", "Broken Promise": "ٹوٹا ہوا وعدہ", "Exchange (Return)": "تبادلہ (واپسی)", "Exchange (New)": "تبادلہ (نیا)", "Opening": "ابتدائی",
+  "Voucher": "واؤچر", "Narration": "تفصیل", "Sale": "فروخت", "Bank transfer": "بینک ٹرانسفر", "Cheque received": "چیک وصول", "Cash received": "نقد وصول",
+  "Sales return": "سیلز واپسی", "qty": "مقدار", "Ret": "واپس", "Promise": "وعدہ", "Page": "صفحہ", "of": "از", "Aap ka baqaya": "آپ کا بقایا", "tak": "تک",
+  "Payment ka wada": "ادائیگی کا وعدہ", "Grade": "گریڈ", "LIVE BAQAYA": "لائیو بقایا", "Statement of account": "حساب کا گوشوارہ", "Customer since": "کسٹمر از",
+  "bills": "بل", "bill": "بل", "Account / statement": "اکاؤنٹ / گوشوارہ", "entries": "اندراجات", "use": "استعمال", "Maal liya": "مال لیا",
+  "Payment + return": "ادائیگی + واپسی", "payment": "ادائیگی", "return": "واپسی", "customer ne dena hai": "کسٹمر نے دینا ہے", "dukaan ne dena hai": "دکان نے دینا ہے",
+  "hisaab barabar": "حساب برابر", "Hisaab barabar": "حساب برابر", "Balance brought forward": "پچھلا بیلنس آگے لایا گیا", "Brought forward from previous page": "پچھلے صفحے سے",
+  "Is muddat ka total": "اس مدت کا کل", "Carried forward": "اگلے صفحے پر", "page": "صفحہ", "sale": "فروخت", "cash": "نقد", "bank": "بینک",
+  "Closing balance": "اختتامی بیلنس", "Customer ne dukaan ko dena hai": "کسٹمر نے دکان کو دینا ہے", "Dukaan ne customer ko dena hai (advance)": "دکان نے کسٹمر کو دینا ہے (ایڈوانس)",
+  "Maal": "مال", "Wusool": "وصول", "Account snapshot": "اکاؤنٹ کا خلاصہ", "Akhri payment": "آخری ادائیگی", "Avg payment time": "اوسط ادائیگی وقت", "din": "دن",
+  "Agli delivery": "اگلی ڈیلیوری", "VERIFIED": "تصدیق شدہ", "END OF STATEMENT": "گوشوارہ ختم", "Computer generated statement · sign ki zaroorat nahi": "کمپیوٹر سے تیار شدہ گوشوارہ · دستخط کی ضرورت نہیں",
+  "QR scan = live baqaya": "QR اسکین = لائیو بقایا", "Computer generated statement": "کمپیوٹر سے تیار شدہ گوشوارہ", "Printed by": "پرنٹ کنندہ", "Time par": "وقت پر",
+  "Warning": "وارننگ", "CONSTRUCTION MATERIALS SUPPLIER": "تعمیراتی سامان سپلائر", "shuru ka": "شروع کا", "Credit limit": "کریڈٹ حد", "Closing": "اختتامی",
 }).forEach(([en, ur]) => { if (!PRINT_URDU[en]) PRINT_URDU[en] = ur; });
 Object.entries(PRINT_URDU).forEach(([en, ur]) => {
   if (!(en in translations.ur)) translations.ur[en] = ur;
@@ -12722,6 +12739,14 @@ function printLedgerType(type, urdu) {
   if (a) return `${printL("Adjustment", true)} — ${printL(a[1], true) !== a[1] ? printL(a[1], true) : printD(a[1], true)}`;
   return printL(type, true);
 }
+// File name the browser suggests when saving the PDF: what + who + number + date.
+function printFileName(name, size, include) {
+  let s = String(name || "Document").replace(/[\\/:*?"<>|#%&{}$!'@`=+]+/g, " ").replace(/\s+/g, " ").trim();
+  if (size && size.thermal) s += ` (${size.label})`;
+  if (include && include.urdu) s += " (Urdu)";
+  return s.slice(0, 140);
+}
+function printFileDate(d) { const x = parseDateValue(d); return x ? `${String(x.getDate()).padStart(2, "0")}-${["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][x.getMonth()]}-${x.getFullYear()}` : ""; }
 function printBannerText(text, urdu) {
   if (!urdu) return text;
   return String(text).split(/( — | · )/).map((part) => (part === " — " || part === " · " ? part : printL(part.trim(), true))).join("");
@@ -13181,11 +13206,11 @@ function PrintToggle({ on, onChange, label, sub, disabled }) {
   );
 }
 
-function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, renderDoc, onClose, sizeOrder, defaultSize, copyLabels }) {
+function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, renderDoc, onClose, sizeOrder, defaultSize, copyLabels, initialInclude }) {
   useLanguage();
   const order = sizeOrder || PRINT_SIZE_ORDER;
   const copyOpts = copyLabels || [[1, "1 Copy"], [2, "2 Copies (Customer + Office)"]];
-  const [prefs, setPrefs] = useState(() => printLoadPrefs(kind, includeDefs, order, defaultSize));
+  const [prefs, setPrefs] = useState(() => { const p = printLoadPrefs(kind, includeDefs, order, defaultSize); if (initialInclude) p.include = { ...p.include, ...initialInclude }; return p; });
   const [busy, setBusy] = useState("");
   const previewBoxRef = React.useRef(null);
   const previewDocRef = React.useRef(null);
@@ -13247,7 +13272,7 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
     document.head.appendChild(style);
     document.body.classList.add("ct-doc-printing");
     const prevTitle = document.title;
-    document.title = fileName + (prefs.size ? `-${prefs.size.toUpperCase()}` : "");
+    document.title = printFileName(fileName, size, prefs.include);
     let cleaned = false;
     const cleanup = () => {
       if (cleaned) return;
@@ -13535,7 +13560,7 @@ function InvoicePrintDialog({ invoice, settings, rs, onClose }) {
       title={`${t("Print / Save")} — ${t("Invoice")} ${invoice.number}`}
       subtitle={`${invoice.customerName} · ${(invoice.items || []).length} ${t("Items")} · ${fmtMoney(invoice.total)}`}
       includeDefs={includeDefs}
-      fileName={`Invoice-${invoice.number}`}
+      fileName={`Invoice ${invoice.number} - ${invoice.customerName || "Customer"} - ${printFileDate(invoice.date)}`}
       sizeOrder={["t58", "t80", "full"]}
       waHref={invoice.customerPhone ? waLink(invoice.customerPhone, buildInvoiceWaMessage(invoice, settings)) : ""}
       onClose={onClose}
@@ -13588,7 +13613,7 @@ function ReceiptPrintDialog({ payment, customer, settings, balances, proofRecord
       title={`${t("Print / Save")} — ${t("Payment Receipt")}`}
       subtitle={`${paymentReceiptNo(payment)} · ${customer.name || "-"} · ${fmtMoney(payment.amount)}`}
       includeDefs={includeDefs}
-      fileName={`Payment-Receipt-${paymentReceiptNo(payment)}`}
+      fileName={`Payment Receipt ${paymentReceiptNo(payment)} - ${customer.name || "Customer"} - Rs ${Math.round(Number(payment.amount) || 0)} - ${printFileDate(payment.date)}`}
       waHref={customer.phone ? waLink(customer.phone, buildReceiptWaMessage(payment, customer, balances, settings)) : ""}
       onClose={onClose}
       renderDoc={(p) => (
@@ -15145,7 +15170,7 @@ function VoucherPrintDialog({ voucher, fin, company, onClose }) {
       sizeOrder={["v5", "t80", "t58"]}
       defaultSize="v5"
       copyLabels={[[1, "1 Copy"], [2, "2 Copies (Office + Payee)"]]}
-      fileName={`Voucher-${voucher.number}`}
+      fileName={`Voucher ${voucher.number} - ${voucher.payee} - Rs ${Math.round(Number(voucher.amount) || 0)}`}
       waHref={wa}
       onClose={onClose}
       renderDoc={(p) => (PRINT_SIZES[p.size].thermal
@@ -15257,7 +15282,7 @@ function KishtSlipPrintDialog({ voucher, kishtId, company, onClose }) {
       sizeOrder={["t80", "t58", "v5"]}
       defaultSize="t80"
       copyLabels={[[1, "1 Copy"], [2, "2 Copies (Office + Payee)"]]}
-      fileName={`Slip-${voucher.number}-K${idx + 1}`}
+      fileName={`Payment Slip ${voucher.number} Kisht ${idx + 1} - ${voucher.payee}`}
       onClose={onClose}
       renderDoc={(p) => (PRINT_SIZES[p.size].thermal
         ? <KishtSlipThermalDoc voucher={voucher} kishtId={kishtId} company={company} {...p} />
@@ -15933,7 +15958,7 @@ function VoucherWorkspace({ voucherId, focusK, rev, currentUser, users, branches
 // What a scanner typed: a voucher / invoice QR link, or a plain voucher / invoice number.
 function finParseScan(text) {
   const s = String(text || "").trim();
-  const m = s.match(/verify=([ivelasw])\.([^&\s]+)/);
+  const m = s.match(/verify=([ivelaswc])\.([^&\s]+)/);
   if (m) {
     const k = s.match(/[&?]k=(\d+)/);
     const r = s.match(/[&?]r=(\d+)/);
@@ -16462,7 +16487,7 @@ function DailyClosingPanel({ fin, movements, invoices, payments, currentUser, co
 
       {printData && (
         <PrintDialog kind="closing" title="Print Daily Closing" subtitle={fmtDate(printData.date)} includeDefs={[]}
-          sizeOrder={["t80", "t58", "v5"]} defaultSize="t80" fileName={`Closing-${printData.date}`}
+          sizeOrder={["t80", "t58", "v5"]} defaultSize="t80" fileName={`Daily Closing ${printFileDate(printData.date)}`}
           waHref={`https://wa.me/?text=${encodeURIComponent(finClosingText(printData, company))}`}
           onClose={() => setPrintData(null)} renderDoc={(p) => <ClosingDoc data={printData} company={company} {...p} />} />
       )}
@@ -16893,7 +16918,7 @@ function docVerifyUrl(kind, id) {
 function docVerifyParse() {
   try {
     const h = String(window.location.hash || "");
-    const m = h.match(/verify=([ivelasw])\.([^&]+)/);
+    const m = h.match(/verify=([ivelaswc])\.([^&]+)/);
     if (!m) return null;
     const k = h.match(/[&?]k=(\d+)/);
     const r = h.match(/[&?]r=(\d+)/);
@@ -17041,7 +17066,7 @@ function VoucherVerifyView({ voucherId, target, settings, onOpen }) {
   );
 }
 
-function DocVerifyPage({ target, invoices, settings, onOpen }) {
+function DocVerifyPage({ target, invoices, settings, onOpen, ledgerData }) {
   useEffect(() => {
     // The verify page always uses the light design.
     try { document.documentElement.classList.remove("ct-dark"); document.documentElement.classList.add("ct-light"); } catch {}
@@ -17050,6 +17075,7 @@ function DocVerifyPage({ target, invoices, settings, onOpen }) {
     const inv = (invoices || []).find((i) => i.id === target.id) || null;
     return <InvoiceVerifyView invoice={inv} settings={settings} onOpen={onOpen} />;
   }
+  if (target.kind === "c") return <CustomerBalanceVerifyView customerId={target.id} {...(ledgerData || {})} settings={settings} onOpen={onOpen} />;
   if (target.kind === "w") return <CrVerifyView target={target} settings={settings} onOpen={onOpen} />;
   if (["e", "l", "a", "s"].includes(target.kind)) return <HrVerifyView target={target} settings={settings} onOpen={onOpen} />;
   return <VoucherVerifyView voucherId={target.id} target={target} settings={settings} onOpen={onOpen} />;
@@ -18060,7 +18086,7 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
       )}
       {stmtPrint && (
         <PrintDialog kind="statement" title="Statement" subtitle={`${customer.name} · ${fmtDate(range.from)} — ${fmtDate(range.to)}`} includeDefs={[]}
-          sizeOrder={["full", "t80", "t58"]} defaultSize="full" fileName={`Statement-${customer.name}`} onClose={() => setStmtPrint(false)}
+          sizeOrder={["full", "t80", "t58"]} defaultSize="full" fileName={`Statement - ${customer.name} - ${printFileDate(range.from)} to ${printFileDate(range.to)}`} onClose={() => setStmtPrint(false)}
           renderDoc={(p) => <StatementDoc customer={customer} company={settings} from={range.from} to={range.to} opening={opening} rows={stmtRows} closing={closing} {...p} />} />
       )}
     </div>
@@ -18846,7 +18872,7 @@ function HrCardPrintDialog({ emps, company, onClose }) {
   return (
     <PrintDialog kind="hrcard" title="Print ID Card" subtitle={emps.length === 1 ? `${emps[0].number} · ${emps[0].name}` : `${emps.length} cards`}
       includeDefs={[]} sizeOrder={["card", "a4"]} defaultSize="card" copyLabels={[[1, "1 Copy"]]}
-      fileName={emps.length === 1 ? `ID-Card-${emps[0].number}` : "ID-Cards"} onClose={onClose}
+      fileName={emps.length === 1 ? `ID Card ${emps[0].number} - ${emps[0].name}` : `ID Cards - ${emps.length} employees`} onClose={onClose}
       renderDoc={(p) => <HrCardDoc emps={emps} company={company} size={p.size} />} />
   );
 }
@@ -18905,7 +18931,7 @@ function HrLeavePrintDialog({ lv, emp, fin, company, onClose }) {
   return (
     <PrintDialog kind="hrleave" title="Print Leave Slip" subtitle={`${lv.number} · ${emp.name}`} includeDefs={[]}
       sizeOrder={["v5", "t80"]} defaultSize="v5" copyLabels={[[1, "1 Copy"], [2, "2 Copies (Employee + Office)"]]}
-      fileName={`Leave-${lv.number}`} onClose={onClose}
+      fileName={`Leave Slip ${lv.number} - ${emp.name}`} onClose={onClose}
       renderDoc={(p) => (PRINT_SIZES[p.size].thermal
         ? <HrThermalDoc company={company} title={`LEAVE SLIP · ${lv.number}`} qrText={docVerifyUrl("l", lv.id)} size={p.size} copies={p.copies}
             lines={[["Employee", emp.name, true], ["EMP", emp.number], ["Post", emp.post], "-", ["Type", lv.type], ["From", fmtDate(lv.from)], ["To", fmtDate(lv.to)], ["Days", String(lv.days), true], ["Reason", lv.reason || "—"], "-", ["Status", String(lv.status).toUpperCase(), true, true]]} />
@@ -18978,7 +19004,7 @@ function HrAdvancePrintDialog({ adv, emp, fin, company, onClose }) {
   return (
     <PrintDialog kind="hradv" title="Print Advance Slip" subtitle={`${adv.number} · ${emp.name} · Rs ${finMoney2(adv.amount)}`} includeDefs={[]}
       sizeOrder={["v5", "t80"]} defaultSize="v5" copyLabels={[[1, "1 Copy"], [2, "2 Copies (Employee + Office)"]]}
-      fileName={`Advance-${adv.number}`} onClose={onClose}
+      fileName={`Advance Slip ${adv.number} - ${emp.name} - Rs ${Math.round(Number(adv.amount) || 0)}`} onClose={onClose}
       renderDoc={(p) => (PRINT_SIZES[p.size].thermal
         ? <HrThermalDoc company={company} title={`ADVANCE SLIP · ${adv.number}`} qrText={docVerifyUrl("a", adv.id)} size={p.size} copies={p.copies}
             lines={[["Employee", emp.name, true], ["EMP", emp.number], "-", ["Amount", `Rs ${finMoney2(adv.amount)}`, true, true], ["Reason", adv.reason || "—"], ["Repay", adv.months ? `${adv.months} x Rs ${finMoney2(info.per)}` : "—"], ["Voucher", info.v ? info.v.number : "—"], "-", ["Status", String(info.status).toUpperCase(), true]]} />
@@ -19042,7 +19068,7 @@ function HrSalaryPrintDialog({ sheet, rows, fin, company, onClose }) {
   return (
     <PrintDialog kind="hrsalary" title={one ? "Print Salary Slip" : "Print All Salary Slips"} subtitle={`${hrMonthLabel(sheet.month)} · ${one ? one.name : rows.length + " employees"}`}
       includeDefs={[]} sizeOrder={one ? ["v5", "t80"] : ["a4"]} defaultSize={one ? "v5" : "a4"} copyLabels={[[1, "1 Copy"]]}
-      fileName={`Salary-${sheet.month}${one ? "-" + one.number : ""}`} onClose={onClose}
+      fileName={one ? `Salary Slip ${hrMonthLabel(sheet.month)} - ${one.name}` : `Salary Slips ${hrMonthLabel(sheet.month)}`} onClose={onClose}
       renderDoc={(p) => (PRINT_SIZES[p.size].thermal && one
         ? <HrThermalDoc company={company} title={`SALARY SLIP · ${hrMonthLabel(sheet.month).toUpperCase()}`} qrText={docVerifyUrl("s", hrSalarySlipId(sheet, one.empId))} size={p.size} copies={1}
             lines={[["Employee", one.name, true], ["EMP", one.number], "-", ["Present", String(one.present)], ["Leave / Absent", `${one.leave} / ${one.absent}`], "-", ["Salary", finMoney2(one.salary)], ["Leave cut", one.maaf ? "Maaf" : finMoney2(one.leaveCut)], ["Advance cut", finMoney2(one.advanceCut)], ...(one.bonus ? [["Bonus", finMoney2(one.bonus)]] : []), ...(one.deduct ? [["Deduction", finMoney2(one.deduct)]] : []), "-", ["NET", `Rs ${finMoney2(one.net)}`, true, true]]} />
@@ -20726,7 +20752,7 @@ function CrLetterPrintDialog({ cust, ag, w, cs, company, onClose }) {
   return (
     <PrintDialog kind="crletter" title="Print Warning Letter" subtitle={`${cust.name} · Warning ${w.n}/${cs.warnings}`} includeDefs={[]}
       sizeOrder={["v5", "t80"]} defaultSize="v5" copyLabels={[[1, "1 Copy"], [2, "2 Copies (Customer + Office)"]]}
-      fileName={`Warning-${w.n}-${cust.name}`} onClose={onClose}
+      fileName={`Payment Warning ${w.n} - ${cust.name} - ${printFileDate(w.date)}`} onClose={onClose}
       renderDoc={(p) => (PRINT_SIZES[p.size].thermal
         ? <HrThermalDoc company={company} title={`PAYMENT WARNING ${w.n}/${cs.warnings}`} qrText={docVerifyUrl("w", `${cust.id}~${w.id}`)} size={p.size} copies={p.copies}
             lines={[["Customer", cust.name, true], ["Date", fmtDate(w.date)], "-", ["Udhaar", `Rs ${finMoney2(ag.out)}`, true, true], ["Purana", ag.oldest >= 999 ? "opening" : `${ag.oldest} din`], ["Pay by", fmtDate(finAddDays(w.date, w.n >= cs.warnings ? cs.redAfterDays : cs.gapDays)), true]]} />
@@ -21992,6 +22018,444 @@ function UrduTranslatePage({ currentUser, customers, products, drivers, branches
       </section>
       <div className="text-[12px] ct-t3 mt-2">{t("Galat Urdu ho to box mein theek likh kar Save / Enter dabayein. Print aur invoice ke andar ka text waise hi rehta hai.")}</div>
     </div>
+  );
+}
+
+/* ============================================================
+   PREMIUM ACCOUNT STATEMENT (customer ledger PDF)
+   Fixed A4 pages: page 1 has the full header, later pages a small
+   header with "Brought forward", every page ends with "Carried
+   forward", the last page has the closing card + snapshot + stamp.
+   Cancelled invoices never appear (the ledger already leaves them out).
+   ============================================================ */
+
+const LS_GOLD = "#d4a94f";
+const LS_NAVY = "#0b1324";
+const LS_EXACT = { WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" };
+const LS_ROW_H = 9.6; // mm per entry row
+const LS_FIRST_ROWS = 16;
+const LS_NEXT_ROWS = 23;
+const LS_LAST_RESERVE = 6; // rows of space the closing card needs on the last page
+
+function lsMoney(n) { return Math.round(Math.abs(Number(n) || 0)).toLocaleString("en-IN"); }
+function lsDrCr(n) { return (Number(n) || 0) < -0.5 ? "Cr" : "Dr"; }
+function lsKind(e) {
+  if (e.type === "Invoice") return { code: "SI", tone: ["#fef2f2", "#b91c1c"] };
+  if (e.type === "Sales Return") return { code: "CN", tone: ["#fffbeb", "#b45309"] };
+  if (String(e.type).startsWith("Exchange")) return { code: "EX", tone: ["#f5f3ff", "#6d28d9"] };
+  if (String(e.type).startsWith("Adjustment")) return { code: "JV", tone: ["#f1f5f9", "#334155"] };
+  if (String(e.type).startsWith("Outstanding Transfer")) return { code: "TR", tone: ["#f1f5f9", "#334155"] };
+  if (e.type === "Booking Refund") return { code: "PV", tone: ["#fef2f2", "#b91c1c"] };
+  if (/bank|cheque|easypaisa|jazz/i.test(String(e.ref || ""))) return { code: "BR", tone: ["#eff6ff", "#1d4ed8"] };
+  return { code: "RV", tone: ["#ecfdf5", "#047857"] };
+}
+const LS_WD = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+const LS_MON = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+const LS_WD_UR = ["اتوار", "پیر", "منگل", "بدھ", "جمعرات", "جمعہ", "ہفتہ"];
+const LS_MON_UR = ["جنوری", "فروری", "مارچ", "اپریل", "مئی", "جون", "جولائی", "اگست", "ستمبر", "اکتوبر", "نومبر", "دسمبر"];
+
+// Text for each ledger line (title + small detail line).
+function lsNarration(e, invById, payById, urdu) {
+  const L = (k) => printL(k, urdu);
+  const D = (x) => printD(x, urdu);
+  if (e.type === "Invoice") {
+    const inv = invById.get(e.id);
+    const items = (inv && inv.items) || [];
+    const first = items[0];
+    const title = `${L("Sale")} — ${first ? D(first.name) : e.ref}${items.length > 1 ? ` +${items.length - 1}` : ""}`;
+    const parts = items.slice(0, 2).map((it) => `${fmtQty(it.qty)} ${D(it.unit || "")} × ${lsMoney(it.price)}`);
+    if (inv && (inv.vehicleNumber || inv.driverName)) parts.push([inv.vehicleType && D(inv.vehicleType), inv.vehicleNumber, inv.driverName && `(${D(inv.driverName)})`].filter(Boolean).join(" "));
+    return { title, sub: parts.join(" · ") };
+  }
+  if (e.type === "Payment" || e.type === "Payment Against Promise" || e.type === "Booking Advance") {
+    const p = payById.get(e.id);
+    const method = (p && p.method) || e.ref || "Cash";
+    const title = /bank/i.test(method) ? `${L("Bank transfer")}` : /cheque/i.test(method) ? L("Cheque received") : /easy|jazz/i.test(method) ? L(method) : L("Cash received");
+    const sub = [e.type === "Booking Advance" ? `${L("Booking")} ${e.ref}` : "", e.type === "Payment Against Promise" ? `${L("Promise")} ${e.ref}` : "", p && p.reference ? `Txn ${p.reference}` : "", p && p.note && !/^Against /.test(p.note) ? D(p.note) : ""].filter(Boolean).join(" · ");
+    return { title, sub };
+  }
+  if (e.type === "Sales Return") return { title: L("Sales return"), sub: [e.qty ? `${fmtQty(e.qty)} ${L("qty")}` : "", e.invoiceNumber ? `${L("Invoice")} ${e.invoiceNumber}` : ""].filter(Boolean).join(" · ") };
+  if (String(e.type).startsWith("Exchange")) return { title: printLedgerType(e.type, urdu), sub: `${L("Ret")} ${fmtQty(e.returnedQty || 0)} / ${L("New")} ${fmtQty(e.newQty || 0)}${e.invoiceNumber ? ` · ${e.invoiceNumber}` : ""}` };
+  if (String(e.type).startsWith("Outstanding Transfer")) return { title: printLedgerType(e.type, urdu), sub: [e.counterparty && D(e.counterparty), e.note && D(e.note)].filter(Boolean).join(" · ") };
+  return { title: printLedgerType(e.type, urdu), sub: [e.note && D(e.note)].filter(Boolean).join(" · ") };
+}
+
+// Average days a bill stayed unpaid (payments clear the oldest bills first).
+function lsAvgPayDays(allEntries, today) {
+  const queue = [];
+  const days = [];
+  allEntries.forEach((e) => {
+    if (e.debit > 0) queue.push({ date: e.date, left: e.debit });
+    let c = e.credit;
+    while (c > 0.5 && queue.length) {
+      const q = queue[0];
+      const take = Math.min(c, q.left);
+      q.left -= take; c -= take;
+      if (q.left <= 0.5) { days.push(Math.max(0, finDaysBetween(q.date, e.date))); queue.shift(); }
+    }
+  });
+  const recent = days.slice(-12);
+  return recent.length ? Math.round(recent.reduce((s, d) => s + d, 0) / recent.length) : null;
+}
+
+function lsPaginate(rows) {
+  const pages = [];
+  let i = 0;
+  let cap = LS_FIRST_ROWS;
+  while (i < rows.length || pages.length === 0) {
+    pages.push(rows.slice(i, i + cap));
+    i += cap;
+    cap = LS_NEXT_ROWS;
+  }
+  const last = pages[pages.length - 1];
+  const lastCap = pages.length === 1 ? LS_FIRST_ROWS : LS_NEXT_ROWS;
+  if (last.length > lastCap - LS_LAST_RESERVE) pages.push([]);
+  return pages;
+}
+
+function LsPageFooter({ left, page, total, L }) {
+  return (
+    <div style={{ position: "absolute", left: 0, right: 0, bottom: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "2.2mm 8mm", background: "#f8fafc", borderTop: "1px solid #e2e8f0", fontSize: "8.5px", color: "#64748b", ...LS_EXACT }}>
+      <span>{left}</span><b><PrintLtr>{L("Page")} {page} {L("of")} {total}</PrintLtr></b>
+    </div>
+  );
+}
+
+function LedgerStatementDoc({ data, settings, include, urdu }) {
+  const L = (k) => printL(k, urdu);
+  const D = (x) => printD(x, urdu);
+  const { customer, rows, opening, closing, periodLabel, stmtNo, totals, status, snapshot, limit, statusText } = data;
+  const pages = lsPaginate(rows);
+  const total = pages.length;
+  const font = urdu ? '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif' : "Inter, Arial, sans-serif";
+  const usedPct = limit > 0 ? Math.max(0, Math.min(100, Math.round((Math.max(0, closing) / limit) * 100))) : 0;
+  const barColor = (bal) => {
+    const pct = limit > 0 ? bal / limit : bal > 0 ? 0.5 : 0;
+    return pct >= 0.7 ? "#ef4444" : pct >= 0.45 ? "#f59e0b" : "#10b981";
+  };
+  const barW = (bal) => Math.max(2, Math.min(100, Math.round((limit > 0 ? Math.max(0, bal) / limit : Math.max(0, bal) / Math.max(1, data.maxBal)) * 100)));
+  const k = { fontSize: "7.5px", fontWeight: 800, letterSpacing: ".14em", textTransform: "uppercase", color: "#64748b" };
+  const th = { fontSize: "7.5px", letterSpacing: ".12em", textTransform: "uppercase", color: "#64748b", textAlign: "start", padding: "1.8mm 1.4mm", borderBottom: `2px solid ${LS_NAVY}`, fontWeight: 800 };
+  const thR = { ...th, textAlign: "end" };
+  const head = (
+    <tr>
+      <th style={{ ...th, width: "13mm" }}>{L("Date")}</th>
+      <th style={{ ...th, width: "27mm" }}>{L("Voucher")}</th>
+      <th style={th}>{L("Narration")}</th>
+      <th style={{ ...thR, width: "22mm" }}>{L("Debit")}</th>
+      <th style={{ ...thR, width: "22mm" }}>{L("Credit")}</th>
+      <th style={{ ...thR, width: "30mm" }}>{L("Balance")}</th>
+    </tr>
+  );
+  const sumRow = (label, a, b, bal, dark) => (
+    <tr style={dark ? { background: LS_NAVY, color: "#fff", ...LS_EXACT } : { background: "#f8fafc", ...LS_EXACT }}>
+      <td colSpan={3} style={{ padding: "2mm 1.4mm", fontWeight: 800, textAlign: dark ? "end" : "start", fontSize: "10px" }}>{label}</td>
+      <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800 }}>{a != null ? <PrintLtr>{lsMoney(a)}</PrintLtr> : ""}</td>
+      <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800 }}>{b != null ? <PrintLtr>{lsMoney(b)}</PrintLtr> : ""}</td>
+      <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800 }}><PrintLtr>{lsMoney(bal)} {lsDrCr(bal)}</PrintLtr></td>
+    </tr>
+  );
+  let runDr = 0, runCr = 0;
+  return (
+    <div style={{ fontFamily: font, direction: urdu ? "rtl" : "ltr", color: "#0f172a", background: "#fff", fontVariantNumeric: "tabular-nums" }}>
+      {pages.map((pageRows, pi) => {
+        const isFirst = pi === 0, isLast = pi === total - 1;
+        const bf = { dr: runDr, cr: runCr, bal: pageRows.length ? pageRows[0].balance - pageRows[0].debit + pageRows[0].credit : closing };
+        if (!isFirst && !pageRows.length) bf.bal = closing;
+        pageRows.forEach((r) => { runDr += r.debit; runCr += r.credit; });
+        let prevDate = "";
+        return (
+          <div key={pi} style={{ width: "210mm", height: "297mm", position: "relative", overflow: "hidden", boxSizing: "border-box", breakAfter: isLast ? "auto" : "page", pageBreakAfter: isLast ? "auto" : "always", background: "#fff" }}>
+            <div style={{ position: "absolute", left: "50%", top: "55%", transform: "translate(-50%,-50%) rotate(-24deg)", fontSize: "70px", fontWeight: 900, color: "rgba(11,19,36,.028)", whiteSpace: "nowrap", pointerEvents: "none" }}>{D(settings.companyName)}</div>
+            {isFirst ? (
+              <>
+                <div style={{ background: LS_NAVY, color: "#fff", padding: "6mm 8mm 5.5mm", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "4mm", position: "relative", borderBottom: `1mm solid ${LS_GOLD}`, ...LS_EXACT }}>
+                  <div style={{ position: "absolute", insetInlineEnd: 0, top: 0, bottom: 0, width: "50mm", background: "repeating-linear-gradient(135deg,rgba(212,169,79,.08) 0 2px,transparent 2px 9px)", ...LS_EXACT }} />
+                  <div style={{ display: "flex", gap: "3.5mm", alignItems: "center", position: "relative", minWidth: 0 }}>
+                    {settings.logoUrl ? <img src={settings.logoUrl} alt="" style={{ width: "14mm", height: "14mm", objectFit: "contain", background: "#fff", borderRadius: "3mm" }} /> : (
+                      <div style={{ width: "14mm", height: "14mm", borderRadius: "3mm", background: "linear-gradient(135deg,#e7c67a,#a8802f)", color: LS_NAVY, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "17px", ...LS_EXACT }}>{uiInitials(settings.companyName)}</div>
+                    )}
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: "19px", fontWeight: 900, letterSpacing: ".01em", lineHeight: 1.1 }}>{D(settings.companyName)}</div>
+                      <div style={{ fontSize: "7.5px", letterSpacing: urdu ? 0 : ".22em", color: LS_GOLD, fontWeight: 800, marginTop: "1mm" }}>{L("CONSTRUCTION MATERIALS SUPPLIER")}</div>
+                      <div style={{ fontSize: "8.5px", color: "#94a3b8", marginTop: "1.2mm", lineHeight: 1.5 }}>{D(settings.companyAddress)}{settings.companyPhone ? <><br /><PrintLtr>{settings.companyPhone}</PrintLtr></> : null}</div>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: "3mm", alignItems: "center", position: "relative" }}>
+                    <div style={{ borderRadius: "3.5mm", background: "linear-gradient(160deg,rgba(212,169,79,.16),rgba(255,255,255,.03))", border: "1px solid rgba(212,169,79,.4)", padding: "2.6mm 3.6mm", textAlign: "end", minWidth: "50mm", ...LS_EXACT }}>
+                      <div style={{ ...k, color: "#cbd5e1" }}>{L("Aap ka baqaya")}</div>
+                      <div style={{ fontSize: "22px", fontWeight: 900, lineHeight: 1.15 }}><PrintLtr>Rs {lsMoney(closing)}</PrintLtr> <span style={{ fontSize: "10px", color: "#94a3b8" }}>{lsDrCr(closing)}</span></div>
+                      <div style={{ fontSize: "8px", color: "#cbd5e1" }}>{printDate(data.asOf, urdu)} {L("tak")}{snapshot.promise ? <> · <b style={{ color: "#f5d98b" }}>{L("Payment ka wada")} {printDate(snapshot.promise.date, urdu)}</b></> : null}</div>
+                      {status && <div style={{ marginTop: "1.4mm" }}>
+                        <span style={{ display: "inline-block", borderRadius: "99px", padding: ".4mm 2.2mm", fontSize: "8px", fontWeight: 800, background: status.bad ? "rgba(244,63,94,.2)" : "rgba(16,185,129,.18)", color: status.bad ? "#fda4af" : "#34d399", ...LS_EXACT }}>● {statusText}</span>{" "}
+                        {status.grade && <span style={{ display: "inline-block", borderRadius: "99px", padding: ".4mm 2.2mm", fontSize: "8px", fontWeight: 800, background: "rgba(212,169,79,.18)", color: "#f5d98b", ...LS_EXACT }}>{L("Grade")} {status.grade}</span>}
+                      </div>}
+                    </div>
+                    {include.qr !== false && (
+                      <div style={{ background: "#fff", padding: "1.4mm", borderRadius: "2.6mm", textAlign: "center" }}>
+                        <QrSvg text={docVerifyUrl("c", customer.id)} sizeMm={18} />
+                        <div style={{ fontSize: "6px", color: "#64748b", fontWeight: 800, marginTop: ".5mm" }}>{L("LIVE BAQAYA")}</div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1.55fr 1fr 1fr 1fr", borderBottom: "1px solid #e2e8f0" }}>
+                  <div style={{ padding: "2.6mm 4mm", borderInlineEnd: "1px solid #eef2f7" }}>
+                    <div style={k}>{L("Statement of account")}</div>
+                    <div style={{ display: "flex", gap: "2.6mm", alignItems: "center", marginTop: "1.2mm" }}>
+                      <div style={{ width: "10mm", height: "10mm", borderRadius: "2.6mm", background: LS_NAVY, color: "#f5d98b", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", flexShrink: 0, ...LS_EXACT }}>{uiInitials(customer.name)}</div>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: "13px", fontWeight: 800, lineHeight: 1.2 }}>{D(customer.name)}</div>
+                        <div style={{ fontSize: "8.5px", color: "#64748b", lineHeight: 1.4 }}>{[customer.address && D(customer.address), customer.phone].filter(Boolean).join(" · ")}{data.since ? <><br />{L("Customer since")} {printMonth(data.since, urdu)} · {data.billCount} {L("bills")}</> : null}</div>
+                      </div>
+                    </div>
+                  </div>
+                  <div style={{ padding: "2.6mm 4mm", borderInlineEnd: "1px solid #eef2f7" }}><div style={k}>{L("Account / statement")}</div><b style={{ display: "block", fontSize: "11px", marginTop: ".8mm" }}><PrintLtr>{data.accountNo}</PrintLtr></b><span style={{ fontSize: "8.5px", color: "#64748b" }}><PrintLtr>{stmtNo}</PrintLtr></span></div>
+                  <div style={{ padding: "2.6mm 4mm", borderInlineEnd: "1px solid #eef2f7" }}><div style={k}>{L("Period")}</div><b style={{ display: "block", fontSize: "11px", marginTop: ".8mm" }}>{periodLabel}</b><span style={{ fontSize: "8.5px", color: "#64748b" }}>{rows.length} {L("entries")}</span></div>
+                  <div style={{ padding: "2.6mm 4mm" }}><div style={k}>{L("Credit limit")}</div>
+                    {limit > 0 ? <>
+                      <b style={{ display: "block", fontSize: "11px", marginTop: ".8mm" }}><PrintLtr>Rs {lsMoney(limit)}</PrintLtr></b>
+                      <div style={{ height: "1.4mm", borderRadius: "1mm", background: "#eef2f7", marginTop: "1mm", overflow: "hidden", ...LS_EXACT }}><i style={{ display: "block", width: `${usedPct}%`, height: "100%", background: barColor(closing), ...LS_EXACT }} /></div>
+                      <span style={{ fontSize: "8px", color: "#64748b" }}>{usedPct}% {L("use")}</span>
+                    </> : <b style={{ display: "block", fontSize: "11px", marginTop: ".8mm" }}>—</b>}
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: "1.6mm", alignItems: "stretch", padding: "3.6mm 8mm 0" }}>
+                  {[
+                    [L("Opening"), lsMoney(opening) + (opening < -0.5 ? " Cr" : ""), data.openingNote, null],
+                    "+",
+                    [L("Maal liya"), lsMoney(totals.debit), `${totals.bills} ${L("bill")}${totals.qty ? ` · ${fmtQty(totals.qty)} ${L("qty")}` : ""}`, ["#fff5f5", "#fecaca", "#b91c1c"]],
+                    "−",
+                    [L("Payment + return"), lsMoney(totals.credit), `${totals.pays} ${L("payment")}${totals.returns ? ` · ${totals.returns} ${L("return")}` : ""}`, ["#f0fdf8", "#a7f3d0", "#047857"]],
+                    "=",
+                    [L("Closing"), `${lsMoney(closing)} ${lsDrCr(closing)}`, closing > 0.5 ? L("customer ne dena hai") : closing < -0.5 ? L("dukaan ne dena hai") : L("hisaab barabar"), "dark"],
+                  ].map((c, i) => (typeof c === "string" ? (
+                    <div key={i} style={{ display: "flex", alignItems: "center", fontSize: "15px", fontWeight: 900, color: "#cbd5e1" }}>{c}</div>
+                  ) : (
+                    <div key={i} style={{ flex: 1, borderRadius: "3mm", padding: "2.2mm 3mm", border: `1px solid ${c[3] === "dark" ? LS_NAVY : c[3] ? c[3][1] : "#e2e8f0"}`, background: c[3] === "dark" ? LS_NAVY : c[3] ? c[3][0] : "#fff", color: c[3] === "dark" ? "#fff" : undefined, ...LS_EXACT }}>
+                      <div style={{ ...k, color: c[3] === "dark" ? LS_GOLD : "#64748b" }}>{c[0]}</div>
+                      <div style={{ fontSize: "13.5px", fontWeight: 800, marginTop: ".6mm", color: c[3] && c[3] !== "dark" ? c[3][2] : undefined }}><PrintLtr>{c[1]}</PrintLtr></div>
+                      <div style={{ fontSize: "7.5px", color: c[3] === "dark" ? "#94a3b8" : "#64748b" }}>{c[2]}</div>
+                    </div>
+                  )))}
+                </div>
+              </>
+            ) : (
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "3.4mm 8mm", background: LS_NAVY, color: "#fff", borderBottom: `.8mm solid ${LS_GOLD}`, ...LS_EXACT }}>
+                <div style={{ display: "flex", gap: "2.6mm", alignItems: "center" }}>
+                  <div style={{ width: "9mm", height: "9mm", borderRadius: "2.4mm", background: "linear-gradient(135deg,#e7c67a,#a8802f)", color: LS_NAVY, fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "10px", ...LS_EXACT }}>{uiInitials(settings.companyName)}</div>
+                  <div><b style={{ fontSize: "12px" }}>{D(customer.name)}</b><div style={{ fontSize: "8px", color: "#94a3b8" }}><PrintLtr>{data.accountNo} · {stmtNo}</PrintLtr> · {periodLabel}</div></div>
+                </div>
+                <div style={{ fontSize: "9px", color: LS_GOLD, fontWeight: 800 }}>{D(settings.companyName)}</div>
+              </div>
+            )}
+            <div style={{ padding: "3mm 8mm 0" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "10px", tableLayout: "fixed" }}>
+                <thead>{head}</thead>
+                <tbody>
+                  {isFirst
+                    ? sumRow(`${L("Balance brought forward")} · ${printDate(data.openingDate, urdu)}`, null, null, opening)
+                    : sumRow(L("Brought forward from previous page"), bf.dr, bf.cr, bf.bal)}
+                  {pageRows.map((r, ri) => {
+                    const showDate = r.date !== prevDate;
+                    const nextSame = pageRows[ri + 1] && pageRows[ri + 1].date === r.date;
+                    prevDate = r.date;
+                    const d = parseDateValue(r.date) || new Date();
+                    const kd = lsKind(r);
+                    const nar = r.nar;
+                    return (
+                      <tr key={r.id + ri} style={{ height: `${LS_ROW_H}mm`, borderBottom: nextSame ? "1px solid #eef2f7" : "1.4px solid #e2e8f0" }}>
+                        <td style={{ textAlign: "center", verticalAlign: "top", paddingTop: "1.6mm" }}>
+                          {showDate && <>
+                            <div style={{ fontSize: "14px", fontWeight: 900, lineHeight: 1, color: LS_NAVY }}><PrintLtr>{String(d.getDate()).padStart(2, "0")}</PrintLtr></div>
+                            <div style={{ fontSize: "6.5px", fontWeight: 800, letterSpacing: urdu ? 0 : ".1em", color: "#b8913f" }}>{urdu ? LS_MON_UR[d.getMonth()] : LS_MON[d.getMonth()]}</div>
+                            <div style={{ fontSize: "6px", color: "#94a3b8", fontWeight: 700 }}>{urdu ? LS_WD_UR[d.getDay()] : LS_WD[d.getDay()]}</div>
+                          </>}
+                        </td>
+                        <td style={{ padding: "0 1.4mm" }}>
+                          <span style={{ whiteSpace: "nowrap", fontFamily: "Consolas, monospace", fontSize: "8px", fontWeight: 700, borderRadius: "1.2mm", padding: ".4mm 1.4mm", background: kd.tone[0], color: kd.tone[1], ...LS_EXACT }}><PrintLtr>{kd.code} · {r.ref}</PrintLtr></span>
+                        </td>
+                        <td style={{ padding: "0 1.4mm", overflow: "hidden" }}>
+                          <div style={{ fontWeight: 700, fontSize: "10px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{nar.title}</div>
+                          {nar.sub ? <div style={{ fontSize: "8.2px", color: "#64748b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{nar.sub}</div> : null}
+                        </td>
+                        <td style={{ padding: "0 1.4mm", textAlign: "end", color: "#b91c1c", fontWeight: 700 }}>{r.debit ? <PrintLtr>{lsMoney(r.debit)}</PrintLtr> : ""}</td>
+                        <td style={{ padding: "0 1.4mm", textAlign: "end", color: "#047857", fontWeight: 700 }}>{r.credit ? <PrintLtr>{lsMoney(r.credit)}</PrintLtr> : ""}</td>
+                        <td style={{ padding: "0 1.4mm", textAlign: "end" }}>
+                          <b style={{ fontSize: "10px" }}><PrintLtr>{lsMoney(r.balance)}</PrintLtr></b><span style={{ fontSize: "7.5px", color: "#94a3b8", fontWeight: 700, marginInlineStart: ".6mm" }}>{lsDrCr(r.balance)}</span>
+                          <div style={{ height: ".9mm", borderRadius: "1mm", background: "#eef2f7", marginTop: ".6mm", overflow: "hidden", ...LS_EXACT }}><i style={{ display: "block", width: `${barW(r.balance)}%`, height: "100%", background: barColor(r.balance), marginInlineStart: "auto", ...LS_EXACT }} /></div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {isLast
+                    ? sumRow(L("Is muddat ka total"), totals.debit, totals.credit, closing, true)
+                    : sumRow(`${L("Carried forward")} → ${L("page")} ${pi + 2}`, runDr, runCr, pageRows.length ? pageRows[pageRows.length - 1].balance : bf.bal, true)}
+                </tbody>
+              </table>
+              {isFirst && (
+                <div style={{ display: "flex", gap: "3mm", fontSize: "7.5px", color: "#64748b", marginTop: "1.6mm" }}>
+                  {[["SI", "#fef2f2", "#b91c1c", "sale"], ["RV", "#ecfdf5", "#047857", "cash"], ["BR", "#eff6ff", "#1d4ed8", "bank"], ["CN", "#fffbeb", "#b45309", "return"]].map(([c, bg, fg, l]) => (
+                    <span key={c}><span style={{ fontFamily: "Consolas, monospace", fontWeight: 700, background: bg, color: fg, borderRadius: "1mm", padding: "0 1mm", ...LS_EXACT }}>{c}</span> {L(l)}</span>
+                  ))}
+                </div>
+              )}
+              {isLast && (
+                <>
+                  <div style={{ display: "grid", gridTemplateColumns: include.snapshot !== false ? "1fr 1fr" : "1fr", gap: "3mm", marginTop: "4mm" }}>
+                    <div style={{ borderRadius: "3.5mm", background: LS_NAVY, color: "#fff", padding: "3.6mm 4.2mm", position: "relative", overflow: "hidden", ...LS_EXACT }}>
+                      <div style={{ position: "absolute", insetInlineEnd: "-8mm", top: "-8mm", width: "32mm", height: "32mm", borderRadius: "50%", background: "radial-gradient(circle,rgba(212,169,79,.35),transparent 70%)", ...LS_EXACT }} />
+                      <div style={{ ...k, color: LS_GOLD }}>{L("Closing balance")} · {printDate(data.asOf, urdu)}</div>
+                      <div style={{ fontSize: "26px", fontWeight: 900, marginTop: ".6mm" }}><PrintLtr>Rs {lsMoney(closing)}</PrintLtr> <span style={{ fontSize: "12px", color: "#94a3b8" }}>{lsDrCr(closing)}</span></div>
+                      <div style={{ fontSize: "9px", color: "#cbd5e1" }}>{closing > 0.5 ? L("Customer ne dukaan ko dena hai") : closing < -0.5 ? L("Dukaan ne customer ko dena hai (advance)") : L("Hisaab barabar")}</div>
+                      <div style={{ display: "flex", gap: "5mm", marginTop: "2.4mm", fontSize: "8.5px", color: "#cbd5e1" }}>
+                        <div>{L("Opening")}<br /><b style={{ color: "#fff", fontSize: "11px" }}><PrintLtr>{lsMoney(opening)}</PrintLtr></b></div>
+                        <div>{L("Maal")}<br /><b style={{ color: "#fca5a5", fontSize: "11px" }}><PrintLtr>+{lsMoney(totals.debit)}</PrintLtr></b></div>
+                        <div>{L("Wusool")}<br /><b style={{ color: "#6ee7b7", fontSize: "11px" }}><PrintLtr>−{lsMoney(totals.credit)}</PrintLtr></b></div>
+                      </div>
+                    </div>
+                    {include.snapshot !== false && (
+                      <div style={{ border: "1px solid #e2e8f0", borderRadius: "3.5mm", padding: "3mm 3.6mm", display: "flex", justifyContent: "space-between", gap: "3mm" }}>
+                        <div style={{ fontSize: "9.5px", lineHeight: 1.85 }}>
+                          <div style={k}>{L("Account snapshot")}</div>
+                          <div>{L("Akhri payment")}: <b>{snapshot.lastPay ? <>{printDate(snapshot.lastPay.date, urdu)} · <PrintLtr>Rs {lsMoney(snapshot.lastPay.amount)}</PrintLtr></> : "—"}</b></div>
+                          <div>{L("Avg payment time")}: <b>{snapshot.avgDays != null ? `${snapshot.avgDays} ${L("din")}` : "—"}</b></div>
+                          {snapshot.delivery && <div>{L("Agli delivery")}: <b>{printDate(snapshot.delivery.date, urdu)} · {fmtQty(snapshot.delivery.qty)} {D(snapshot.delivery.unit || "")}</b></div>}
+                          {snapshot.promise && <div>{L("Payment ka wada")}: <b>{printDate(snapshot.promise.date, urdu)} · <PrintLtr>Rs {lsMoney(snapshot.promise.amount)}</PrintLtr></b></div>}
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center" }}>
+                          <div style={{ width: "25mm", height: "25mm", borderRadius: "50%", border: "2.4px double #1d4ed8", color: "#1d4ed8", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", transform: "rotate(-12deg)", fontWeight: 900, fontSize: "7.5px", letterSpacing: ".06em", textAlign: "center", opacity: .85, lineHeight: 1.25, padding: "2mm" }}>
+                            <span>{D(settings.companyName)}</span>
+                            <span style={{ fontSize: "6.5px", marginTop: ".8mm" }}>✓ {L("VERIFIED")}</span>
+                            <span style={{ fontSize: "6.5px" }}><PrintLtr>{fmtDate(data.asOf)}</PrintLtr></span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <div style={{ textAlign: "center", marginTop: "5mm", fontSize: "8px", letterSpacing: urdu ? 0 : ".3em", color: "#94a3b8", fontWeight: 800 }}>— {L("END OF STATEMENT")} —</div>
+                </>
+              )}
+            </div>
+            <LsPageFooter page={pi + 1} total={total} L={L}
+              left={isLast ? `${L("Computer generated statement · sign ki zaroorat nahi")} · ${L("QR scan = live baqaya")}` : `${L("Computer generated statement")} · ${L("Printed by")} ${data.printedBy} · ${fmtDateTime(new Date().toISOString())}`} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// Everything the statement needs, worked out from the ledger.
+function lsBuildData({ customer, entries, outstanding, monthFilter, invoices, payments, promises, settings, currentUser, bookings }) {
+  const today = todayISO();
+  const nonZero = entries.filter((e) => (Number(e.debit) || 0) > 0 || (Number(e.credit) || 0) > 0);
+  const inPeriod = monthFilter ? nonZero.filter((e) => String(e.date).slice(0, 7) === monthFilter) : nonZero;
+  const before = monthFilter ? nonZero.filter((e) => String(e.date).slice(0, 7) < monthFilter) : [];
+  const opening = before.length ? before[before.length - 1].balance : Number(customer.openingBalance) || 0;
+  const closing = inPeriod.length ? inPeriod[inPeriod.length - 1].balance : opening;
+  return { today, inPeriod, opening, closing, allNonZero: nonZero };
+}
+function lsPrepare({ customer, entries, outstanding, monthFilter, invoices, payments, promises, settings, currentUser, bookings, urdu }) {
+  const { today, inPeriod, opening, closing, allNonZero } = lsBuildData({ customer, entries, outstanding, monthFilter });
+  const invById = new Map((invoices || []).map((i) => [i.id, i]));
+  const payById = new Map((payments || []).map((p) => [p.id, p]));
+  const rows = inPeriod.map((e) => {
+    const pay = payById.get(e.id);
+    let ref = e.ref;
+    if (pay && /Payment|Booking/.test(e.type)) { try { ref = paymentReceiptNo(pay); } catch {} }
+    return { ...e, ref, nar: lsNarration(e, invById, payById, urdu) };
+  });
+  const totals = {
+    debit: roundMoney(rows.reduce((s, r) => s + (Number(r.debit) || 0), 0)),
+    credit: roundMoney(rows.reduce((s, r) => s + (Number(r.credit) || 0), 0)),
+    bills: rows.filter((r) => r.type === "Invoice").length,
+    qty: roundQty(rows.filter((r) => r.type === "Invoice").reduce((s, r) => s + (Number(r.qty) || 0), 0)),
+    pays: rows.filter((r) => /Payment|Booking Advance/.test(r.type)).length,
+    returns: rows.filter((r) => r.type === "Sales Return").length,
+  };
+  const [y, m] = (monthFilter || "").split("-").map(Number);
+  const firstDate = monthFilter ? `${monthFilter}-01` : (allNonZero[0] ? allNonZero[0].date : today);
+  const lastDate = monthFilter ? dateToLocalISO(new Date(y, m, 0)) : today;
+  const asOf = monthFilter && lastDate < today ? lastDate : today;
+  const periodLabel = monthFilter ? `${printDate(firstDate, urdu)} – ${printDate(lastDate, urdu)}` : `${printMonth("All Time", urdu)}${allNonZero[0] ? ` · ${printDate(allNonZero[0].date, urdu)} –` : ""}`;
+  const openingDate = monthFilter ? finAddDays(firstDate, -1) : (allNonZero[0] ? allNonZero[0].date : today);
+  const myInv = (invoices || []).filter((i) => i.customerId === customer.id && !isInvoiceCancelled(i)).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const sinceD = myInv[0] ? parseDateValue(myInv[0].date) : null;
+  const since = sinceD ? sinceD.toLocaleDateString("en-GB", { month: "long", year: "numeric" }) : "";
+  const myPays = (payments || []).filter((p) => p.customerId === customer.id && p.kind !== "Refund").sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const lastPay = myPays.length ? myPays[myPays.length - 1] : null;
+  const prom = (promises || []).filter((p) => p.customerId === customer.id && p.status !== "Deleted").map(promiseWithComputed)
+    .filter((p) => p.status === "Pending" || p.status === "Partially Paid").sort((a, b) => String(a.expectedDate).localeCompare(String(b.expectedDate)))[0];
+  let delivery = null;
+  try {
+    (bookings || []).filter((b) => b.customerId === customer.id && b.status !== "Cancelled").forEach((b) => {
+      const plan = finState.deliveryPlans[b.id];
+      if (!plan || !plan.length) return;
+      const st = computeBookingState(b, invoices, payments);
+      finDeliveryRows(plan, Number(st.deliveredQty) || 0).forEach((r) => {
+        if (r.status !== "Delivered" && r.date >= today && (!delivery || r.date < delivery.date)) delivery = { date: r.date, qty: r.left, unit: b.unit };
+      });
+    });
+  } catch {}
+  let status = null, statusText = "";
+  try {
+    const cs = crSettingsOf(finState.settings);
+    const ag = crAgingOne(customer, { customers: [customer], invoices, payments, returns: [], exchanges: [], promises, transfers: [], adjustments: [] }, today, cs.normalDays);
+    const st = finState.creditState[customer.id] || {};
+    const s = crStatusOf(customer, ag, st, cs, today);
+    const g = crGrade(st, ag, finState.creditLog.filter((l) => l.customerId === customer.id), today);
+    status = { bad: ["red", "blocked", "warning"].includes(s.key), grade: g.g };
+    statusText = s.key === "green" ? printL("Time par", urdu) : s.key === "warning" ? `${printL("Warning", urdu)} ${s.warningsN}/${s.W}` : printL(s.label, urdu);
+  } catch {}
+  const custNo = (() => { const m2 = String(customer.code || customer.id || "").match(/(\d+)/); return `CUST-${String(m2 ? m2[1] : "1").padStart(4, "0").slice(-4)}`; })();
+  const stmtNo = `SOA-${String(asOf).slice(2, 4)}${String(asOf).slice(5, 7)}-${String(customer.id || "").replace(/[^A-Za-z0-9]/g, "").slice(-4).toUpperCase()}`;
+  const maxBal = Math.max(1, ...rows.map((r) => Number(r.balance) || 0), opening);
+  return {
+    customer, rows, opening, closing, totals, periodLabel, openingDate, asOf, stmtNo, accountNo: custNo, status, statusText,
+    limit: Number(customer.creditLimit) || 0, since, billCount: myInv.length, maxBal,
+    openingNote: monthFilter ? `${printDate(openingDate, urdu)} ${printL("tak", urdu)}` : printL("shuru ka", urdu),
+    snapshot: { lastPay, avgDays: lsAvgPayDays(allNonZero, today), promise: prom ? { date: prom.expectedDate, amount: prom.remainingAmount } : null, delivery },
+    printedBy: (currentUser && (currentUser.name || currentUser.username)) || "",
+  };
+}
+
+function LedgerStatementDialog({ customer, entries, outstanding, monthFilter, monthLabel, invoices, payments, promises, bookings, settings, currentUser, urdu, onClose }) {
+  const name = String(customer.name || "Customer");
+  return (
+    <PrintDialog
+      kind="ledger3"
+      title={`${t("Print / Save")} — ${t("Ledger")}`}
+      subtitle={`${name} · ${monthLabel}`}
+      includeDefs={[
+        { key: "qr", label: "QR Code", sub: "Scan = live baqaya", default: true },
+        { key: "snapshot", label: "Account snapshot", sub: "Akhri payment, wada, delivery + mohar", default: true },
+        { key: "urdu", label: "Urdu Print", sub: "Print the document in Urdu", default: false },
+      ]}
+      initialInclude={{ urdu: !!urdu }}
+      sizeOrder={["a4"]} defaultSize="a4" copyLabels={[[1, "1 Copy"]]}
+      fileName={`Ledger - ${name} - ${monthLabel}`}
+      waHref={customer.phone ? waLink(customer.phone, `${settings.companyName}\n${name} — ${t("Ledger")} ${monthLabel}\nBaqaya: Rs ${lsMoney(outstanding)}`) : ""}
+      onClose={onClose}
+      renderDoc={(p) => {
+        const data = lsPrepare({ customer, entries, outstanding, monthFilter, invoices, payments, promises, settings, currentUser, bookings, urdu: !!p.include.urdu });
+        return <div style={{ width: "210mm" }}><LedgerStatementDoc data={data} settings={settings} include={p.include} urdu={!!p.include.urdu} /></div>;
+      }}
+    />
+  );
+}
+
+/* QR on the statement → read-only live balance page (#verify=c.<customerId>) */
+function CustomerBalanceVerifyView({ customerId, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments, settings, onOpen }) {
+  const c = (customers || []).find((x) => x.id === customerId);
+  if (!c) return <VerifyShell settings={settings} tone="bad" title="Account not found" sub="This QR code does not match our records." onOpen={onOpen}><div className="text-[14px] text-slate-600">The code may not be from this shop.</div></VerifyShell>;
+  const { outstanding } = computeLedgerForCustomer(c, invoices || [], payments || [], returns || [], exchanges || [], promises || [], transfers || [], adjustments || []);
+  return (
+    <VerifyShell settings={settings} tone="ok" title="Genuine statement · live balance" sub={c.name} onOpen={onOpen}>
+      <div className="text-[12px] text-slate-500">Balance today ({fmtDate(todayISO())})</div>
+      <div className="text-[30px] font-black tracking-tight">{fmtMoney(Math.abs(outstanding))} <span className="text-[14px] text-slate-500">{outstanding < -0.5 ? "Cr (advance)" : "Dr"}</span></div>
+      <div className="text-[12px] text-slate-400 mt-3">Full ledger is visible to the customer in the portal and to staff.</div>
+    </VerifyShell>
   );
 }
 
