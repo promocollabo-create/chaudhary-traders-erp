@@ -3170,7 +3170,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
           invoices={invoices} payments={payments} promises={promises} bookings={bookings} settings={settings} currentUser={currentUser}
           urdu={stmtOpen.urdu} onClose={() => setStmtOpen(null)} />
       )}
-      <div id="print-ledger" className="print-area ct-noxl" style={{ display: "none" }}>
+      <div id="print-ledger" data-print-title={`Ledger - ${customer.name} - ${fmtMonthLabel(monthFilter)}`} className="print-area ct-noxl" style={{ display: "none" }}>
         <div className="bg-white" dir={ledgerUrdu ? "rtl" : "ltr"} style={ledgerUrdu ? { fontFamily: '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif', lineHeight: 1.7 } : undefined}>
           <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
             <div className="flex items-center gap-3">
@@ -10337,6 +10337,28 @@ function App() {
     }, 1200);
     return () => clearTimeout(tm);
   }, [loading, currentUser, finLive.loaded, finLive.settings, customers, invoices, payments, promises, crTick]);
+
+  // PDF file names: the page title is what Windows / Chrome suggests when saving.
+  // Never leave it empty, and for prints that don't set their own name
+  // (e.g. Ctrl+P) use what is being printed + the page + the date.
+  useEffect(() => {
+    const appTitle = `${settings.companyName || "Chaudhary Traders"} — ERP`;
+    if (!document.title || /— ERP$/.test(document.title)) document.title = appTitle;
+    let changed = false;
+    const back = () => { if (changed && document.title !== appTitle && changed === document.title) document.title = appTitle; changed = false; window.removeEventListener("pointerdown", back, true); };
+    const before = () => {
+      if (document.title && document.title !== appTitle) return;
+      const el = document.querySelector("[data-print-title]");
+      const item = NAV_GROUPS.flatMap((g) => g.items).find((it) => it.id === page);
+      const name = (el && el.getAttribute("data-print-title")) || `${settings.companyName || "Chaudhary Traders"} - ${item ? item.label : "Print"} - ${printFileDate(todayISO())}`;
+      document.title = printFileName(name);
+      changed = document.title;
+    };
+    const after = () => { setTimeout(() => window.addEventListener("pointerdown", back, true), 1000); };
+    window.addEventListener("beforeprint", before);
+    window.addEventListener("afterprint", after);
+    return () => { window.removeEventListener("beforeprint", before); window.removeEventListener("afterprint", after); window.removeEventListener("pointerdown", back, true); };
+  }, [settings.companyName, page]);
 
   // Urdu: new English names get an Urdu version automatically.
   useEffect(() => {
