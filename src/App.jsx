@@ -2970,8 +2970,10 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
       })()
     : Number(customer.openingBalance) || 0;
 
-  function downloadPDF() {
-    window.print();
+  const [ledgerUrdu, setLedgerUrdu] = useState(false);
+  function downloadPDF(urdu = false) {
+    setLedgerUrdu(!!urdu);
+    setTimeout(() => window.print(), 120);
   }
 
   function confirmReverseAdj() {
@@ -3006,7 +3008,8 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
           <option value="">All Time</option>
           {monthOptions.map((m) => <option key={m} value={m}>{fmtMonthLabel(m)}</option>)}
         </select>
-        <Btn variant="dark" onClick={downloadPDF}>{monthFilter ? `Download PDF (${fmtMonthLabel(monthFilter)})` : "Download PDF"}</Btn>
+        <Btn variant="dark" onClick={() => downloadPDF(false)}>{monthFilter ? `Download PDF (${fmtMonthLabel(monthFilter)})` : "Download PDF"}</Btn>
+        <Btn variant="dark" onClick={() => downloadPDF(true)}>اردو PDF</Btn>
         <Btn onClick={() => { setEditingAdj(null); setShowAdjForm(true); }}>+ Adjustment</Btn>
       </div>
       {monthFilter && (
@@ -3164,8 +3167,8 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
           visible by the @media print rule in <PrintStyles/> via the
           "print-area" class, so window.print() outputs ONLY this clean
           template instead of the sidebar/app chrome around it. */}
-      <div id="print-ledger" className="print-area" style={{ display: "none" }}>
-        <div className="bg-white">
+      <div id="print-ledger" className="print-area ct-noxl" style={{ display: "none" }}>
+        <div className="bg-white" dir={ledgerUrdu ? "rtl" : "ltr"} style={ledgerUrdu ? { fontFamily: '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif', lineHeight: 1.7 } : undefined}>
           <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
             <div className="flex items-center gap-3">
               {settings?.logoUrl ? (
@@ -3174,72 +3177,72 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
                 <div className="w-14 h-14 bg-slate-900 flex items-center justify-center font-black text-xl text-white">CT</div>
               )}
               <div>
-                <div className="text-xl font-black uppercase tracking-tight text-slate-900">{settings?.companyName}</div>
-                <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">Construction Materials Supplier</div>
+                <div className="text-xl font-black uppercase tracking-tight text-slate-900">{printD(settings?.companyName, ledgerUrdu)}</div>
+                <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">{printL("Construction Materials Supplier", ledgerUrdu)}</div>
               </div>
             </div>
-            <div className="text-right text-xs text-slate-500">
-              <div>{settings?.companyAddress}</div>
-              {settings?.companyPhone && <div>Ph: {settings.companyPhone}</div>}
+            <div className={`${ledgerUrdu ? "text-left" : "text-right"} text-xs text-slate-500`}>
+              <div>{printD(settings?.companyAddress, ledgerUrdu)}</div>
+              {settings?.companyPhone && <div>{printL("Ph", ledgerUrdu)}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
             </div>
           </div>
 
           <div className="flex justify-between items-start mb-4">
             <div className="text-sm">
-              <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-0.5">Customer Ledger</div>
-              <div className="font-bold text-slate-900">{customer.name}</div>
-              {customer.phone && <div className="text-slate-500">{customer.phone}</div>}
-              {customer.address && <div className="text-slate-500">{customer.address}</div>}
+              <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-0.5">{printL("Customer Ledger", ledgerUrdu)}</div>
+              <div className="font-bold text-slate-900">{printD(customer.name, ledgerUrdu)}</div>
+              {customer.phone && <div className="text-slate-500"><PrintLtr>{customer.phone}</PrintLtr></div>}
+              {customer.address && <div className="text-slate-500">{printD(customer.address, ledgerUrdu)}</div>}
             </div>
-            <div className="text-right text-xs text-slate-500">
-              <div>Period: <span className="font-bold text-slate-700">{fmtMonthLabel(monthFilter)}</span></div>
-              <div>Date: <span className="font-bold text-slate-700">{fmtDate(todayISO())}</span></div>
+            <div className={`${ledgerUrdu ? "text-left" : "text-right"} text-xs text-slate-500`}>
+              <div>{printL("Period", ledgerUrdu)}: <span className="font-bold text-slate-700">{printMonth(fmtMonthLabel(monthFilter), ledgerUrdu)}</span></div>
+              <div>{printL("Date", ledgerUrdu)}: <span className="font-bold text-slate-700">{printDate(todayISO(), ledgerUrdu)}</span></div>
             </div>
           </div>
 
           <table className="w-full text-sm mb-4">
             <thead>
               <tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
-                <th className="py-2 px-2 text-left">Date</th>
-                <th className="py-2 px-2 text-left">Type</th>
-                <th className="py-2 px-2 text-left">Ref</th>
-                <th className="py-2 px-2 text-right">Debit</th>
-                <th className="py-2 px-2 text-right">Credit</th>
-                <th className="py-2 px-2 text-right">Balance</th>
+                <th className={`py-2 px-2 ${ledgerUrdu ? "text-right" : "text-left"}`}>{printL("Date", ledgerUrdu)}</th>
+                <th className={`py-2 px-2 ${ledgerUrdu ? "text-right" : "text-left"}`}>{printL("Type", ledgerUrdu)}</th>
+                <th className={`py-2 px-2 ${ledgerUrdu ? "text-right" : "text-left"}`}>{printL("Ref", ledgerUrdu)}</th>
+                <th className={`py-2 px-2 ${ledgerUrdu ? "text-left" : "text-right"}`}>{printL("Debit", ledgerUrdu)}</th>
+                <th className={`py-2 px-2 ${ledgerUrdu ? "text-left" : "text-right"}`}>{printL("Credit", ledgerUrdu)}</th>
+                <th className={`py-2 px-2 ${ledgerUrdu ? "text-left" : "text-right"}`}>{printL("Balance", ledgerUrdu)}</th>
               </tr>
             </thead>
             <tbody>
               <tr className="border-b border-slate-100 bg-slate-50">
-                <td className="py-2 px-2 text-slate-500" colSpan={5}>Opening Balance</td>
-                <td className="py-2 px-2 text-right font-bold">{fmtMoney(openingForPeriod)}</td>
+                <td className="py-2 px-2 text-slate-500" colSpan={5}>{printL("Opening Balance", ledgerUrdu)}</td>
+                <td className={`py-2 px-2 ${ledgerUrdu ? "text-left" : "text-right"} font-bold`}><PrintLtr>{fmtMoney(openingForPeriod)}</PrintLtr></td>
               </tr>
               {filteredEntries.map((e) => (
                 <tr key={e.id} className="border-b border-slate-100">
-                  <td className="py-2 px-2">{fmtDate(e.date)}</td>
-                  <td className="py-2 px-2">{e.type}</td>
-                  <td className="py-2 px-2 text-slate-500">{e.ref}</td>
-                  <td className="py-2 px-2 text-right text-red-600">{e.debit ? fmtMoney(e.debit) : ""}</td>
-                  <td className="py-2 px-2 text-right text-emerald-600">{e.credit ? fmtMoney(e.credit) : ""}</td>
-                  <td className="py-2 px-2 text-right font-bold">{fmtMoney(e.balance)}</td>
+                  <td className="py-2 px-2">{printDate(e.date, ledgerUrdu)}</td>
+                  <td className="py-2 px-2">{printLedgerType(e.type, ledgerUrdu)}</td>
+                  <td className="py-2 px-2 text-slate-500">{ledgerUrdu && printL(e.ref, true) !== e.ref ? printL(e.ref, true) : <PrintLtr>{e.ref}</PrintLtr>}</td>
+                  <td className={`py-2 px-2 ${ledgerUrdu ? "text-left" : "text-right"} text-red-600`}><PrintLtr>{e.debit ? fmtMoney(e.debit) : ""}</PrintLtr></td>
+                  <td className={`py-2 px-2 ${ledgerUrdu ? "text-left" : "text-right"} text-emerald-600`}><PrintLtr>{e.credit ? fmtMoney(e.credit) : ""}</PrintLtr></td>
+                  <td className={`py-2 px-2 ${ledgerUrdu ? "text-left" : "text-right"} font-bold`}><PrintLtr>{fmtMoney(e.balance)}</PrintLtr></td>
                 </tr>
               ))}
               {filteredEntries.length === 0 && (
-                <tr><td colSpan={6} className="py-4 px-2 text-center text-slate-400">Koi entry nahi.</td></tr>
+                <tr><td colSpan={6} className="py-4 px-2 text-center text-slate-400">{ledgerUrdu ? "کوئی اندراج نہیں۔" : "Koi entry nahi."}</td></tr>
               )}
             </tbody>
           </table>
 
           <div className="flex justify-end">
-            <div className="w-72 text-sm space-y-1.5">
+            <div className={`${ledgerUrdu ? "w-80" : "w-72"} text-sm space-y-1.5`}>
               {monthFilter && (
                 <div className="flex justify-between">
-                  <span className="text-slate-500">Closing Balance ({fmtMonthLabel(monthFilter)})</span>
-                  <span className="font-bold">{fmtMoney(filteredEntries.length ? filteredEntries[filteredEntries.length - 1].balance : openingForPeriod)}</span>
+                  <span className="text-slate-500">{printL("Closing Balance", ledgerUrdu)} ({printMonth(fmtMonthLabel(monthFilter), ledgerUrdu)})</span>
+                  <span className="font-bold"><PrintLtr>{fmtMoney(filteredEntries.length ? filteredEntries[filteredEntries.length - 1].balance : openingForPeriod)}</PrintLtr></span>
                 </div>
               )}
               <div className="flex justify-between border-t-2 border-slate-900 pt-2 mt-1">
-                <span className="font-black uppercase text-blue-700">Total Outstanding (All Time)</span>
-                <span className="font-black text-lg text-blue-700">{fmtMoney(outstanding)}</span>
+                <span className="font-black uppercase text-blue-700">{printL("Total Outstanding (All Time)", ledgerUrdu)}</span>
+                <span className="font-black text-lg text-blue-700"><PrintLtr>{fmtMoney(outstanding)}</PrintLtr></span>
               </div>
             </div>
           </div>
@@ -12673,6 +12676,12 @@ Object.entries({
   "Unpaid": "غیر ادا شدہ", "CANCELLED": "منسوخ", "REVERSED — invoice cancelled": "واپس — انوائس منسوخ", "Advance": "ایڈوانس", "Adv": "ایڈوانس",
   "Normal": "معمول", "Partially Returned": "جزوی واپسی", "Fully Returned": "مکمل واپسی", "Partially Exchanged": "جزوی تبادلہ", "Fully Exchanged": "مکمل تبادلہ",
   "Returned + Exchanged": "واپسی + تبادلہ", "Payment Proof": "ادائیگی کا ثبوت",
+  "Customer Ledger": "کسٹمر کھاتہ", "Period": "مدت", "Type": "قسم", "Debit": "بنام (ڈیبٹ)", "Credit": "جمع (کریڈٹ)", "Balance": "بیلنس",
+  "Opening Balance": "ابتدائی بیلنس", "Closing Balance": "اختتامی بیلنس", "Total Outstanding (All Time)": "کل بقایا (تمام عرصہ)",
+  "Payment": "ادائیگی", "Sales Return": "سیلز واپسی", "Adjustment": "ایڈجسٹمنٹ", "Credit Note": "کریڈٹ نوٹ", "Transfer In": "ٹرانسفر آمد",
+  "Transfer Out": "ٹرانسفر روانگی", "Exchange": "تبادلہ", "Booking Advance": "بکنگ ایڈوانس", "Booking Refund": "بکنگ ریفنڈ", "Exchange (Even Swap)": "تبادلہ (برابر)", "Exchange (Extra Charge)": "تبادلہ (اضافی رقم)",
+  "Exchange (Refund Credit)": "تبادلہ (ریفنڈ کریڈٹ)", "Outstanding Transfer In": "بقایا ٹرانسفر آمد", "Outstanding Transfer Out": "بقایا ٹرانسفر روانگی",
+  "Payment Against Promise": "وعدے کے مطابق ادائیگی", "Promise Created": "وعدہ کیا گیا", "Pending": "زیر التوا", "Completed": "مکمل", "Broken Promise": "ٹوٹا ہوا وعدہ", "Exchange (Return)": "تبادلہ (واپسی)", "Exchange (New)": "تبادلہ (نیا)", "Opening": "ابتدائی",
 }).forEach(([en, ur]) => { if (!PRINT_URDU[en]) PRINT_URDU[en] = ur; });
 Object.entries(PRINT_URDU).forEach(([en, ur]) => {
   if (!(en in translations.ur)) translations.ur[en] = ur;
@@ -12698,6 +12707,20 @@ const PRINT_UR_MONTHS = { Jan: "جنوری", Feb: "فروری", Mar: "مارچ",
 function printDate(d, urdu) {
   const s = fmtDate(d);
   return urdu ? "\u2067" + String(s).replace(/\b(Sept|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/g, (m) => PRINT_UR_MONTHS[m]) + "\u2069" : s;
+}
+const PRINT_UR_MONTHS_FULL = { January: "جنوری", February: "فروری", March: "مارچ", April: "اپریل", May: "مئی", June: "جون", July: "جولائی", August: "اگست", September: "ستمبر", October: "اکتوبر", November: "نومبر", December: "دسمبر" };
+function printMonth(label, urdu) {
+  if (!urdu) return label;
+  if (label === "All Time") return "تمام عرصہ";
+  return String(label).replace(/\b(January|February|March|April|May|June|July|August|September|October|November|December)\b/g, (m) => PRINT_UR_MONTHS_FULL[m]);
+}
+function printLedgerType(type, urdu) {
+  if (!urdu) return type;
+  const m = String(type).match(/^Promise Created \((.+)\)$/);
+  if (m) return `${printL("Promise Created", true)} (${printL(m[1], true)})`;
+  const a = String(type).match(/^Adjustment — (.+)$/);
+  if (a) return `${printL("Adjustment", true)} — ${printL(a[1], true) !== a[1] ? printL(a[1], true) : printD(a[1], true)}`;
+  return printL(type, true);
 }
 function printBannerText(text, urdu) {
   if (!urdu) return text;
