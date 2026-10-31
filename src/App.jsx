@@ -12657,6 +12657,23 @@ const PRINT_URDU = {
   "No empty space below": "نیچے خالی جگہ نہیں",
   "Whole A4 / A5 page": "پورا A4 / A5 صفحہ",
 };
+Object.entries({
+  "Construction Materials Supplier": "تعمیراتی سامان سپلائر", "Bill To": "بنام", "Date": "تاریخ", "Booking": "بکنگ", "delivered": "ڈیلیور",
+  "Cash Sale": "نقد فروخت", "Item": "آئٹم", "Qty (Sold)": "مقدار", "Unit": "یونٹ", "Rate / Unit": "ریٹ", "Amount": "رقم", "Returned": "واپس",
+  "Remaining": "باقی", "Rickshaw & Delivery Details": "رکشہ اور ڈیلیوری کی تفصیل", "Driver": "ڈرائیور", "Rickshaw Rent": "رکشہ کرایہ",
+  "Delivery Charges": "ڈیلیوری چارجز", "Payment Received By": "ادائیگی وصول کنندہ", "Previous Balance": "پچھلا بیلنس", "New Purchase": "نئی خریداری",
+  "Rickshaw + Delivery": "رکشہ + ڈیلیوری", "Discount": "ڈسکاؤنٹ", "Payment Received": "وصول شدہ ادائیگی", "Advance Applied": "ایڈوانس منہا",
+  "Outstanding Balance": "کل بقایا", "Receiving Proof": "وصولی کا ثبوت", "Ph": "فون", "Material Issued To": "سامان وصول کنندہ", "Method": "طریقہ",
+  "Cash": "نقد", "Bank Transfer": "بینک ٹرانسفر", "Cheque": "چیک", "Easypaisa/JazzCash": "ایزی پیسہ / جاز کیش", "Received": "وصول",
+  "Remaining Balance": "باقی بیلنس", "Note": "نوٹ", "Ref": "حوالہ", "Receipt #": "رسید نمبر", "PAYMENT RECEIPT": "ادائیگی کی رسید",
+  "Authorized": "مجاز", "Thank you!": "شکریہ!", "Inv #": "انوائس نمبر", "Subtotal": "ذیلی کل", "TOTAL": "کل رقم", "Paid": "ادا شدہ",
+  "This Invoice Due": "اس انوائس کا بقایا", "Net Balance": "کل بیلنس", "Received by": "وصول کنندہ", "Customer": "گاہک", "Invoice": "انوائس",
+  "Invoice Cancelled": "انوائس منسوخ", "Reversed From Ledger": "کھاتے سے واپس", "Paid in Full": "مکمل ادا شدہ", "This Invoice Paid": "یہ انوائس ادا شدہ",
+  "Previous Outstanding Still Due": "پچھلا بقایا ابھی باقی ہے", "Partial Payment Received": "جزوی ادائیگی وصول", "Balance Due on Current Purchase": "موجودہ خریداری کا بقایا",
+  "Unpaid": "غیر ادا شدہ", "CANCELLED": "منسوخ", "REVERSED — invoice cancelled": "واپس — انوائس منسوخ", "Advance": "ایڈوانس", "Adv": "ایڈوانس",
+  "Normal": "معمول", "Partially Returned": "جزوی واپسی", "Fully Returned": "مکمل واپسی", "Partially Exchanged": "جزوی تبادلہ", "Fully Exchanged": "مکمل تبادلہ",
+  "Returned + Exchanged": "واپسی + تبادلہ", "Payment Proof": "ادائیگی کا ثبوت",
+}).forEach(([en, ur]) => { if (!PRINT_URDU[en]) PRINT_URDU[en] = ur; });
 Object.entries(PRINT_URDU).forEach(([en, ur]) => {
   if (!(en in translations.ur)) translations.ur[en] = ur;
 });
@@ -12665,6 +12682,26 @@ Object.entries(PRINT_URDU).forEach(([en, ur]) => {
 function printL(key, urdu) {
   if (!urdu) return key;
   return PRINT_URDU[key] || translations.ur[key] || key;
+}
+
+// Saved data (names, items, address …) for an Urdu print: the Urdu Translation
+// dictionary first, otherwise the automatic Urdu spelling.
+function printD(text, urdu) {
+  const s = String(text == null ? "" : text);
+  if (!urdu || !s.trim() || /[\u0600-\u06FF]/.test(s) || !/[A-Za-z]/.test(s)) return s;
+  const k = s.trim();
+  const hit = PRINT_URDU[k] || translations.ur[k];
+  if (hit) return hit;
+  try { return typeof urTranslit === "function" ? urTranslit(k) : s; } catch { return s; }
+}
+const PRINT_UR_MONTHS = { Jan: "جنوری", Feb: "فروری", Mar: "مارچ", Apr: "اپریل", May: "مئی", Jun: "جون", Jul: "جولائی", Aug: "اگست", Sep: "ستمبر", Sept: "ستمبر", Oct: "اکتوبر", Nov: "نومبر", Dec: "دسمبر" };
+function printDate(d, urdu) {
+  const s = fmtDate(d);
+  return urdu ? "\u2067" + String(s).replace(/\b(Sept|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/g, (m) => PRINT_UR_MONTHS[m]) + "\u2069" : s;
+}
+function printBannerText(text, urdu) {
+  if (!urdu) return text;
+  return String(text).split(/( — | · )/).map((part) => (part === " — " || part === " · " ? part : printL(part.trim(), true))).join("");
 }
 
 function printLoadPrefs(kind, includeDefs, order = PRINT_SIZE_ORDER, defaultSize = "t80") {
@@ -12681,6 +12718,8 @@ function printLoadPrefs(kind, includeDefs, order = PRINT_SIZE_ORDER, defaultSize
       }
     }
   } catch {}
+  // App in Urdu → the print starts in Urdu too.
+  if (includeDefs.some((d) => d.key === "urdu") && typeof languageState !== "undefined" && languageState === "ur") base.include.urdu = true;
   return base;
 }
 
@@ -12768,24 +12807,24 @@ function InvoiceThermalDoc({ invoice, settings, size, include, copies, urdu, rec
       <PrintCopyWrap copies={copies} thermal>
         {(copyLabel) => (
           <div>
-            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.3em" }}>{settings.companyName}</div>
-            {settings.companyAddress && <div style={{ textAlign: "center" }}>{settings.companyAddress}</div>}
+            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.3em" }}>{printD(settings.companyName, urdu)}</div>
+            {settings.companyAddress && <div style={{ textAlign: "center" }}>{printD(settings.companyAddress, urdu)}</div>}
             {settings.companyPhone && <div style={{ textAlign: "center" }}>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
             <PrintRule />
-            <div style={{ textAlign: "center", fontWeight: 700 }}>{L(invoice.customerType === "Cash" ? "CASH SALE" : "SALE INVOICE")}{invoice.docStatus === "Cancelled" ? " — CANCELLED" : ""}</div>
+            <div style={{ textAlign: "center", fontWeight: 700 }}>{L(invoice.customerType === "Cash" ? "CASH SALE" : "SALE INVOICE")}{invoice.docStatus === "Cancelled" ? ` — ${L("CANCELLED")}` : ""}</div>
             {copyLabel && <div style={{ textAlign: "center" }}>({L(copyLabel)})</div>}
-            <PrintRow l={<>{L("Inv #")}: <PrintLtr>{invoice.number}</PrintLtr></>} v={fmtDate(invoice.date)} />
-            <div>{L("Customer")}: <b>{invoice.customerName}</b></div>
+            <PrintRow l={<>{L("Inv #")}: <PrintLtr>{invoice.number}</PrintLtr></>} v={printDate(invoice.date, urdu)} />
+            <div>{L("Customer")}: <b>{printD(invoice.customerName, urdu)}</b></div>
             {invoice.customerPhone && <div>{L("Ph")}: <PrintLtr>{invoice.customerPhone}</PrintLtr></div>}
             {include.issuedTo && invoice.issuedTo?.name && (
-              <div>{L("Material Issued To")}: {invoice.issuedTo.name}{invoice.issuedTo.relation ? ` (${invoice.issuedTo.relation})` : ""}</div>
+              <div>{L("Material Issued To")}: {printD(invoice.issuedTo.name, urdu)}{invoice.issuedTo.relation ? ` (${printD(invoice.issuedTo.relation, urdu)})` : ""}</div>
             )}
             {invoice.bookingRef && <div>{L("Booking")}: {invoice.bookingRef}</div>}
             <PrintRule />
             {(invoice.items || []).map((it, i) => (
               <div key={i} style={{ marginBottom: "0.8mm" }}>
-                <div style={{ fontWeight: 700 }}>{it.name}</div>
-                <PrintRow lLtr l={`${fmtQty(it.qty)} ${it.unit || ""} x ${fmtMoney(it.price).replace("Rs ", "")}`} v={fmtMoney(it.total).replace("Rs ", "")} />
+                <div style={{ fontWeight: 700 }}>{printD(it.name, urdu)}</div>
+                <PrintRow lLtr l={`${fmtQty(it.qty)} ${printD(it.unit || "", urdu)} x ${fmtMoney(it.price).replace("Rs ", "")}`} v={fmtMoney(it.total).replace("Rs ", "")} />
               </div>
             ))}
             <PrintRule />
@@ -12807,10 +12846,10 @@ function InvoiceThermalDoc({ invoice, settings, size, include, copies, urdu, rec
               <>
                 <PrintRule />
                 <div style={{ fontWeight: 700 }}>{L("Rickshaw & Delivery Details")}</div>
-                <div>{L("Driver")}: <PrintLtr>{invoice.driverName || "-"}{invoice.driverId ? ` (${invoice.driverId})` : ""}{invoice.vehicleType ? ` — ${invoice.vehicleType}` : ""}{invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}</PrintLtr></div>
+                <div>{L("Driver")}: {printD(invoice.driverName || "-", urdu)}<PrintLtr>{invoice.driverId ? ` (${invoice.driverId})` : ""}</PrintLtr>{invoice.vehicleType ? ` — ${printD(invoice.vehicleType, urdu)}` : ""}<PrintLtr>{invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}</PrintLtr></div>
                 <PrintRow l={L("Rickshaw Rent")} v={fmtMoney(invoice.rickshawRent || 0)} />
                 <PrintRow l={L("Delivery Charges")} v={fmtMoney(invoice.deliveryCharges || 0)} />
-                <div>{L("Payment Received By")}: <PrintLtr>{invoice.receivedBy || "-"}</PrintLtr></div>
+                <div>{L("Payment Received By")}: {printD(invoice.receivedBy || "-", urdu)}</div>
               </>
             )}
             {include.recvProof && recvProofs.length > 0 && (
@@ -12978,8 +13017,8 @@ function ReceiptDoc({ payment, customer, settings, balances, size, include, copi
       <PrintCopyWrap copies={copies} thermal={s.thermal || !!fit}>
         {(copyLabel) => s.thermal ? (
           <div>
-            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.3em" }}>{settings.companyName}</div>
-            {settings.companyAddress && <div style={{ textAlign: "center" }}>{settings.companyAddress}</div>}
+            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.3em" }}>{printD(settings.companyName, urdu)}</div>
+            {settings.companyAddress && <div style={{ textAlign: "center" }}>{printD(settings.companyAddress, urdu)}</div>}
             {settings.companyPhone && <div style={{ textAlign: "center" }}>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
             <PrintRule />
             <div style={{ textAlign: "center", fontWeight: 700 }}>{L("PAYMENT RECEIPT")}</div>
@@ -12987,16 +13026,16 @@ function ReceiptDoc({ payment, customer, settings, balances, size, include, copi
             {copyLabel && <div style={{ textAlign: "center" }}>({L(copyLabel)})</div>}
             {balances.reversed && <div style={{ textAlign: "center", fontWeight: 700 }}>*** REVERSED ***</div>}
             <PrintRule />
-            <PrintRow l={L("Date")} v={fmtDate(payment.date)} />
-            <PrintRow l={L("Customer")} v={customer.name || "-"} />
+            <PrintRow l={L("Date")} v={printDate(payment.date, urdu)} />
+            <PrintRow l={L("Customer")} v={printD(customer.name || "-", urdu)} />
             {customer.phone && <PrintRow l={L("Ph")} v={customer.phone} />}
-            <PrintRow l={L("Method")} v={payment.method || "Cash"} />
+            <PrintRow l={L("Method")} v={L(payment.method || "Cash")} />
             {payment.reference && <PrintRow l={L("Ref")} v={payment.reference} />}
             {payment.bookingCode && <PrintRow l={L("Booking")} v={payment.bookingCode} />}
             <PrintRule />
             {include.balance && <PrintRow l={L("Previous Balance")} v={fmtMoney(balances.previous).replace("Rs ", "")} />}
             <PrintRow l={L("Received").toUpperCase()} v={fmtMoney(balances.received)} bold big />
-            {include.balance && <PrintRow l={L("Remaining Balance")} v={fmtMoney(balances.remaining).replace("Rs ", "") + (balances.remaining < 0 ? " (Adv)" : "")} bold />}
+            {include.balance && <PrintRow l={L("Remaining Balance")} v={fmtMoney(balances.remaining).replace("Rs ", "") + (balances.remaining < 0 ? ` (${L("Adv")})` : "")} bold />}
             {note && (<><PrintRule /><div>{L("Note")}: {note}</div></>)}
             {showProof && (
               <>
@@ -13022,30 +13061,30 @@ function ReceiptDoc({ payment, customer, settings, balances, size, include, copi
                   <div style={{ width: "12mm", height: "12mm", background: "#0f172a", color: "#fff", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center" }}>{uiInitials(settings.companyName)}</div>
                 )}
                 <div>
-                  <div style={{ fontWeight: 900, fontSize: "1.45em", textTransform: "uppercase" }}>{settings.companyName}</div>
-                  <div style={{ fontSize: ".78em", fontWeight: 700, color: "#047857", textTransform: "uppercase", letterSpacing: ".06em" }}>Construction Materials Supplier</div>
+                  <div style={{ fontWeight: 900, fontSize: "1.45em", textTransform: "uppercase" }}>{printD(settings.companyName, urdu)}</div>
+                  <div style={{ fontSize: ".78em", fontWeight: 700, color: "#047857", textTransform: "uppercase", letterSpacing: ".06em" }}>{L("Construction Materials Supplier")}</div>
                 </div>
               </div>
               <div style={{ textAlign: "end", color: "#4b5563", fontSize: ".9em" }}>
-                <div>{settings.companyAddress}</div>
+                <div>{printD(settings.companyAddress, urdu)}</div>
                 {settings.companyPhone && <div>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
               </div>
             </div>
             <div style={{ background: "#0f172a", color: "#fff", textAlign: "center", fontWeight: 900, padding: "1.5mm", marginTop: "3mm", letterSpacing: ".06em" }}>
               {L("PAYMENT RECEIPT")}{copyLabel ? ` — ${L(copyLabel)}` : ""}
             </div>
-            {balances.reversed && <div style={{ marginTop: "2mm", border: "1px solid #fca5a5", color: "#b91c1c", padding: "1.5mm", fontWeight: 700, textAlign: "center" }}>REVERSED — invoice cancelled</div>}
+            {balances.reversed && <div style={{ marginTop: "2mm", border: "1px solid #fca5a5", color: "#b91c1c", padding: "1.5mm", fontWeight: 700, textAlign: "center" }}>{L("REVERSED — invoice cancelled")}</div>}
             <div style={{ display: "flex", justifyContent: "space-between", gap: "4mm", marginTop: "3mm" }}>
               <div>
                 <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Customer")}</div>
-                <div style={{ fontWeight: 700, fontSize: "1.1em" }}>{customer.name || "-"}</div>
+                <div style={{ fontWeight: 700, fontSize: "1.1em" }}>{printD(customer.name || "-", urdu)}</div>
                 {customer.phone && <div style={{ color: "#4b5563" }}>{customer.phone}</div>}
-                {customer.address && <div style={{ color: "#4b5563" }}>{customer.address}</div>}
+                {customer.address && <div style={{ color: "#4b5563" }}>{printD(customer.address, urdu)}</div>}
               </div>
               <div style={{ textAlign: "end" }}>
                 <div style={{ fontSize: ".75em", fontWeight: 700, color: "#6b7280", textTransform: "uppercase" }}>{L("Receipt #")}</div>
-                <div style={{ fontWeight: 700 }}>{receiptNo}</div>
-                <div style={{ color: "#4b5563" }}>{fmtDate(payment.date)} · {payment.method || "Cash"}</div>
+                <div style={{ fontWeight: 700 }}><PrintLtr>{receiptNo}</PrintLtr></div>
+                <div style={{ color: "#4b5563" }}>{printDate(payment.date, urdu)} · {L(payment.method || "Cash")}</div>
                 {payment.reference && <div style={{ color: "#4b5563" }}>{L("Ref")}: {payment.reference}</div>}
                 {payment.bookingCode && <div style={{ color: "#4b5563" }}>{L("Booking")}: {payment.bookingCode}</div>}
               </div>
@@ -13055,7 +13094,7 @@ function ReceiptDoc({ payment, customer, settings, balances, size, include, copi
               <div style={{ padding: "1.5mm 2mm" }}><PrintRow l={L("Received")} v={fmtMoney(balances.received)} bold color="#047857" /></div>
               {include.balance && (
                 <div style={{ padding: "1.5mm 2mm", borderTop: "2px solid #0f172a" }}>
-                  <PrintRow l={L("Remaining Balance")} v={fmtMoney(balances.remaining) + (balances.remaining < 0 ? " (Advance)" : "")} bold big color="#0f172a" />
+                  <PrintRow l={L("Remaining Balance")} v={fmtMoney(balances.remaining) + (balances.remaining < 0 ? ` (${L("Advance")})` : "")} bold big color="#0f172a" />
                 </div>
               )}
             </div>
@@ -13302,7 +13341,11 @@ function invoiceQrText(invoice) {
 }
 
 /* Full Page — the original invoice design, exactly as the old print. */
-function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProofs, rs, fit = true }) {
+function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProofs, rs, urdu, fit = true }) {
+  const L = (k) => printL(k, urdu);
+  const D = (x) => printD(x, urdu);
+  const TR = urdu ? "text-left" : "text-right";
+  const TL = urdu ? "text-right" : "text-left";
   const banner = invoiceStatusBanner(invoice);
   const bannerCls = {
     emerald: "bg-emerald-50 text-emerald-700 border-emerald-200",
@@ -13314,11 +13357,11 @@ function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProof
   const hasDelivery = invoice.rickshawRent > 0 || invoice.deliveryCharges > 0 || invoice.driverName || invoice.receivedBy;
   const showRs = rs && rs.status !== "Normal" ? rs : null;
   return (
-    <div style={{ ...printDocStyle(size, false, fit), padding: "10mm 12mm 8mm", fontFamily: "Inter, Arial, sans-serif", fontSize: "16px", lineHeight: 1.5, direction: "ltr" }}>
+    <div style={{ ...printDocStyle(size, false, fit), padding: "10mm 12mm 8mm", fontFamily: urdu ? '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif' : "Inter, Arial, sans-serif", fontSize: "16px", lineHeight: urdu ? 1.75 : 1.5, direction: urdu ? "rtl" : "ltr" }}>
       <PrintCopyWrap copies={copies} thermal={false}>
         {(copyLabel) => (
           <div className="bg-white text-slate-900">
-            {copyLabel && <div className="text-right text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1">{copyLabel}</div>}
+            {copyLabel && <div className={`${TR} text-[11px] font-bold uppercase tracking-wide text-slate-400 mb-1`}>{L(copyLabel)}</div>}
             <div className="flex justify-between items-start pb-4 border-b-4 border-slate-900 mb-4">
               <div className="flex items-center gap-3">
                 {settings.logoUrl ? (
@@ -13327,14 +13370,14 @@ function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProof
                   <div className="w-14 h-14 bg-slate-900 flex items-center justify-center font-black text-xl text-white">CT</div>
                 )}
                 <div>
-                  <div className="text-xl font-black uppercase tracking-tight text-slate-900">{settings.companyName}</div>
-                  <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">Construction Materials Supplier</div>
+                  <div className="text-xl font-black uppercase tracking-tight text-slate-900">{D(settings.companyName)}</div>
+                  <div className="text-[11px] uppercase tracking-wide font-bold text-blue-700">{L("Construction Materials Supplier")}</div>
                 </div>
               </div>
               <div className="flex items-start gap-3">
-                <div className="text-right text-xs text-slate-500">
-                  <div>{settings.companyAddress}</div>
-                  {settings.companyPhone && <div>Ph: {settings.companyPhone}</div>}
+                <div className={`${TR} text-xs text-slate-500`}>
+                  <div>{D(settings.companyAddress)}</div>
+                  {settings.companyPhone && <div>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
                 </div>
                 {include.qr !== false && <QrSvg text={invoiceQrText(invoice, settings)} sizeMm={22} />}
               </div>
@@ -13342,30 +13385,30 @@ function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProof
 
             <div className="flex justify-between items-start mb-4">
               <div className="text-sm">
-                <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-0.5">Bill To</div>
-                <div className="font-bold text-slate-900">{invoice.customerName}</div>
-                {invoice.customerPhone && <div className="text-slate-500">{invoice.customerPhone}</div>}
-                {invoice.customerAddress && <div className="text-slate-500">{invoice.customerAddress}</div>}
+                <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400 mb-0.5">{L("Bill To")}</div>
+                <div className="font-bold text-slate-900">{D(invoice.customerName)}</div>
+                {invoice.customerPhone && <div className="text-slate-500"><PrintLtr>{invoice.customerPhone}</PrintLtr></div>}
+                {invoice.customerAddress && <div className="text-slate-500">{D(invoice.customerAddress)}</div>}
                 {invoice.issuedTo?.name && (
                   <div className="mt-2 text-xs bg-blue-50 border border-blue-200 px-2 py-1 inline-block">
-                    <span className="text-blue-700 font-bold uppercase">Material Issued To:</span>{" "}
-                    <span className="font-bold text-slate-900">{invoice.issuedTo.name}</span>
-                    {invoice.issuedTo.relation && <span className="text-slate-500"> ({invoice.issuedTo.relation})</span>}
+                    <span className="text-blue-700 font-bold uppercase">{L("Material Issued To")}:</span>{" "}
+                    <span className="font-bold text-slate-900">{D(invoice.issuedTo.name)}</span>
+                    {invoice.issuedTo.relation && <span className="text-slate-500"> ({D(invoice.issuedTo.relation)})</span>}
                     {invoice.issuedTo.phone && <span className="text-slate-500"> · {invoice.issuedTo.phone}</span>}
                   </div>
                 )}
               </div>
-              <div className="text-right">
+              <div className={TR}>
                 <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{invoice.number}</div>
-                <div className="text-xs text-slate-500 mt-1">Date: <span className="font-bold text-slate-700">{fmtDate(invoice.date)}</span></div>
+                <div className="text-xs text-slate-500 mt-1">{L("Date")}: <span className="font-bold text-slate-700">{printDate(invoice.date, urdu)}</span></div>
                 {invoice.bookingRef && (
-                  <div className="text-[10px] font-bold uppercase text-amber-700 mt-1">Booking: {invoice.bookingRef}{invoice.bookingQty != null ? ` · ${fmtQty(invoice.bookingQty)} delivered` : ""}</div>
+                  <div className="text-[10px] font-bold uppercase text-amber-700 mt-1">{L("Booking")}: {invoice.bookingRef}{invoice.bookingQty != null ? ` · ${fmtQty(invoice.bookingQty)} ${L("delivered")}` : ""}</div>
                 )}
                 {invoice.customerType === "Cash" && (
-                  <div className="inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">Cash Sale</div>
+                  <div className="inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 bg-amber-100 text-amber-700">{L("Cash Sale")}</div>
                 )}
                 {showRs && (
-                  <div className={`inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 ${RETURN_STATUS_TONE[showRs.status]}`}>{showRs.status}</div>
+                  <div className={`inline-block mt-1 text-[10px] font-bold uppercase px-2 py-0.5 ${RETURN_STATUS_TONE[showRs.status]}`}>{L(showRs.status)}</div>
                 )}
               </div>
             </div>
@@ -13373,25 +13416,25 @@ function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProof
             <table className="w-full text-sm mb-4">
               <thead>
                 <tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
-                  <th className="py-2 px-2 text-left">Item</th>
-                  <th className="py-2 px-2 text-right">Qty (Sold)</th>
-                  <th className="py-2 px-2 text-right">Unit</th>
-                  <th className="py-2 px-2 text-right">Rate / Unit</th>
-                  <th className="py-2 px-2 text-right">Amount</th>
-                  {showRs && <th className="py-2 px-2 text-right">Returned</th>}
-                  {showRs && <th className="py-2 px-2 text-right">Remaining</th>}
+                  <th className={`py-2 px-2 ${TL}`}>{L("Item")}</th>
+                  <th className={`py-2 px-2 ${TR}`}>{L("Qty (Sold)")}</th>
+                  <th className={`py-2 px-2 ${TR}`}>{L("Unit")}</th>
+                  <th className={`py-2 px-2 ${TR}`}>{L("Rate / Unit")}</th>
+                  <th className={`py-2 px-2 ${TR}`}>{L("Amount")}</th>
+                  {showRs && <th className={`py-2 px-2 ${TR}`}>{L("Returned")}</th>}
+                  {showRs && <th className={`py-2 px-2 ${TR}`}>{L("Remaining")}</th>}
                 </tr>
               </thead>
               <tbody>
                 {(showRs ? showRs.breakdown : invoice.items || []).map((it, idx) => (
                   <tr key={idx} className="border-b border-slate-100">
-                    <td className="py-2 px-2">{it.name}</td>
-                    <td className="py-2 px-2 text-right">{fmtQty(it.qty)}</td>
-                    <td className="py-2 px-2 text-right text-slate-500">{it.unit || "-"}</td>
-                    <td className="py-2 px-2 text-right">{fmtMoney(it.price)}</td>
-                    <td className="py-2 px-2 text-right font-bold">{fmtMoney(it.total)}</td>
-                    {showRs && <td className="py-2 px-2 text-right text-slate-500">{(it.returnedQty || 0) + (it.exchangedQty || 0) > 0 ? fmtQty((it.returnedQty || 0) + (it.exchangedQty || 0)) : "-"}</td>}
-                    {showRs && <td className="py-2 px-2 text-right text-slate-500">{fmtQty(it.remainingQty)}</td>}
+                    <td className="py-2 px-2">{D(it.name)}</td>
+                    <td className={`py-2 px-2 ${TR}`}><PrintLtr>{fmtQty(it.qty)}</PrintLtr></td>
+                    <td className={`py-2 px-2 ${TR} text-slate-500`}>{D(it.unit || "-")}</td>
+                    <td className={`py-2 px-2 ${TR}`}><PrintLtr>{fmtMoney(it.price)}</PrintLtr></td>
+                    <td className={`py-2 px-2 ${TR} font-bold`}><PrintLtr>{fmtMoney(it.total)}</PrintLtr></td>
+                    {showRs && <td className={`py-2 px-2 ${TR} text-slate-500`}>{(it.returnedQty || 0) + (it.exchangedQty || 0) > 0 ? fmtQty((it.returnedQty || 0) + (it.exchangedQty || 0)) : "-"}</td>}
+                    {showRs && <td className={`py-2 px-2 ${TR} text-slate-500`}>{fmtQty(it.remainingQty)}</td>}
                   </tr>
                 ))}
               </tbody>
@@ -13399,47 +13442,47 @@ function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProof
 
             {hasDelivery && (
               <div className="mb-4 text-sm">
-                <div className="font-bold text-slate-900 mb-1">Rickshaw &amp; Delivery Details</div>
+                <div className="font-bold text-slate-900 mb-1">{L("Rickshaw & Delivery Details")}</div>
                 <div className="text-xs text-slate-500 space-y-0.5">
                   {invoice.driverName && (
                     <div>
-                      Driver: {invoice.driverName}
+                      {L("Driver")}: {D(invoice.driverName)}
                       {invoice.driverId ? ` (${invoice.driverId})` : ""}
-                      {invoice.vehicleType ? ` — ${invoice.vehicleType}` : ""}
+                      {invoice.vehicleType ? ` — ${D(invoice.vehicleType)}` : ""}
                       {invoice.vehicleNumber ? ` [${invoice.vehicleNumber}]` : ""}
                     </div>
                   )}
-                  <div>Rickshaw Rent: {fmtMoney(invoice.rickshawRent)}</div>
-                  <div>Delivery Charges: {fmtMoney(invoice.deliveryCharges)}</div>
-                  <div>Payment Received By: {invoice.receivedBy || "-"}</div>
+                  <div>{L("Rickshaw Rent")}: <PrintLtr>{fmtMoney(invoice.rickshawRent)}</PrintLtr></div>
+                  <div>{L("Delivery Charges")}: <PrintLtr>{fmtMoney(invoice.deliveryCharges)}</PrintLtr></div>
+                  <div>{L("Payment Received By")}: {D(invoice.receivedBy || "-")}</div>
                 </div>
               </div>
             )}
 
             <div className="flex justify-end">
-              <div className="w-72 text-sm space-y-1.5">
-                <div className="flex justify-between"><span className="text-slate-500">Previous Balance</span><span className="font-bold">{fmtMoney((invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0))}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">New Purchase</span><span className="font-bold">{fmtMoney(invoice.subtotal)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">Rickshaw + Delivery</span><span className="font-bold">{fmtMoney((invoice.rickshawRent || 0) + (invoice.deliveryCharges || 0))}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">Discount</span><span className="font-bold">-{fmtMoney(invoice.discount || 0)}</span></div>
-                <div className="flex justify-between"><span className="text-slate-500">Payment Received</span><span className="font-bold">-{fmtMoney(invoice.paymentReceived)}</span></div>
+              <div className={`${urdu ? "w-80" : "w-72"} text-sm space-y-1.5`}>
+                <div className="flex justify-between"><span className="text-slate-500">{L("Previous Balance")}</span><span className="font-bold"><PrintLtr>{fmtMoney((invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0))}</PrintLtr></span></div>
+                <div className="flex justify-between"><span className="text-slate-500">{L("New Purchase")}</span><span className="font-bold"><PrintLtr>{fmtMoney(invoice.subtotal)}</PrintLtr></span></div>
+                <div className="flex justify-between"><span className="text-slate-500">{L("Rickshaw + Delivery")}</span><span className="font-bold"><PrintLtr>{fmtMoney((invoice.rickshawRent || 0) + (invoice.deliveryCharges || 0))}</PrintLtr></span></div>
+                <div className="flex justify-between"><span className="text-slate-500">{L("Discount")}</span><span className="font-bold"><PrintLtr>-{fmtMoney(invoice.discount || 0)}</PrintLtr></span></div>
+                <div className="flex justify-between"><span className="text-slate-500">{L("Payment Received")}</span><span className="font-bold"><PrintLtr>-{fmtMoney(invoice.paymentReceived)}</PrintLtr></span></div>
                 {Number(invoice.advanceApplied) > 0 && (
-                  <div className="flex justify-between"><span className="text-slate-500">Advance Applied ({invoice.bookingRef})</span><span className="font-bold">-{fmtMoney(invoice.advanceApplied)}</span></div>
+                  <div className="flex justify-between"><span className="text-slate-500">{L("Advance Applied")} ({invoice.bookingRef})</span><span className="font-bold"><PrintLtr>-{fmtMoney(invoice.advanceApplied)}</PrintLtr></span></div>
                 )}
                 <div className="flex justify-between border-t-2 border-slate-900 pt-2 mt-1">
-                  <span className="font-black uppercase text-blue-700">Outstanding Balance</span>
-                  <span className="font-black text-lg text-blue-700">{fmtMoney(outstandingNow)}</span>
+                  <span className="font-black uppercase text-blue-700">{L("Outstanding Balance")}</span>
+                  <span className="font-black text-lg text-blue-700"><PrintLtr>{fmtMoney(outstandingNow)}</PrintLtr></span>
                 </div>
               </div>
             </div>
 
             <div className={`mt-4 border px-3 py-2 text-xs font-bold text-center ${bannerCls}`}>
-              ⚠ {banner.text}
+              ⚠ {printBannerText(banner.text, urdu)}
             </div>
 
             {include.recvProof && recvProofs.length > 0 && (
               <div style={{ breakBefore: "page", pageBreakBefore: "always", paddingTop: "4mm" }}>
-                <div className="text-xs font-black uppercase tracking-wide mb-3">Receiving Proof — {invoice.number}</div>
+                <div className="text-xs font-black uppercase tracking-wide mb-3">{L("Receiving Proof")} — {invoice.number}</div>
                 {recvProofs.map((p) => <img key={p.receiving_id} src={recvSafeImageSrc(p.proof_image)} alt="" style={{ display: "block", maxWidth: "100%", maxHeight: "250mm", marginBottom: "4mm" }} />)}
               </div>
             )}
@@ -13461,7 +13504,7 @@ function InvoicePrintDialog({ invoice, settings, rs, onClose }) {
     { key: "issuedTo", label: "Material Issued To", sub: "Who collected the material", default: true, sizes: ["t58", "t80"] },
     { key: "signature", label: "Signature Line", sub: "Customer / authorized signature", default: true, sizes: ["t58", "t80"] },
     { key: "qr", label: "QR Code", sub: "Scan to see invoice details", default: true },
-    { key: "urdu", label: "Urdu Print", sub: "Print the document in Urdu", default: false, sizes: ["t58", "t80"] },
+    { key: "urdu", label: "Urdu Print", sub: "Print the document in Urdu", default: false },
   ];
   return (
     <PrintDialog
