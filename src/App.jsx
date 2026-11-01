@@ -1192,6 +1192,7 @@ const NAV_GROUPS = [
   { title: "Overview", items: [
     { id: "dashboard", label: "Dashboard", icon: "dashboard" },
     { id: "profit", label: "Profit Calculator", icon: "trend", adminOnly: true },
+    { id: "branches", label: "Branches", icon: "branch", superOnly: true },
   ]},
   { title: "Sales", items: [
     { id: "invoices", label: "Invoices", icon: "file" },
@@ -1777,6 +1778,7 @@ function isInvoiceCancelled(inv) {
 // (invoices created before this field existed). Used so that cancelling
 // an invoice also reverses the payment that was recorded against it.
 function isPaymentLinkedToCancelledInvoice(payment, invoices) {
+  if (payment && payment.status === "Cancelled") return true;
   if (payment.invoiceId) {
     const inv = invoices.find((i) => i.id === payment.invoiceId);
     return !!inv && isInvoiceCancelled(inv);
@@ -1898,7 +1900,18 @@ function computeLedgerForCustomer(customer, invoices, payments, returns = [], ex
         id: a.id, note: a.reason, adjNote: a.note,
       })
     );
-  entries.sort((a, b) => new Date(a.date) - new Date(b.date));
+  const ledgerMadeAt = (e) => {
+    if (e.createdAt) { const t = Date.parse(e.createdAt); if (!isNaN(t)) return t; }
+    const m = String(e.id || "").match(/_([0-9a-z]{8})/);
+    return m ? parseInt(m[1], 36) : null;
+  };
+  entries.forEach((e, i) => { e._seq = i; e._at = ledgerMadeAt(e); });
+  entries.sort((a, b) => {
+    const d = new Date(a.date) - new Date(b.date);
+    if (d) return d;
+    if (a._at != null && b._at != null && a._at !== b._at) return a._at - b._at;
+    return a._seq - b._seq;
+  });
   let bal = Number(customer.openingBalance) || 0;
   const withBalance = entries.map((e) => {
     bal = roundMoney(bal + e.debit - e.credit);
@@ -3939,7 +3952,7 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
         </a>
         {!isCancelled && onEdit && <Btn variant="ghost" onClick={() => onEdit(invoice)}>Edit Invoice</Btn>}
         {!isCancelled && onCancelInvoice && (
-          <Btn variant="danger" onClick={() => { if (confirm(`Invoice ${invoice.number} cancel karein? Ye ledger se reverse ho jayegi.`)) onCancelInvoice(invoice); }}>
+          <Btn variant="danger" onClick={() => { if (confirm(`Invoice ${invoice.number} cancel karein? Ye ledger se reverse ho jayegi.${Number(invoice.paymentReceived) > 0 ? `\n\nIs invoice par li gayi payment ${fmtMoney(invoice.paymentReceived)} bhi cancel ho jayegi (cash book / closing se hat jayegi).` : ""}`)) onCancelInvoice(invoice); }}>
             Cancel Invoice
           </Btn>
         )}
@@ -3976,7 +3989,7 @@ function Invoices({ customers, products, drivers, invoices, payments, returns, e
   const [showForm, setShowForm] = useState(false);
   const [editingInvoice, setEditingInvoice] = useState(null);
   const [viewing, setViewing] = useState(null);
-  const nextNumber = "CT-" + String(settings.invoiceCounter).padStart(4, "0");
+  const nextNumber = (settings.invoicePrefix || "CT-") + String(settings.invoiceCounter).padStart(4, "0");
 
   useEffect(() => {
     if (prefill) setShowForm(true);
@@ -5085,11 +5098,11 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
             {sorted.map((p) => {
               const reversed = isPaymentLinkedToCancelledInvoice(p, invoices);
               return (
-                <tr key={p.id} className={`border-t border-slate-100 ${editing && editing.id === p.id ? "bg-blue-50" : ""}`}>
+                <tr key={p.id} data-pay-cancelled={reversed ? "1" : undefined} className={`border-t border-slate-100 ${editing && editing.id === p.id ? "bg-blue-50" : reversed ? "bg-red-50/40 opacity-70" : ""}`}>
                   <td className="px-4 py-2">{fmtDate(p.date)}</td>
                   <td className="px-4 py-2 font-bold">{p.customerName}</td>
                   <td className="px-4 py-2 text-slate-500">{p.method}</td>
-                  <td className={`px-4 py-2 text-right font-bold ${p.kind === "Refund" ? "text-red-600" : "text-emerald-600"}`}>{p.kind === "Refund" ? "-" : ""}{fmtMoney(p.amount)}</td>
+                  <td className={`px-4 py-2 text-right font-bold ${reversed ? "text-slate-400 line-through" : p.kind === "Refund" ? "text-red-600" : "text-emerald-600"}`}>{p.kind === "Refund" ? "-" : ""}{fmtMoney(p.amount)}{reversed && <div className="no-underline"><span className="inline-block mt-0.5 text-[10px] font-extrabold tracking-wide text-red-700 bg-red-100 border border-red-200 px-1.5 py-px" style={{ textDecoration: "none" }}>CANCELLED</span></div>}</td>
                   <td className="px-4 py-2 text-slate-500 text-xs">
                     {p.note || "-"}
                     {p.reference && <div className="text-[10px] text-slate-400" dir="ltr">Ref: {p.reference}</div>}
@@ -8755,7 +8768,7 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
   const inRange = (d) => d >= from && d <= to;
 
   const salesInRange = invoices.filter((i) => inRange(i.date) && i.docStatus !== "Cancelled").reduce((s, i) => s + i.total, 0);
-  const collectedInRange = payments.filter((p) => inRange(p.date)).reduce((s, p) => s + (p.kind === "Refund" ? -p.amount : p.amount), 0);
+  const collectedInRange = payments.filter((p) => inRange(p.date) && !isPaymentLinkedToCancelledInvoice(p, invoices)).reduce((s, p) => s + (p.kind === "Refund" ? -p.amount : p.amount), 0);
   const totalInvoices = invoices.filter((i) => inRange(i.date)).length;
   const totalOrders = orders.filter((o) => inRange(o.date)).length;
   const totalReturnAmount = returns.filter((r) => inRange(r.date) && r.status !== "Deleted").reduce((s, r) => s + r.amount, 0);
@@ -9147,7 +9160,7 @@ function CustomerPortal({ currentUser, customers, invoices, payments, returns, e
 
 /* ---------------- Settings ---------------- */
 
-function Settings({ settings, saveSettings, users, saveUser, deleteUser, branches, saveBranch, deleteBranch, onRestoreBackup, exportBackup }) {
+function Settings({ settings, saveSettings, users, saveUser, deleteUser, branches, saveBranch, deleteBranch, onRestoreBackup, exportBackup, isSuper = true }) {
   const [form, setForm] = useState(settings);
   const [showUserForm, setShowUserForm] = useState(false);
   const [editingUser, setEditingUser] = useState(null);
@@ -9223,10 +9236,12 @@ function Settings({ settings, saveSettings, users, saveUser, deleteUser, branche
         <Field label="Company Name"><input className={inputCls} value={form.companyName} onChange={(e) => setForm({ ...form, companyName: e.target.value })} /></Field>
         <Field label="Address"><input className={inputCls} value={form.companyAddress} onChange={(e) => setForm({ ...form, companyAddress: e.target.value })} /></Field>
         <Field label="Phone"><input className={inputCls} value={form.companyPhone} onChange={(e) => setForm({ ...form, companyPhone: e.target.value })} /></Field>
+        <Field label="Invoice Number Prefix"><input className={inputCls} value={form.invoicePrefix || ""} placeholder="CT-" onChange={(e) => setForm({ ...form, invoicePrefix: e.target.value.toUpperCase().replace(/\s+/g, "") })} /></Field>
+        <div className="text-[11px] text-slate-400 -mt-1 mb-3">{t("Agla invoice")}: <b>{(form.invoicePrefix || "CT-") + String(form.invoiceCounter || 1).padStart(4, "0")}</b></div>
         <Btn onClick={saveCompanyInfo}>Save</Btn>
       </div>
 
-      <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
+      {isSuper && <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
         <div className="flex items-center justify-between mb-3">
           <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">Branches</div>
           <Btn small onClick={() => setShowBranchForm(true)}>Add Branch</Btn>
@@ -9249,7 +9264,7 @@ function Settings({ settings, saveSettings, users, saveUser, deleteUser, branche
             <Btn small variant="ghost" onClick={() => setShowBranchForm(false)}>Cancel</Btn>
           </div>
         )}
-      </div>
+      </div>}
 
       <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
         <div className="flex items-center justify-between mb-3">
@@ -9285,8 +9300,8 @@ function Settings({ settings, saveSettings, users, saveUser, deleteUser, branche
                 </select>
               </Field>
               <Field label="Branch">
-                <select className={inputCls} value={userForm.branchId || ""} onChange={(e) => setUserForm({ ...userForm, branchId: e.target.value })}>
-                  <option value="">All Branches</option>
+                <select className={inputCls} value={userForm.branchId || ""} onChange={(e) => setUserForm({ ...userForm, branchId: e.target.value })} disabled={!isSuper}>
+                  <option value="">{isSuper ? "Main Branch" : (branches[0]?.name || "This Branch")}</option>
                   {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
                 </select>
               </Field>
@@ -9296,14 +9311,14 @@ function Settings({ settings, saveSettings, users, saveUser, deleteUser, branche
         )}
       </div>
 
-      <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
+      {isSuper && <div className="bg-white border border-slate-200 p-4 max-w-xl mb-6">
         <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-3">Backup</div>
         <div className="flex gap-2">
           <Btn onClick={exportBackup}>Download Backup (JSON)</Btn>
           <Btn variant="ghost" onClick={() => restoreInputRef.current?.click()}>Restore from File</Btn>
           <input ref={restoreInputRef} type="file" accept="application/json" onChange={handleRestoreFile} className="hidden" />
         </div>
-      </div>
+      </div>}
 
       <div className="flex items-center gap-2 mb-6">
         <span className="text-[11px] uppercase tracking-wide font-bold text-slate-500">Language</span>
@@ -9363,33 +9378,61 @@ function App() {
   const [focusInvoiceId, setFocusInvoiceId] = useState(null);
   const [focusPromiseId, setFocusPromiseId] = useState(null);
 
-  const [users, setUsers] = useState(DEFAULT_USERS);
-  const [customers, setCustomers] = useState([]);
-  const [invoices, setInvoices] = useState([]);
-  const [payments, setPayments] = useState([]);
-  const [returns, setReturns] = useState([]);
-  const [exchanges, setExchanges] = useState([]);
-  const [creditNotes, setCreditNotes] = useState([]);
-  const [promises, setPromises] = useState([]);
-  const [transfers, setTransfers] = useState([]);
-  const [adjustments, setAdjustments] = useState([]);
-  const [leads, setLeads] = useState([]);
-  const [products, setProducts] = useState([]);
-  const [drivers, setDrivers] = useState([]);
-  const [offers, setOffers] = useState([]);
-  const [bookings, setBookings] = useState([]);
-  const [orders, setOrders] = useState([]);
-  const [orderTargets, setOrderTargets] = useState([]);
-  const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [users__all, setUsers] = useState(DEFAULT_USERS);
+  const [customers__all, setCustomers] = useState([]);
+  const [invoices__all, setInvoices] = useState([]);
+  const [payments__all, setPayments] = useState([]);
+  const [returns__all, setReturns] = useState([]);
+  const [exchanges__all, setExchanges] = useState([]);
+  const [creditNotes__all, setCreditNotes] = useState([]);
+  const [promises__all, setPromises] = useState([]);
+  const [transfers__all, setTransfers] = useState([]);
+  const [adjustments__all, setAdjustments] = useState([]);
+  const [leads__all, setLeads] = useState([]);
+  const [products__all, setProducts] = useState([]);
+  const [drivers__all, setDrivers] = useState([]);
+  const [offers__all, setOffers] = useState([]);
+  const [bookings__all, setBookings] = useState([]);
+  const [orders__all, setOrders] = useState([]);
+  const [orderTargets__all, setOrderTargets] = useState([]);
+  const [settings__all, setSettings] = useState(DEFAULT_SETTINGS);
   const [branches, setBranches] = useState(DEFAULT_BRANCHES);
-  const [auditLog, setAuditLog] = useState([]);
+  const [auditLog__all, setAuditLog] = useState([]);
 
   // Commission Management System state (additive; never modifies invoice/
   // customer/payment tables above).
-  const [commissionAgents, setCommissionAgents] = useState([]);
-  const [commissionRules, setCommissionRules] = useState([]);
-  const [commissionTransactions, setCommissionTransactions] = useState([]);
-  const [commissionPayments, setCommissionPayments] = useState([]);
+  const [commissionAgents__all, setCommissionAgents] = useState([]);
+  const [commissionRules__all, setCommissionRules] = useState([]);
+  const [commissionTransactions__all, setCommissionTransactions] = useState([]);
+  const [commissionPayments__all, setCommissionPayments] = useState([]);
+  const [viewBranchId, setViewBranchIdRaw] = useState(() => { try { return sessionStorage.getItem("ct-view-branch") || ""; } catch { return ""; } });
+  function setViewBranchId(id) { try { sessionStorage.setItem("ct-view-branch", id || ""); } catch {} setViewBranchIdRaw(id || ""); }
+  brCustBranch = brCustMap(customers__all);
+  const brScopeNow = brScopeFor(currentUser, viewBranchId, customers__all, branches);
+  brSetScope(brScopeNow);
+  const users = brScopeList(users__all, brScopeNow, "users");
+  const customers = brScopeList(customers__all, brScopeNow, "customers");
+  const invoices = brScopeList(invoices__all, brScopeNow, "invoices");
+  const payments = brScopeList(payments__all, brScopeNow, "payments");
+  const returns = brScopeList(returns__all, brScopeNow, "returns");
+  const exchanges = brScopeList(exchanges__all, brScopeNow, "exchanges");
+  const creditNotes = brScopeList(creditNotes__all, brScopeNow, "creditNotes");
+  const promises = brScopeList(promises__all, brScopeNow, "promises");
+  const transfers = brScopeList(transfers__all, brScopeNow, "transfers");
+  const adjustments = brScopeList(adjustments__all, brScopeNow, "adjustments");
+  const leads = brScopeList(leads__all, brScopeNow, "leads");
+  const products = brScopeList(products__all, brScopeNow, "products");
+  const drivers = brScopeList(drivers__all, brScopeNow, "drivers");
+  const offers = brScopeList(offers__all, brScopeNow, "offers");
+  const bookings = brScopeList(bookings__all, brScopeNow, "bookings");
+  const orders = brScopeList(orders__all, brScopeNow, "orders");
+  const orderTargets = brScopeList(orderTargets__all, brScopeNow, "orderTargets");
+  const auditLog = brScopeList(auditLog__all, brScopeNow, "auditLog");
+  const commissionAgents = brScopeList(commissionAgents__all, brScopeNow, "commissionAgents");
+  const commissionRules = brScopeList(commissionRules__all, brScopeNow, "commissionRules");
+  const commissionTransactions = brScopeList(commissionTransactions__all, brScopeNow, "commissionTransactions");
+  const commissionPayments = brScopeList(commissionPayments__all, brScopeNow, "commissionPayments");
+  const settings = brSettingsFor(settings__all, branches, brScopeNow);
 
   useEffect(() => {
     let cancelled = false;
@@ -9446,36 +9489,42 @@ function App() {
   }, []);
 
   const persist = {
-    users: (v) => { setUsers(v); storeSet("ct-users", v); },
-    customers: (v) => { setCustomers(v); storeSet("ct-customers", v); },
-    invoices: (v) => { setInvoices(v); storeSet("ct-invoices", v); },
-    payments: (v) => { setPayments(v); storeSet("ct-payments", v); },
-    returns: (v) => { setReturns(v); storeSet("ct-returns", v); },
-    exchanges: (v) => { setExchanges(v); storeSet("ct-exchanges", v); },
-    creditNotes: (v) => { setCreditNotes(v); storeSet("ct-creditnotes", v); },
-    promises: (v) => { setPromises(v); storeSet("ct-promises", v); },
-    transfers: (v) => { setTransfers(v); storeSet("ct-transfers", v); },
-    adjustments: (v) => { setAdjustments(v); storeSet("ct-adjustments", v); },
-    leads: (v) => { setLeads(v); storeSet("ct-leads", v); },
-    products: (v) => { setProducts(v); storeSet("ct-products", v); },
-    drivers: (v) => { setDrivers(v); storeSet("ct-drivers", v); },
-    offers: (v) => { setOffers(v); storeSet("ct-offers", v); },
-    bookings: (v) => { setBookings(v); storeSet("ct-bookings", v); },
-    orders: (v) => { setOrders(v); storeSet("ct-orders", v); },
-    orderTargets: (v) => { setOrderTargets(v); storeSet("ct-ordertargets", v); },
-    settings: (v) => { setSettings(v); storeSet("ct-settings", v); },
+    users: (v) => { const f = brMerge(users__all, v, brScopeNow, "users"); setUsers(f); storeSet("ct-users", f); },
+    customers: (v) => { const f = brMerge(customers__all, v, brScopeNow, "customers"); setCustomers(f); storeSet("ct-customers", f); },
+    invoices: (v) => { const f = brMerge(invoices__all, v, brScopeNow, "invoices"); setInvoices(f); storeSet("ct-invoices", f); },
+    payments: (v) => { const f = brMerge(payments__all, v, brScopeNow, "payments"); setPayments(f); storeSet("ct-payments", f); },
+    returns: (v) => { const f = brMerge(returns__all, v, brScopeNow, "returns"); setReturns(f); storeSet("ct-returns", f); },
+    exchanges: (v) => { const f = brMerge(exchanges__all, v, brScopeNow, "exchanges"); setExchanges(f); storeSet("ct-exchanges", f); },
+    creditNotes: (v) => { const f = brMerge(creditNotes__all, v, brScopeNow, "creditNotes"); setCreditNotes(f); storeSet("ct-creditnotes", f); },
+    promises: (v) => { const f = brMerge(promises__all, v, brScopeNow, "promises"); setPromises(f); storeSet("ct-promises", f); },
+    transfers: (v) => { const f = brMerge(transfers__all, v, brScopeNow, "transfers"); setTransfers(f); storeSet("ct-transfers", f); },
+    adjustments: (v) => { const f = brMerge(adjustments__all, v, brScopeNow, "adjustments"); setAdjustments(f); storeSet("ct-adjustments", f); },
+    leads: (v) => { const f = brMerge(leads__all, v, brScopeNow, "leads"); setLeads(f); storeSet("ct-leads", f); },
+    products: (v) => { const f = brMerge(products__all, v, brScopeNow, "products"); setProducts(f); storeSet("ct-products", f); },
+    drivers: (v) => { const f = brMerge(drivers__all, v, brScopeNow, "drivers"); setDrivers(f); storeSet("ct-drivers", f); },
+    offers: (v) => { const f = brMerge(offers__all, v, brScopeNow, "offers"); setOffers(f); storeSet("ct-offers", f); },
+    bookings: (v) => { const f = brMerge(bookings__all, v, brScopeNow, "bookings"); setBookings(f); storeSet("ct-bookings", f); },
+    orders: (v) => { const f = brMerge(orders__all, v, brScopeNow, "orders"); setOrders(f); storeSet("ct-orders", f); },
+    orderTargets: (v) => { const f = brMerge(orderTargets__all, v, brScopeNow, "orderTargets"); setOrderTargets(f); storeSet("ct-ordertargets", f); },
+    settings: (v) => {
+      if (brScopeNow && brScopeNow !== BR_MAIN && !brBypass) {
+        const nb = branches.map((b) => (b.id === brScopeNow ? { ...b, settings: { ...(b.settings || {}), ...v } } : b));
+        setBranches(nb); storeSet("ct-branches", nb); return;
+      }
+      setSettings(v); storeSet("ct-settings", v);
+    },
     branches: (v) => { setBranches(v); storeSet("ct-branches", v); },
-    auditLog: (v) => { setAuditLog(v); storeSet("ct-auditlog", v); },
-    commissionAgents: (v) => { setCommissionAgents(v); storeSet("ct-commissionagents", v); },
-    commissionRules: (v) => { setCommissionRules(v); storeSet("ct-commissionrules", v); },
-    commissionTransactions: (v) => { setCommissionTransactions(v); storeSet("ct-commissiontransactions", v); },
-    commissionPayments: (v) => { setCommissionPayments(v); storeSet("ct-commissionpayments", v); },
+    auditLog: (v) => { const f = brMerge(auditLog__all, v, brScopeNow, "auditLog"); setAuditLog(f); storeSet("ct-auditlog", f); },
+    commissionAgents: (v) => { const f = brMerge(commissionAgents__all, v, brScopeNow, "commissionAgents"); setCommissionAgents(f); storeSet("ct-commissionagents", f); },
+    commissionRules: (v) => { const f = brMerge(commissionRules__all, v, brScopeNow, "commissionRules"); setCommissionRules(f); storeSet("ct-commissionrules", f); },
+    commissionTransactions: (v) => { const f = brMerge(commissionTransactions__all, v, brScopeNow, "commissionTransactions"); setCommissionTransactions(f); storeSet("ct-commissiontransactions", f); },
+    commissionPayments: (v) => { const f = brMerge(commissionPayments__all, v, brScopeNow, "commissionPayments"); setCommissionPayments(f); storeSet("ct-commissionpayments", f); },
   };
 
   function logAudit(action, reference, reason) {
     setAuditLog((prev) => {
       const next = [...prev, {
-        id: uid("aud"), action, reference, reason: reason || "",
+        id: uid("aud"), action, reference, reason: reason || "", branchId: brScopeNow && brScopeNow !== BR_MAIN ? brScopeNow : "",
         user: currentUser?.name || currentUser?.username || "System", at: new Date().toISOString(),
       }];
       storeSet("ct-auditlog", next);
@@ -9621,6 +9670,13 @@ function App() {
       const updatedTx = { ...linkedTx, status: "Cancelled", remainingAmount: 0, cancelReason: "Invoice cancelled" };
       persist.commissionTransactions(commissionTransactions.map((t) => (t.id === linkedTx.id ? updatedTx : t)));
       logAudit("Commission Cancelled", `${linkedTx.invoiceNumber} — ${linkedTx.agentName}`, "Invoice cancelled");
+    }
+    const linkedPays = payments.filter((p) => p.status !== "Cancelled" && p.kind !== "Refund" && (p.invoiceId === inv.id || (!p.invoiceId && p.note && p.note.replace("Against ", "").trim() === inv.number && p.note.startsWith("Against "))));
+    if (linkedPays.length) {
+      const ids = new Set(linkedPays.map((p) => p.id));
+      const by = currentUser?.name || currentUser?.username || "";
+      persist.payments(payments.map((p) => (ids.has(p.id) ? { ...p, status: "Cancelled", cancelledAt: new Date().toISOString(), cancelledBy: by, cancelReason: `Invoice ${inv.number} cancelled` } : p)));
+      linkedPays.forEach((p) => logAudit("Payment Cancelled", `${p.customerName || ""} — Rs ${p.amount}`, `Invoice ${inv.number} cancelled`));
     }
     logAudit("Invoice Cancelled", inv.number, "");
   }
@@ -10117,12 +10173,15 @@ function App() {
 
   function exportBackup() {
     const data = {
-      users, customers, invoices, payments, returns, exchanges, creditNotes, promises, transfers, adjustments,
-      leads, products, drivers, offers, bookings, orders, settings, branches, auditLog,
-      commissionAgents, commissionRules, commissionTransactions, commissionPayments, orderTargets,
-      vouchers: finState.vouchers, finSettings: finState.settings, cashClosings: finState.closings, cashMoves: finState.moves, costRates: finState.costs,
-      employees: finState.employees, attendance: finState.attendance, leaves: finState.leaves, advances: finState.advances, salarySheets: finState.salarySheets,
-      creditState: finState.creditState, creditLog: finState.creditLog, creditRequests: finState.creditRequests, urduDict: finState.urduDict,
+      users: users__all, customers: customers__all, invoices: invoices__all, payments: payments__all, returns: returns__all, exchanges: exchanges__all,
+      creditNotes: creditNotes__all, promises: promises__all, transfers: transfers__all, adjustments: adjustments__all,
+      leads: leads__all, products: products__all, drivers: drivers__all, offers: offers__all, bookings: bookings__all, orders: orders__all,
+      settings: settings__all, branches, auditLog: auditLog__all,
+      commissionAgents: commissionAgents__all, commissionRules: commissionRules__all, commissionTransactions: commissionTransactions__all,
+      commissionPayments: commissionPayments__all, orderTargets: orderTargets__all,
+      vouchers: finRaw.vouchers, finSettings: finState.settings, cashClosings: finRaw.closings, cashMoves: finRaw.moves, costRates: finState.costs,
+      employees: finRaw.employees, attendance: finRaw.attendance, leaves: finRaw.leaves, advances: finRaw.advances, salarySheets: finRaw.salarySheets,
+      creditState: finState.creditState, creditLog: finRaw.creditLog, creditRequests: finRaw.creditRequests, urduDict: finState.urduDict,
     };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -10131,6 +10190,11 @@ function App() {
     URL.revokeObjectURL(url);
   }
   function onRestoreBackup(data) {
+    if (!brIsSuper(currentUser)) { alert(t("Backup sirf Main admin restore kar sakta hai.")); return; }
+    brBypass = true;
+    try { onRestoreBackupAll(data); } finally { brBypass = false; }
+  }
+  function onRestoreBackupAll(data) {
     if (data.users) persist.users(data.users);
     if (data.customers) persist.customers(data.customers);
     if (data.invoices) persist.invoices(data.invoices);
@@ -10155,14 +10219,14 @@ function App() {
     if (data.commissionRules) persist.commissionRules(data.commissionRules);
     if (data.commissionTransactions) persist.commissionTransactions(data.commissionTransactions);
     if (data.commissionPayments) persist.commissionPayments(data.commissionPayments);
-    if (Array.isArray(data.vouchers)) finMutate("vouchers", () => data.vouchers);
+    if (Array.isArray(data.vouchers)) finMutate("vouchers", () => data.vouchers, true);
     if (data.finSettings) finMutate("settings", () => finNormalizeSettings(data.finSettings));
-    if (Array.isArray(data.cashClosings)) finMutate("closings", () => data.cashClosings);
-    if (Array.isArray(data.cashMoves)) finMutate("moves", () => data.cashMoves);
+    if (Array.isArray(data.cashClosings)) finMutate("closings", () => data.cashClosings, true);
+    if (Array.isArray(data.cashMoves)) finMutate("moves", () => data.cashMoves, true);
     if (data.costRates && typeof data.costRates === "object") finMutate("costs", () => data.costRates);
     if (data.urduDict && typeof data.urduDict === "object") finMutate("urduDict", () => data.urduDict);
     if (data.creditState && typeof data.creditState === "object") finMutate("creditState", () => data.creditState);
-    ["employees", "attendance", "leaves", "advances", "salarySheets", "creditLog", "creditRequests"].forEach((k) => { if (Array.isArray(data[k])) finMutate(k, () => data[k]); });
+    ["employees", "attendance", "leaves", "advances", "salarySheets", "creditLog", "creditRequests"].forEach((k) => { if (Array.isArray(data[k])) finMutate(k, () => data[k], true); });
   }
 
   /* ---------- Commission Management handlers ---------- */
@@ -10254,7 +10318,7 @@ function App() {
   // unscoped (same as the pre-existing pattern for products/drivers) —
   // only customers/invoices/payments are filtered per-branch for staff
   // who are assigned to a specific branch.
-  const isBranchScoped = currentUser && currentUser.role !== "admin" && !!currentUser.branchId;
+  const isBranchScoped = false; // lists are already scoped to the active branch (multi-branch)
   const visibleCustomers = isBranchScoped ? customers.filter((c) => c.branchId === currentUser.branchId) : customers;
   const visibleCustomerIds = new Set(visibleCustomers.map((c) => c.id));
   const visibleInvoices = isBranchScoped
@@ -10298,7 +10362,7 @@ function App() {
     const crPend = crOk ? finLive.creditRequests.filter((r) => r.status === "Pending") : [];
     const meKey = finUserKey(currentUser);
     const crMine = finLive.creditRequests.filter((r) => r.createdBy && r.createdBy.key === meKey && r.decision && String(r.decision.at).slice(0, 10) >= finAddDays(today, -2) && r.status !== "Used");
-    const crUnsent = hrPageAllowed(currentUser, "creditControl") ? Object.entries(finLive.creditState).reduce((n, [, s]) => n + ((s && s.warnings) || []).filter((w) => !w.waAt).length, 0) : 0;
+    const crUnsent = hrPageAllowed(currentUser, "creditControl") ? Object.entries(finLive.creditState).filter(([cid]) => !brScopeNow || brCustBranch[cid] === brScopeNow).reduce((n, [, s]) => n + ((s && s.warnings) || []).filter((w) => !w.waAt).length, 0) : 0;
     return {
       count: mine.length,
       dueCount: due.length,
@@ -10479,10 +10543,26 @@ function App() {
       const emp = finState.employees.find((e) => e.id === user.employeeId);
       if (emp && emp.status === "Left") { alert(t("Ye login band hai.")); return; }
     }
+    if (user && user.branchId && user.role !== "customer") {
+      const br = branches.find((b) => b.id === user.branchId);
+      if (br && br.status === "Frozen") { alert(t("Ye branch band hai. Main admin se raabta karein.")); return; }
+    }
     if (user && user.role !== "customer") setPage(hrFirstPage(user));
+    setViewBranchId("");
     setCurrentUser(user);
   }
-  function handleLogout() { setCurrentUser(null); setPage("dashboard"); }
+  function handleLogout() { setCurrentUser(null); setViewBranchId(""); setPage("dashboard"); }
+  function openBranchView(id) { setViewBranchId(id && id !== BR_MAIN ? id : ""); setPage("dashboard"); }
+  function saveBranchFull(branch, admin) {
+    const exists = branches.some((b) => b.id === branch.id);
+    persist.branches(exists ? branches.map((b) => (b.id === branch.id ? branch : b)) : [...branches, branch]);
+    if (admin) {
+      const ex = users__all.some((u) => u.id === admin.id);
+      const full = ex ? users__all.map((u) => (u.id === admin.id ? admin : u)) : [...users__all, admin];
+      setUsers(full); storeSet("ct-users", full);
+    }
+    logAudit(exists ? "Branch Updated" : "Branch Created", branch.name, admin ? `Admin: ${admin.username}` : "");
+  }
 
   // Splash -> (loading screen while data loads) -> login / dashboard / portal.
   // Login is never shown before startup data has finished loading.
@@ -10557,7 +10637,7 @@ function App() {
         customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments}
         returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
         saveCustomer={saveCustomer} deleteCustomer={deleteCustomer} openLedger={openLedger}
-        branches={branches} currentUser={currentUser}
+        branches={[]} currentUser={currentUser}
       />
     ),
     invoices: (
@@ -10669,6 +10749,12 @@ function App() {
     ),
     assistant: <SalesAssistant customers={visibleCustomers} />,
     estimator: <CementEstimator settings={settings} />,
+    branches: (
+      <BranchesPage currentUser={currentUser} branches={branches} settingsAll={settings__all}
+        raw={{ users: users__all, customers: customers__all, invoices: invoices__all, payments: payments__all, returns: returns__all, exchanges: exchanges__all,
+          promises: promises__all, transfers: transfers__all, adjustments: adjustments__all, products: products__all }}
+        onOpen={openBranchView} onSaveBranch={saveBranchFull} />
+    ),
     vouchers: <VouchersPage currentUser={currentUser} users={users} branches={branches} settings={settings} />,
     profit: currentUser.role === "admin" ? (
       <ProfitPage currentUser={currentUser} products={products} customers={customers} invoices={invoices} payments={payments}
@@ -10691,19 +10777,17 @@ function App() {
         promises={promises} transfers={transfers} adjustments={adjustments} settings={settings} />
     ),
     settings: (
-      <Settings
+      <Settings key={brScopeNow || "all"} isSuper={brIsSuper(currentUser) && brScopeNow === BR_MAIN}
         settings={settings} saveSettings={saveSettings}
         users={users} saveUser={saveUser} deleteUser={deleteUser}
-        branches={branches} saveBranch={saveBranch} deleteBranch={deleteBranch}
+        branches={brScopeNow === BR_MAIN ? branches : branches.filter((b) => b.id === brScopeNow)} saveBranch={saveBranch} deleteBranch={deleteBranch}
         onRestoreBackup={onRestoreBackup} exportBackup={exportBackup}
       />
     ),
   };
 
   hrNavUser = currentUser;
-  const branchLabel = currentUser.branchId
-    ? (branches.find((b) => b.id === currentUser.branchId)?.name || t("Branch"))
-    : (branches.length > 1 ? t("All Branches") : (branches[0]?.name || ""));
+  const branchLabel = brLabelFor(brScopeNow, branches, settings__all);
 
   return (
     <>
@@ -10719,6 +10803,7 @@ function App() {
           open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount, portalRequests: finAlerts.portalCount, deliverySchedule: finAlerts.deliveryCount, hrRequests: finAlerts.hrCount, creditControl: finAlerts.crCount }}
         />
         <div className="flex-1 min-w-0 flex flex-col">
+          {brIsSuper(currentUser) && <BranchViewBanner scope={brScopeNow} branches={branches} onBack={() => openBranchView("")} />}
           <AppHeader
             page={page} currentUser={currentUser} alerts={[...finAlerts.list, ...shellAlerts.list].filter((a) => !a.page || hrPageAllowed(currentUser, a.page))}
             onMenu={() => setNavOpen(true)} onSearch={() => setPaletteOpen(true)} onNewInvoice={hrPageAllowed(currentUser, "invoices") ? openNewInvoice : null} onGo={goPage}
@@ -13586,11 +13671,11 @@ function InvoicePrintDialog({ invoice, settings, rs, onClose }) {
   const user = useRecvSessionUser();
   const { proofs } = useRecvProofs(invoice.id, recvIsStaff(user));
   const includeDefs = [
-    { key: "prevBalance", label: "Previous Balance", sub: "Old balance + net balance", default: true, disabled: invoice.customerType === "Cash", disabledNote: "Cash Customer / Walk-In", sizes: ["t58", "t80"] },
-    { key: "delivery", label: "Driver & Delivery", sub: "Driver, vehicle, rent", default: true, sizes: ["t58", "t80"] },
+    { key: "prevBalance", label: "Previous Balance", sub: "Old balance + net balance", default: true, disabled: invoice.customerType === "Cash", disabledNote: "Cash Customer / Walk-In" },
+    { key: "delivery", label: "Driver & Delivery", sub: "Driver, vehicle, rent", default: true },
     { key: "recvProof", label: "Receiving Proof", sub: "Signed slip photo", default: true, disabled: proofs.length === 0, disabledNote: "Not Uploaded" },
-    { key: "issuedTo", label: "Material Issued To", sub: "Who collected the material", default: true, sizes: ["t58", "t80"] },
-    { key: "signature", label: "Signature Line", sub: "Customer / authorized signature", default: true, sizes: ["t58", "t80"] },
+    { key: "issuedTo", label: "Material Issued To", sub: "Who collected the material", default: true },
+    { key: "signature", label: "Signature Line", sub: "Customer / authorized signature", default: true },
     { key: "qr", label: "QR Code", sub: "Scan to see invoice details", default: true },
     { key: "urdu", label: "Urdu Print", sub: "Print the document in Urdu", default: false },
   ];
@@ -13606,9 +13691,9 @@ function InvoicePrintDialog({ invoice, settings, rs, onClose }) {
       onClose={onClose}
       renderDoc={(p) => {
         const inc = { ...p.include, prevBalance: p.include.prevBalance && invoice.customerType !== "Cash", recvProof: p.include.recvProof && proofs.length > 0 };
-        if (p.size === "full") return <InvoiceClassicDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} rs={rs} />;
+        if (p.size === "full") return <InvoiceProDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} rs={rs} />;
         return PRINT_SIZES[p.size].thermal
-          ? <InvoiceThermalDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} />
+          ? <InvoiceThermalProDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} />
           : <InvoicePaperDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} rs={rs} />;
       }}
     />
@@ -13663,6 +13748,411 @@ function ReceiptPrintDialog({ payment, customer, settings, balances, proofRecord
     />
   );
 }
+
+/* ============================================================
+   NEW INVOICE DESIGN (approved): A4 + Thermal 80mm + Thermal 58mm
+   Totals order everywhere:
+     New purchase + rickshaw/delivery − discount = INVOICE TOTAL
+     + previous balance = TOTAL
+     − payment received (− advance) = OUTSTANDING BALANCE
+   ============================================================ */
+
+function invProNumbers(invoice) {
+  const subtotal = Number(invoice.subtotal) || 0;
+  const delivery = (Number(invoice.rickshawRent) || 0) + (Number(invoice.deliveryCharges) || 0);
+  const discount = Number(invoice.discount) || 0;
+  const total = Number(invoice.total) || 0;
+  const cash = invoice.customerType === "Cash";
+  const advance = Number(invoice.advanceApplied) || 0;
+  const previous = cash ? 0 : (Number(invoice.previousOutstanding) || 0) + advance;
+  const grand = previous + total;
+  const paid = Number(invoice.paymentReceived) || 0;
+  const outstanding = cash ? Math.max(0, total - paid) : (Number(invoice.previousOutstanding) || 0) + (Number(invoice.balanceDue) || 0) + advance;
+  const billDue = Number(invoice.balanceDue) || 0;
+  const paidPct = total > 0 ? Math.max(0, Math.min(100, Math.round(((paid + advance) / total) * 100))) : 100;
+  const cancelled = isInvoiceCancelled(invoice);
+  const status = cancelled ? "Cancelled" : billDue <= 0.5 ? "Paid" : paid + advance > 0.5 ? "Partial" : "Unpaid";
+  return { subtotal, delivery, discount, total, cash, advance, previous, grand, paid, outstanding, billDue, paidPct, status, cancelled };
+}
+function invProTime(invoice) {
+  try {
+    const t = typeof ledgerEntryTime === "function" ? ledgerEntryTime(invoice) : 0;
+    const m = String(invoice.id || "").match(/_([0-9a-z]{8})/);
+    const ms = t || (m ? parseInt(m[1], 36) : 0);
+    if (ms > 1500000000000 && ms < 4100000000000) return new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  } catch {}
+  return "";
+}
+const INV_PRO_STATUS = {
+  Paid: { color: "#047857", ur: "مکمل ادا" },
+  Partial: { color: "#d97706", ur: "جزوی ادا" },
+  Unpaid: { color: "#b91c1c", ur: "غیر ادا شدہ" },
+  Cancelled: { color: "#64748b", ur: "منسوخ" },
+};
+const INV_EXACT = { WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" };
+
+
+/* Amount in words — Urdu (lakh / crore system) */
+const UR_NUM_WORDS = ["", "ایک", "دو", "تین", "چار", "پانچ", "چھ", "سات", "آٹھ", "نو", "دس", "گیارہ", "بارہ", "تیرہ", "چودہ", "پندرہ", "سولہ", "سترہ", "اٹھارہ", "انیس", "بیس", "اکیس", "بائیس", "تئیس", "چوبیس", "پچیس", "چھبیس", "ستائیس", "اٹھائیس", "انتیس", "تیس", "اکتیس", "بتیس", "تینتیس", "چونتیس", "پینتیس", "چھتیس", "سینتیس", "اڑتیس", "انتالیس", "چالیس", "اکتالیس", "بیالیس", "تینتالیس", "چوالیس", "پینتالیس", "چھیالیس", "سینتالیس", "اڑتالیس", "انچاس", "پچاس", "اکاون", "باون", "ترپن", "چون", "پچپن", "چھپن", "ستاون", "اٹھاون", "انسٹھ", "ساٹھ", "اکسٹھ", "باسٹھ", "تریسٹھ", "چونسٹھ", "پینسٹھ", "چھیاسٹھ", "سڑسٹھ", "اڑسٹھ", "انہتر", "ستر", "اکہتر", "بہتر", "تہتر", "چوہتر", "پچھتر", "چھہتر", "ستتر", "اٹھہتر", "اناسی", "اسی", "اکیاسی", "بیاسی", "تراسی", "چوراسی", "پچاسی", "چھیاسی", "ستاسی", "اٹھاسی", "نواسی", "نوے", "اکانوے", "بانوے", "ترانوے", "چورانوے", "پچانوے", "چھیانوے", "ستانوے", "اٹھانوے", "ننانوے"];
+function urduAmountInWords(amount) {
+  let n = Math.round(Math.abs(Number(amount) || 0));
+  if (n === 0) return "صفر روپے";
+  const parts = [];
+  const take = (div, name) => { const q = Math.floor(n / div); if (q > 0) { parts.push(`${urduUpto99(q)} ${name}`); n -= q * div; } };
+  const urduUpto99 = (x) => {
+    if (x < 100) return UR_NUM_WORDS[x];
+    const h = Math.floor(x / 100), r = x % 100;
+    return `${UR_NUM_WORDS[h]} سو${r ? " " + UR_NUM_WORDS[r] : ""}`;
+  };
+  take(1000000000, "ارب");
+  take(10000000, "کروڑ");
+  take(100000, "لاکھ");
+  take(1000, "ہزار");
+  take(100, "سو");
+  if (n > 0) parts.push(UR_NUM_WORDS[n]);
+  return `${parts.join(" ")} روپے صرف`;
+}
+function printWords(amount, urdu) { return urdu ? urduAmountInWords(amount) : finAmountInWords(amount); }
+
+/* ---------------- A4 ---------------- */
+
+function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urdu, fit }) {
+  const L = (k) => printL(k, urdu);
+  const D = (x) => printD(x, urdu);
+  const n = invProNumbers(invoice);
+  const showRs = rs && rs.status !== "Normal" ? rs : null;
+  const items = showRs ? showRs.breakdown : invoice.items || [];
+  const qtyTotal = roundQty(items.reduce((s, it) => s + (Number(it.qty) || 0), 0));
+  const units = Array.from(new Set(items.map((it) => it.unit).filter(Boolean)));
+  const hasDelivery = n.delivery > 0 || invoice.driverName || invoice.vehicleNumber || invoice.receivedBy;
+  const time = invProTime(invoice);
+  const st = INV_PRO_STATUS[n.status];
+  const banner = invoiceStatusBanner(invoice);
+  const navy = "#0f172a", blue = "#1d4ed8";
+  const k = { fontSize: "7.5px", fontWeight: 800, letterSpacing: urdu ? 0 : ".14em", textTransform: "uppercase", color: "#64748b" };
+  const card = { border: "1px solid #e2e8f0", borderRadius: "2.6mm", padding: "3mm 3.6mm" };
+  const kv = (l, v, vs) => <div style={{ display: "flex", justifyContent: "space-between", gap: "2mm", lineHeight: 1.9, whiteSpace: "nowrap" }}><span style={{ color: "#64748b" }}>{l}</span><b style={vs}>{v}</b></div>;
+  const tr = urdu ? "left" : "right";
+  const th = { fontSize: "7.5px", fontWeight: 800, letterSpacing: urdu ? 0 : ".08em", textTransform: "uppercase", color: "#fff", background: navy, padding: "2.4mm 2mm", textAlign: "start", ...INV_EXACT };
+  const td = { padding: "2.6mm 2mm", borderBottom: "1px solid #e2e8f0", verticalAlign: "top" };
+  const row = (l, v, vs) => <div style={{ display: "flex", justifyContent: "space-between", fontSize: "11px", lineHeight: 2.05 }}><span style={{ color: "#475569" }}>{l}</span><b style={vs}><PrintLtr>{v}</PrintLtr></b></div>;
+  const sumBar = (l, v, style, ls) => (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "2.2mm 3.6mm", fontWeight: 800, ...INV_EXACT, ...style }}>
+      <span style={{ fontSize: "8.5px", letterSpacing: urdu ? 0 : ".12em", ...ls }}>{l}</span><span><PrintLtr>{v}</PrintLtr></span>
+    </div>
+  );
+  return (
+    <div style={{ ...printDocStyle(size_full_guard(), urdu, false), padding: 0, fontSize: "11px", lineHeight: 1.45, color: navy, fontFamily: urdu ? '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif' : "Inter, Arial, sans-serif", direction: urdu ? "rtl" : "ltr", fontVariantNumeric: "tabular-nums" }}>
+      <PrintCopyWrap copies={copies} thermal={false}>
+        {(copyLabel) => (
+          <div style={{ minHeight: "296mm", display: "flex", flexDirection: "column", position: "relative", overflow: "hidden", background: "#fff" }}>
+            <div style={{ height: "1.6mm", background: `linear-gradient(90deg,${navy} 70%,${blue})`, ...INV_EXACT }} />
+            {/* header */}
+            <div style={{ padding: "6.5mm 10mm 4.5mm", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1.1mm solid ${navy}`, position: "relative", overflow: "hidden" }}>
+              <div style={{ position: "absolute", insetInlineEnd: "-10mm", top: "-16mm", width: "70mm", height: "54mm", background: "linear-gradient(135deg,rgba(29,78,216,.10),rgba(29,78,216,0))", transform: "skewX(-20deg)", ...INV_EXACT }} />
+              <div style={{ display: "flex", gap: "3.6mm", alignItems: "center", position: "relative" }}>
+                {settings.logoUrl ? <img src={settings.logoUrl} alt="" style={{ width: "16mm", height: "16mm", objectFit: "contain" }} /> : (
+                  <div style={{ width: "16mm", height: "16mm", background: navy, color: "#fff", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "18px", ...INV_EXACT }}>{uiInitials(settings.companyName)}</div>
+                )}
+                <div>
+                  <div style={{ fontSize: "21px", fontWeight: 900, letterSpacing: "-.01em", lineHeight: 1.1, textTransform: urdu ? "none" : "uppercase" }}>{D(settings.companyName)}</div>
+                  <div style={{ fontSize: "9px", fontWeight: 800, letterSpacing: urdu ? 0 : ".06em", color: blue, marginTop: ".6mm" }}>{L("CONSTRUCTION MATERIALS SUPPLIER")}</div>
+                </div>
+              </div>
+              <div style={{ textAlign: tr, fontSize: "9.5px", color: "#475569", lineHeight: 1.65, position: "relative" }}>
+                <div>{D(settings.companyAddress)}</div>
+                {settings.companyPhone && <div>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+              </div>
+            </div>
+
+            {/* three cards */}
+            <div style={{ padding: "4.6mm 10mm 0", display: "grid", gridTemplateColumns: "1.15fr 1fr 1.2fr", gap: "3.6mm" }}>
+              <div style={card}>
+                <div style={k}>{L("Bill To")}</div>
+                <div style={{ fontSize: "14.5px", fontWeight: 800, marginTop: "1mm" }}>{D(invoice.customerName)}</div>
+                <div style={{ color: "#475569", lineHeight: 1.6 }}>
+                  {invoice.customerPhone && <div><PrintLtr>{invoice.customerPhone}</PrintLtr></div>}
+                  {invoice.customerAddress && <div>{D(invoice.customerAddress)}</div>}
+                </div>
+                <div style={{ marginTop: "1.6mm", display: "flex", gap: "1.6mm", flexWrap: "wrap" }}>
+                  <span style={{ background: n.cash ? "#fef3c7" : "#eff6ff", color: n.cash ? "#92400e" : blue, borderRadius: "1.4mm", padding: ".5mm 2mm", fontSize: "8.5px", fontWeight: 700, ...INV_EXACT }}>{n.cash ? L("Cash Sale") : L("Credit customer")}</span>
+                  {invoice.bookingRef && <span style={{ background: "#f1f5f9", color: "#334155", borderRadius: "1.4mm", padding: ".5mm 2mm", fontSize: "8.5px", fontWeight: 700, ...INV_EXACT }}>{L("Booking")} {invoice.bookingRef}</span>}
+                </div>
+                {include.issuedTo !== false && invoice.issuedTo && invoice.issuedTo.name && (
+                  <div style={{ marginTop: "1.6mm", fontSize: "9px", color: "#475569" }}>{L("Material Issued To")}: <b style={{ color: navy }}>{D(invoice.issuedTo.name)}</b>{invoice.issuedTo.relation ? ` (${D(invoice.issuedTo.relation)})` : ""}</div>
+                )}
+              </div>
+              <div style={card}>
+                <div style={k}>{L("Invoice")}</div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "1mm" }}>
+                  <span style={{ background: navy, color: "#fff", fontWeight: 900, padding: ".8mm 3.4mm .8mm 2.6mm", fontSize: "13px", clipPath: urdu ? "polygon(8% 0,100% 0,100% 100%,0 100%)" : "polygon(0 0,100% 0,92% 100%,0 100%)", ...INV_EXACT }}><PrintLtr>{invoice.number}</PrintLtr></span>
+                  <span style={{ border: `1px solid ${blue}`, color: blue, fontSize: "7.5px", fontWeight: 800, letterSpacing: urdu ? 0 : ".1em", padding: ".4mm 1.6mm" }}>{copyLabel ? L(copyLabel).toUpperCase() : L("ORIGINAL")}</span>
+                </div>
+                <div style={{ marginTop: "1.6mm" }}>
+                  {kv(L("Date"), printDate(invoice.date, urdu))}
+                  {time && kv(L("Time"), <PrintLtr>{time}</PrintLtr>)}
+                  {invoice.receivedBy && kv(L("Payment Received By"), D(invoice.receivedBy))}
+                </div>
+              </div>
+              <div style={{ ...card, display: "flex", gap: "2.6mm", justifyContent: "space-between" }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={k}>{L("Payment status")}</div>
+                  <div style={{ marginTop: "1mm" }}>
+                    {kv(L("Status"), urdu ? st.ur : n.status, { color: st.color })}
+                    {!n.cancelled && kv(L("Paid"), `${n.paidPct}%`)}
+                    {!n.cancelled && n.billDue > 0.5 && kv(L("Is bill ka baqi"), <PrintLtr>{fmtMoney(n.billDue)}</PrintLtr>)}
+                  </div>
+                </div>
+                {include.qr !== false && (
+                  <div style={{ textAlign: "center" }}>
+                    <QrSvg text={invoiceQrText(invoice, settings)} sizeMm={17} />
+                    <div style={{ fontSize: "6.5px", color: "#94a3b8", letterSpacing: ".08em", marginTop: ".6mm" }}>{L("SCAN · VERIFY")}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* items */}
+            <div style={{ margin: "4.6mm 10mm 0", borderRadius: "2.6mm 2.6mm 0 0", overflow: "hidden" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead>
+                  <tr>
+                    <th style={{ ...th, width: "8mm" }}>#</th>
+                    <th style={th}>{L("Item")}</th>
+                    <th style={{ ...th, textAlign: "end" }}>{L("Qty (Sold)")}</th>
+                    <th style={{ ...th, textAlign: "center" }}>{L("Unit")}</th>
+                    <th style={{ ...th, textAlign: "end" }}>{L("Rate / Unit")}</th>
+                    <th style={{ ...th, textAlign: "end" }}>{L("Amount")}</th>
+                    {showRs && <th style={{ ...th, textAlign: "end" }}>{L("Returned")}</th>}
+                    {showRs && <th style={{ ...th, textAlign: "end" }}>{L("Remaining")}</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((it, i) => (
+                    <tr key={i}>
+                      <td style={{ ...td, color: "#94a3b8", fontWeight: 700 }}>{i + 1}</td>
+                      <td style={td}><b>{D(it.name)}</b></td>
+                      <td style={{ ...td, textAlign: "end" }}><PrintLtr>{fmtQty(it.qty)}</PrintLtr></td>
+                      <td style={{ ...td, textAlign: "center" }}>{D(it.unit || "-")}</td>
+                      <td style={{ ...td, textAlign: "end" }}><PrintLtr>{fmtMoney(it.price)}</PrintLtr></td>
+                      <td style={{ ...td, textAlign: "end" }}><b><PrintLtr>{fmtMoney(it.total)}</PrintLtr></b></td>
+                      {showRs && <td style={{ ...td, textAlign: "end", color: "#94a3b8" }}>{(it.returnedQty || 0) + (it.exchangedQty || 0) > 0 ? <PrintLtr>{fmtQty((it.returnedQty || 0) + (it.exchangedQty || 0))}</PrintLtr> : "—"}</td>}
+                      {showRs && <td style={{ ...td, textAlign: "end" }}><PrintLtr>{fmtQty(it.remainingQty)}</PrintLtr></td>}
+                    </tr>
+                  ))}
+                  <tr style={{ background: "#f8fafc", ...INV_EXACT }}>
+                    <td style={td} />
+                    <td style={{ ...td, color: "#64748b", fontSize: "9.5px" }}>{L("Total")} · {items.length} {L(items.length === 1 ? "item" : "items")}</td>
+                    <td style={{ ...td, textAlign: "end" }}><b><PrintLtr>{fmtQty(qtyTotal)}</PrintLtr></b></td>
+                    <td style={{ ...td, textAlign: "center", color: "#64748b" }}>{units.length === 1 ? D(units[0]) : ""}</td>
+                    <td style={td} />
+                    <td style={{ ...td, textAlign: "end" }}><b><PrintLtr>{fmtMoney(n.subtotal)}</PrintLtr></b></td>
+                    {showRs && <td style={td} />}
+                    {showRs && <td style={td} />}
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            {/* delivery + totals */}
+            <div style={{ padding: "4.6mm 10mm 0", display: "flex", gap: "6mm", alignItems: "flex-start" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                {include.delivery !== false && hasDelivery && (
+                  <div style={{ border: "1px solid #e2e8f0", borderRadius: "2.6mm", overflow: "hidden" }}>
+                    <div style={{ background: "#f8fafc", padding: "1.8mm 3mm", fontWeight: 800, fontSize: "10.5px", borderBottom: "1px solid #e2e8f0", ...INV_EXACT }}>{L("Rickshaw & Delivery Details")}</div>
+                    <div style={{ padding: "2mm 3mm", display: "grid", gridTemplateColumns: "1fr 1fr", gap: ".8mm 4mm", fontSize: "9.5px" }}>
+                      <div><span style={{ color: "#64748b" }}>{L("Driver")}:</span> <b>{D(invoice.driverName || "-")}</b>{invoice.driverId ? <PrintLtr> ({invoice.driverId})</PrintLtr> : null}</div>
+                      <div><span style={{ color: "#64748b" }}>{L("Vehicle")}:</span> <b>{D(invoice.vehicleType || "-")}{invoice.vehicleNumber ? <PrintLtr> · {invoice.vehicleNumber}</PrintLtr> : null}</b></div>
+                      <div><span style={{ color: "#64748b" }}>{L("Rickshaw Rent")}:</span> <PrintLtr>{fmtMoney(invoice.rickshawRent || 0)}</PrintLtr></div>
+                      <div><span style={{ color: "#64748b" }}>{L("Delivery Charges")}:</span> <PrintLtr>{fmtMoney(invoice.deliveryCharges || 0)}</PrintLtr></div>
+                      <div><span style={{ color: "#64748b" }}>{L("Payment Received By")}:</span> <b>{D(invoice.receivedBy || "-")}</b></div>
+                    </div>
+                  </div>
+                )}
+                <div style={{ marginTop: "3mm" }}>
+                  <div style={k}>{L("Amount in words (this purchase)")}</div>
+                  <div style={{ marginTop: ".8mm", fontWeight: 700 }}>{printWords(n.total, urdu)}</div>
+                </div>
+              </div>
+              <div style={{ width: "76mm", flexShrink: 0 }}>
+                <div style={{ borderRadius: "3mm", overflow: "hidden", border: "1px solid #e2e8f0" }}>
+                  <div style={{ padding: "2.6mm 3.6mm 1mm" }}>
+                    {row(L("New Purchase"), fmtMoney(n.subtotal))}
+                    {row(L("Rickshaw + Delivery"), fmtMoney(n.delivery))}
+                    {row(L("Discount"), `− ${fmtMoney(n.discount)}`)}
+                  </div>
+                  {sumBar(L("INVOICE TOTAL"), fmtMoney(n.total), { background: "#f1f5f9", borderTop: "1px solid #e2e8f0", borderBottom: "1px solid #e2e8f0", fontSize: "11.5px" })}
+                  {!n.cash && include.prevBalance !== false && (
+                    <>
+                      <div style={{ padding: "1.6mm 3.6mm 1mm" }}>{row(L("Previous Balance"), `+ ${fmtMoney(n.previous)}`)}</div>
+                      {sumBar(L("TOTAL"), fmtMoney(n.grand), { background: "#e0e7ff", color: "#1e3a8a", fontSize: "12.5px" })}
+                    </>
+                  )}
+                  <div style={{ padding: "1.6mm 3.6mm 1mm" }}>
+                    {row(L("Payment Received"), `− ${fmtMoney(n.paid)}`, { color: "#047857" })}
+                    {n.advance > 0 && row(`${L("Advance Applied")}${invoice.bookingRef ? ` (${invoice.bookingRef})` : ""}`, `− ${fmtMoney(n.advance)}`, { color: "#047857" })}
+                  </div>
+                  {sumBar(
+                    !n.cash && include.prevBalance !== false ? L("OUTSTANDING BALANCE") : L("Is bill ka baqi"),
+                    fmtMoney(!n.cash && include.prevBalance !== false ? n.outstanding : n.billDue),
+                    { background: `linear-gradient(90deg,${navy},#1e3a8a)`, color: "#fff", padding: "3mm 3.6mm", fontSize: "19px" },
+                    { color: "#93c5fd", fontSize: "8.5px" }
+                  )}
+                </div>
+              </div>
+            </div>
+
+            <div style={{ margin: "4mm 10mm 0", border: "1px solid #bfdbfe", background: "#eff6ff", borderRadius: "2mm", padding: "2.2mm", textAlign: "center", color: blue, fontWeight: 800, fontSize: "10.5px", ...INV_EXACT }}>
+              ⚠ {printBannerText(banner.text, urdu)}
+            </div>
+
+            {include.recvProof && recvProofs && recvProofs.length > 0 && (
+              <div style={{ padding: "4mm 10mm 0" }}>
+                <div style={k}>{L("Receiving Proof")}</div>
+                <div style={{ display: "flex", gap: "3mm", marginTop: "1.6mm", flexWrap: "wrap" }}>
+                  {recvProofs.slice(0, 3).map((p) => <img key={p.receiving_id} src={recvSafeImageSrc(p.proof_image)} alt="" style={{ height: "40mm", maxWidth: "60mm", objectFit: "contain", border: "1px solid #e2e8f0" }} />)}
+                </div>
+              </div>
+            )}
+
+            <div style={{ marginTop: "auto", padding: "8mm 10mm 4.6mm" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", gap: "6mm" }}>
+                <div style={{ fontSize: "8.5px", color: "#64748b", lineHeight: 1.7, maxWidth: "88mm" }}><b style={{ color: navy }}>{L("Terms")}:</b> {L("Maal check kar ke lein · wapsi sirf 7 din mein is bill ke saath · E. & O.E.")}</div>
+                {include.signature !== false && (
+                  <div style={{ display: "flex", gap: "6mm" }}>
+                    <div style={{ width: "38mm", textAlign: "center" }}><div style={{ height: "9mm" }} /><div style={{ borderTop: `1px solid ${navy}`, paddingTop: ".8mm", fontSize: "9px", color: "#475569" }}>{L("Customer signature")}</div></div>
+                    <div style={{ width: "38mm", textAlign: "center", position: "relative" }}>
+                      <div style={{ position: "absolute", insetInlineStart: "10mm", bottom: "4mm", width: "17mm", height: "17mm", borderRadius: "50%", border: "2px solid rgba(29,78,216,.45)", color: "rgba(29,78,216,.6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "5.5px", fontWeight: 800, textAlign: "center", transform: "rotate(-12deg)", lineHeight: 1.25, padding: "1mm" }}>{D(settings.companyName)}</div>
+                      <div style={{ height: "9mm" }} />
+                      <div style={{ borderTop: `1px solid ${navy}`, paddingTop: ".8mm", fontSize: "9px", color: "#475569" }}>{L("For")} {D(settings.companyName)}</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div style={{ background: navy, color: "#94a3b8", fontSize: "8.5px", padding: "2.4mm 10mm", display: "flex", justifyContent: "space-between", ...INV_EXACT }}>
+              <span>{L("Shukriya! · QR scan karke invoice check karein · Computer generated")}</span>
+              <span style={{ color: "#fff", fontWeight: 700 }}><PrintLtr>{invoice.number}</PrintLtr></span>
+            </div>
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+function size_full_guard() { return "full"; }
+
+/* ---------------- Thermal 80 / 58 ---------------- */
+
+function InvoiceThermalProDoc({ invoice, settings, size, include, copies, urdu, recvProofs }) {
+  const L = (k) => printL(k, urdu);
+  const D = (x) => printD(x, urdu);
+  const n = invProNumbers(invoice);
+  const small = size === "t58";
+  const time = invProTime(invoice);
+  const st = INV_PRO_STATUS[n.status];
+  const m = (x) => fmtMoney(x).replace("Rs ", "");
+  const rule = (thick) => <div style={{ borderTop: thick ? "2px solid #000" : "1px dashed #000", margin: "1.2mm 0" }} />;
+  const prevOn = !n.cash && include.prevBalance !== false;
+  return (
+    <div style={printDocStyle(size, urdu)}>
+      <PrintCopyWrap copies={copies} thermal>
+        {(copyLabel) => (
+          <div>
+            {settings.logoUrl && <div style={{ textAlign: "center" }}><img src={settings.logoUrl} alt="" style={{ width: small ? "10mm" : "13mm", height: small ? "10mm" : "13mm", objectFit: "contain", filter: "grayscale(1) contrast(1.3)" }} /></div>}
+            <div style={{ textAlign: "center", fontWeight: 800, fontSize: small ? "1.2em" : "1.35em" }}>{D(settings.companyName)}</div>
+            {!small && <div style={{ textAlign: "center", fontSize: ".82em", letterSpacing: urdu ? 0 : ".06em" }}>{L("CONSTRUCTION MATERIALS SUPPLIER")}</div>}
+            {!small && settings.companyAddress && <div style={{ textAlign: "center", fontSize: ".9em" }}>{D(settings.companyAddress)}</div>}
+            {settings.companyPhone && <div style={{ textAlign: "center", fontSize: ".9em" }}>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+            {rule(true)}
+            <div style={{ textAlign: "center", fontWeight: 800, letterSpacing: urdu ? 0 : ".1em" }}>{L(n.cash ? "CASH SALE" : "SALE INVOICE")}{n.cancelled ? ` — ${L("CANCELLED")}` : ""}</div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: ".8mm" }}>
+              <span style={{ background: "#000", color: "#fff", fontWeight: 800, padding: ".3mm 1.6mm", WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}><PrintLtr>{invoice.number}</PrintLtr></span>
+              <span>{copyLabel ? L(copyLabel) : L("ORIGINAL")}</span>
+            </div>
+            <PrintRow l={L("Date")} v={printDate(invoice.date, urdu)} />
+            {time && <PrintRow l={L("Time")} v={time} />}
+            {rule()}
+            {!small && <div style={{ fontWeight: 800 }}>{L("Bill To")}</div>}
+            <div style={{ fontWeight: 800, fontSize: small ? "1em" : "1.12em" }}>{D(invoice.customerName)}</div>
+            {invoice.customerPhone && <div><PrintLtr>{invoice.customerPhone}</PrintLtr></div>}
+            {!small && invoice.customerAddress && <div>{D(invoice.customerAddress)}</div>}
+            {include.issuedTo !== false && invoice.issuedTo && invoice.issuedTo.name && <div>{L("Material Issued To")}: {D(invoice.issuedTo.name)}</div>}
+            {invoice.bookingRef && <div>{L("Booking")}: <PrintLtr>{invoice.bookingRef}</PrintLtr></div>}
+            {rule(true)}
+            {!small && <PrintRow l={<b>{L("Item")}</b>} v={<b>{L("Amount")}</b>} />}
+            {!small && rule()}
+            {(invoice.items || []).map((it, i) => (
+              <div key={i} style={{ marginBottom: ".8mm" }}>
+                <div style={{ fontWeight: 700 }}>{small ? "" : `${i + 1}. `}{D(it.name)}</div>
+                <PrintRow lLtr l={`${fmtQty(it.qty)} ${D(it.unit || "")} x ${m(it.price)}`} v={<b>{m(it.total)}</b>} />
+              </div>
+            ))}
+            {rule(true)}
+            <PrintRow l={L(small ? "Purchase" : "New Purchase")} v={m(n.subtotal)} />
+            <PrintRow l={L(small ? "Rickshaw" : "Rickshaw + Delivery")} v={m(n.delivery)} />
+            <PrintRow l={L("Discount")} v={`-${m(n.discount)}`} />
+            <div style={{ borderTop: "1px solid #000", borderBottom: "1px solid #000", padding: ".4mm 0", margin: ".6mm 0" }}><PrintRow l={L("INVOICE TOTAL")} v={m(n.total)} bold /></div>
+            {prevOn && (
+              <>
+                <PrintRow l={L("Previous Balance")} v={`+${m(n.previous)}`} />
+                <div style={{ borderBottom: "1px dashed #000", paddingBottom: ".4mm" }}><PrintRow l={L("TOTAL")} v={m(n.grand)} bold /></div>
+              </>
+            )}
+            <PrintRow l={L("Payment Received")} v={`-${m(n.paid)}`} />
+            {n.advance > 0 && <PrintRow l={L("Advance Applied")} v={`-${m(n.advance)}`} />}
+            <div style={{ border: "1.5px solid #000", padding: small ? ".8mm 1mm" : "1.2mm 1.6mm", margin: "1.4mm 0" }}>
+              {small ? (
+                <>
+                  <div style={{ textAlign: "center", fontWeight: 800, fontSize: ".85em" }}>{prevOn ? L("OUTSTANDING") : L("Is bill ka baqi")}</div>
+                  <div style={{ textAlign: "center", fontWeight: 800, fontSize: "1.45em" }}><PrintLtr>{fmtMoney(prevOn ? n.outstanding : n.billDue)}</PrintLtr></div>
+                </>
+              ) : <PrintRow l={prevOn ? L("OUTSTANDING") : L("Is bill ka baqi")} v={fmtMoney(prevOn ? n.outstanding : n.billDue)} bold big />}
+            </div>
+            <div style={{ textAlign: "center", fontSize: ".9em" }}>{prevOn && n.billDue > 0.5 ? <>{L("Is bill ka baqi")}: <PrintLtr>{m(n.billDue)}</PrintLtr> · </> : null}{urdu ? st.ur : n.status.toUpperCase()}</div>
+            {include.delivery !== false && (invoice.driverName || invoice.vehicleNumber || n.delivery > 0) && (
+              <>
+                {rule()}
+                {!small && <div style={{ fontWeight: 800 }}>{L("DELIVERY")}</div>}
+                <div style={{ fontSize: small ? ".9em" : "1em" }}>{[invoice.vehicleType && D(invoice.vehicleType), invoice.vehicleNumber, invoice.driverName && D(invoice.driverName)].filter(Boolean).join(" · ") || "-"}</div>
+                {!small && <div>{[invoice.driverId, `${L("Rent")} ${m(invoice.rickshawRent || 0)}`, invoice.receivedBy && `${L("Recv")}: ${D(invoice.receivedBy)}`].filter(Boolean).join(" · ")}</div>}
+              </>
+            )}
+            {!small && <>{rule()}<div style={{ textAlign: "center", fontSize: ".9em" }}>{printWords(n.total, urdu)}</div></>}
+            {include.recvProof && recvProofs && recvProofs.length > 0 && (
+              <>{rule()}<div style={{ textAlign: "center", fontWeight: 700 }}>{L("Receiving Proof")}</div>{recvProofs.map((p) => <img key={p.receiving_id} src={recvSafeImageSrc(p.proof_image)} alt="" style={PRINT_THERMAL_IMG} />)}</>
+            )}
+            {include.qr !== false && (
+              <>
+                <div style={{ display: "flex", justifyContent: "center", marginTop: "2mm" }}><QrSvg text={invoiceQrText(invoice, settings)} sizeMm={small ? 22 : 28} /></div>
+                <div style={{ textAlign: "center", fontSize: ".85em" }}>{L(small ? "Scan = invoice check" : "Scan karke invoice check karein")}</div>
+              </>
+            )}
+            {include.signature !== false && (
+              <div style={{ textAlign: "center", marginTop: "7mm" }}>
+                <div style={{ borderTop: "1px solid #000", width: small ? "80%" : "70%", margin: "0 auto" }} />
+                <div style={{ fontSize: ".9em" }}>{L("Customer signature")}</div>
+              </div>
+            )}
+            {!small && <>{rule()}<div style={{ textAlign: "center", fontSize: ".85em" }}>{L("Maal check kar ke lein · wapsi 7 din mein is bill ke saath · E. & O.E.")}</div></>}
+            <div style={{ textAlign: "center", fontWeight: 800, marginTop: "1mm" }}>*** {L("Shukriya!")} ***</div>
+          </div>
+        )}
+      </PrintCopyWrap>
+    </div>
+  );
+}
+
+Object.entries({
+  "Credit customer": "ادھار کسٹمر", "ORIGINAL": "اصل", "Time": "وقت", "Payment status": "ادائیگی کی صورتحال", "Status": "حالت", "Paid": "ادا شدہ",
+  "Is bill ka baqi": "اس بل کا بقایا", "SCAN · VERIFY": "اسکین · تصدیق", "Total": "کل", "item": "آئٹم", "items": "آئٹمز", "Vehicle": "گاڑی",
+  "Amount in words (this purchase)": "رقم الفاظ میں (یہ خریداری)", "INVOICE TOTAL": "انوائس کل", "TOTAL": "کل رقم", "OUTSTANDING BALANCE": "کل بقایا",
+  "OUTSTANDING": "کل بقایا", "Terms": "شرائط", "Maal check kar ke lein · wapsi sirf 7 din mein is bill ke saath · E. & O.E.": "مال چیک کر کے لیں · واپسی صرف 7 دن میں اس بل کے ساتھ",
+  "Maal check kar ke lein · wapsi 7 din mein is bill ke saath · E. & O.E.": "مال چیک کر کے لیں · واپسی 7 دن میں اس بل کے ساتھ",
+  "Customer signature": "گاہک کے دستخط", "For": "منجانب", "Shukriya! · QR scan karke invoice check karein · Computer generated": "شکریہ! · QR اسکین کر کے انوائس چیک کریں · کمپیوٹر سے تیار",
+  "Purchase": "خریداری", "Rickshaw": "رکشہ", "DELIVERY": "ڈیلیوری", "Rent": "کرایہ", "Recv": "وصول", "Scan = invoice check": "اسکین = انوائس چیک",
+  "Scan karke invoice check karein": "اسکین کر کے انوائس چیک کریں", "Shukriya!": "شکریہ!", "Payment Received": "وصول شدہ ادائیگی",
+}).forEach(([en, ur]) => { if (!PRINT_URDU[en]) PRINT_URDU[en] = ur; });
 
 /* ============================================================
    STARTUP SCREEN (built in — no separate StartupScreen.jsx file)
@@ -14030,6 +14520,17 @@ Object.entries(FIN_URDU).forEach(([en, ur]) => {
 
 const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [], urduDict: {} };
 const finListeners = new Set();
+// Full (all-branch) copies; finState holds the active branch's view.
+const finRaw = {};
+const FIN_BR_ARRAYS = ["vouchers", "closings", "moves", "portalPay", "portalMsgs", "employees", "attendance", "leaves", "advances", "salarySheets", "creditLog", "creditRequests"];
+function finBrView(name, v) {
+  return FIN_BR_ARRAYS.includes(name) && typeof brScopeList === "function" ? brScopeList(v, brScope, name) : v;
+}
+function finRescope() {
+  if (!finState.loaded) return;
+  FIN_BR_ARRAYS.forEach((n) => { if (finRaw[n]) finState[n] = finBrView(n, finRaw[n]); });
+  Promise.resolve().then(finEmit);
+}
 let finLoadPromise = null;
 let finChannel = null;
 
@@ -14058,7 +14559,7 @@ function finLoad() {
   finLoadPromise = (async () => {
     const names = Object.keys(FIN_KEYS);
     const values = await Promise.all(names.map((n) => storeGet(FIN_KEYS[n], null).catch(() => null)));
-    names.forEach((n, i) => { finState[n] = finNormalize(n, values[i]); });
+    names.forEach((n, i) => { finRaw[n] = finNormalize(n, values[i]); finState[n] = finBrView(n, finRaw[n]); });
     finState.loaded = true;
     finEmit();
     if (supabase && !finChannel) {
@@ -14069,7 +14570,9 @@ function finLoad() {
         .on("postgres_changes", { event: "*", schema: "public", table: "kv_store" }, (payload) => {
           const row = payload.new;
           if (!row || !byKey[row.key]) return;
-          finState[byKey[row.key]] = finNormalize(byKey[row.key], row.value);
+          const nm = byKey[row.key];
+          finRaw[nm] = finNormalize(nm, row.value);
+          finState[nm] = finBrView(nm, finRaw[nm]);
           finEmit();
         })
         .subscribe();
@@ -14090,14 +14593,16 @@ function useFin() {
 }
 
 // Read-modify-write against the latest saved copy.
-async function finMutate(name, fn) {
-  let latest = finState[name];
+async function finMutate(name, fn, all) {
+  let latest = finRaw[name] !== undefined ? finRaw[name] : finState[name];
   try {
     const remote = await storeGet(FIN_KEYS[name], null);
     if (remote != null) latest = finNormalize(name, remote);
   } catch {}
-  const next = fn(latest);
-  finState[name] = next;
+  const scoped = !all && FIN_BR_ARRAYS.includes(name) && brScope;
+  const next = scoped ? brMerge(latest, fn(brScopeList(latest, brScope, name)), brScope, name) : fn(latest);
+  finRaw[name] = next;
+  finState[name] = finBrView(name, next);
   finEmit();
   await storeSet(FIN_KEYS[name], next);
   return next;
@@ -18511,6 +19016,7 @@ function hrPermsOf(user) {
 }
 function hrPageAllowed(user, pageId) {
   if (!user) return false;
+  if (pageId === "branches") return brIsSuper(user);
   if (pageId === "myHr") return !!user.employeeId;
   if (user.role === "admin") return true;
   if (!user.employeeId) return !HR_MANAGE_PAGES.includes(pageId);
@@ -18527,6 +19033,7 @@ function hrAllow(user, perm) {
 // Sidebar / search use this (set by App on every render).
 let hrNavUser = null;
 function hrNavOk(it, role) {
+  if (it.superOnly) return brIsSuper(hrNavUser);
   if (role === "admin" && it.id !== "myHr") return true;
   if (it.adminOnly) return false;
   return hrPageAllowed(hrNavUser || { role }, it.id);
@@ -19142,7 +19649,7 @@ function HrLoading() { return <div className="ct-card p-10 text-center ct-t2">{t
 function HrAccessMatrix({ perms, onChange }) {
   const has = (id) => perms.includes(id);
   const toggle = (id) => onChange(has(id) ? perms.filter((p) => p !== id) : [...perms, id]);
-  const groups = NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((it) => !it.adminOnly && it.id !== "myHr") })).filter((g) => g.items.length);
+  const groups = NAV_GROUPS.map((g) => ({ ...g, items: g.items.filter((it) => !it.adminOnly && !it.superOnly && it.id !== "myHr") })).filter((g) => g.items.length);
   return (
     <div className="space-y-3">
       {groups.map((g) => (
@@ -22496,6 +23003,364 @@ function CustomerBalanceVerifyView({ customerId, customers, invoices, payments, 
       <div className="text-[30px] font-black tracking-tight">{fmtMoney(Math.abs(outstanding))} <span className="text-[14px] text-slate-500">{outstanding < -0.5 ? "Cr (advance)" : "Dr"}</span></div>
       <div className="text-[12px] text-slate-400 mt-3">Full ledger is visible to the customer in the portal and to staff.</div>
     </VerifyShell>
+  );
+}
+
+/* ============================================================
+   MULTI-BRANCH
+   ------------------------------------------------------------
+   Every record belongs to one branch (record.branchId; empty or
+   "branch_main" = Main Branch). The App keeps the full lists and
+   hands every page a view filtered to the active branch; persist
+   merges the view back so other branches are never touched.
+   - Branch admin / staff (user.branchId) → always their branch.
+   - Super admin (admin of Main) → Main, or any branch opened from
+     the Branches page ("view as branch").
+   - Branch settings (logo, name, address, counters, invoice
+     prefix) live on branch.settings and override the main ones.
+   ============================================================ */
+
+const BR_MAIN = "branch_main";
+let brScope = null;        // null = no filtering (login screen, public verify)
+let brCustBranch = {};     // customerId → branchId (for older records without branchId)
+let brBypass = false;      // backup restore writes full lists
+
+const BR_COUNTERS = { invoiceCounter: 1, driverCounter: 1, bookingCounter: 1, orderCounter: 1, returnCounter: 1, exchangeCounter: 1, creditNoteCounter: 1, promiseCounter: 1, transferCounter: 1, adjustmentCounter: 1, commissionAgentCounter: 1 };
+
+function brNorm(id) { return !id || id === BR_MAIN ? BR_MAIN : String(id); }
+function brOfRec(rec, kind) {
+  if (!rec || typeof rec !== "object") return BR_MAIN;
+  if (rec.branchId) return brNorm(rec.branchId);
+  if (kind !== "customers" && kind !== "users") {
+    const cid = rec.customerId || rec.fromCustomerId;
+    if (cid && brCustBranch[cid]) return brCustBranch[cid];
+  }
+  return BR_MAIN;
+}
+function brScopeList(list, scope, kind) {
+  if (!scope || !Array.isArray(list)) return list;
+  return list.filter((r) => brOfRec(r, kind) === scope);
+}
+function brMerge(all, view, scope, kind) {
+  if (!scope || brBypass || !Array.isArray(view)) return view;
+  const viewIds = new Set(view.map((r) => r && r.id).filter(Boolean));
+  const outside = (all || []).filter((r) => brOfRec(r, kind) !== scope && !(r && r.id && viewIds.has(r.id)));
+  const stamped = view.map((r) => (r && typeof r === "object" && !r.branchId && scope !== BR_MAIN ? { ...r, branchId: scope } : r));
+  return [...outside, ...stamped];
+}
+function brCustMap(customers) {
+  const m = {};
+  (customers || []).forEach((c) => { if (c && c.id) m[c.id] = brNorm(c.branchId); });
+  return m;
+}
+function brIsSuper(u) { return !!u && u.role === "admin" && brNorm(u.branchId) === BR_MAIN; }
+function brScopeFor(user, viewId, customersAll, branches) {
+  if (!user) return null;
+  if (user.role === "customer") {
+    const c = (customersAll || []).find((x) => x.id === user.id);
+    return brNorm(c && c.branchId);
+  }
+  const own = brNorm(user.branchId);
+  if (own !== BR_MAIN) return own;
+  if (user.role === "admin" && viewId && viewId !== BR_MAIN && (branches || []).some((b) => b.id === viewId)) return viewId;
+  return BR_MAIN;
+}
+function brSetScope(s) {
+  if (s === brScope) return;
+  brScope = s;
+  if (typeof finRescope === "function") finRescope();
+}
+function brSettingsFor(all, branches, scope) {
+  if (!scope || scope === BR_MAIN) return all;
+  const b = (branches || []).find((x) => x.id === scope);
+  if (!b) return all;
+  return { ...all, ...BR_COUNTERS, companyName: b.name || all.companyName, companyAddress: b.address || "", companyPhone: b.phone || "", logoUrl: b.logoUrl || "", invoicePrefix: b.invoicePrefix || "", ...(b.settings || {}) };
+}
+function brLabelFor(scope, branches, settingsAll) {
+  if (!scope || scope === BR_MAIN) return (settingsAll && settingsAll.companyName) || t("Main Branch");
+  const b = (branches || []).find((x) => x.id === scope);
+  return (b && ((b.settings && b.settings.companyName) || b.name)) || t("Branch");
+}
+function brPrefixFrom(name) {
+  const w = String(name || "").replace(/[^A-Za-z ]/g, " ").trim().split(/\s+/).filter(Boolean);
+  const p = (w.length >= 2 ? w.slice(0, 3).map((x) => x[0]).join("") : (w[0] || "BR").slice(0, 3)).toUpperCase();
+  return (p || "BR") + "-";
+}
+function brPhoneKey(p) { const d = String(p || "").replace(/\D/g, ""); return d.length >= 10 ? d.slice(-10) : ""; }
+function brShortMoney(n) {
+  const v = Number(n) || 0, a = Math.abs(v);
+  if (a >= 10000000) return (v / 10000000).toFixed(1).replace(/\.0$/, "") + " Cr";
+  if (a >= 100000) return (v / 100000).toFixed(1).replace(/\.0$/, "") + " L";
+  return Math.round(v).toLocaleString("en-PK");
+}
+function brResizeLogo(file, cb) {
+  const r = new FileReader();
+  r.onload = () => {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, 320 / Math.max(img.width, img.height));
+      const c = document.createElement("canvas");
+      c.width = Math.round(img.width * s); c.height = Math.round(img.height * s);
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      cb(c.toDataURL("image/png"));
+    };
+    img.src = r.result;
+  };
+  r.readAsDataURL(file);
+}
+
+const BR_COLORS = ["#2563eb", "#059669", "#7c3aed", "#d97706", "#db2777", "#0891b2", "#4f46e5", "#65a30d"];
+
+function BrLogo({ url, name, color, size = 46 }) {
+  if (url) return <img src={url} alt="" className="rounded-xl object-contain bg-white shrink-0" style={{ width: size, height: size }} />;
+  return <div className="rounded-xl flex items-center justify-center text-white font-black shrink-0" style={{ width: size, height: size, background: color, fontSize: size * 0.34 }}>{uiInitials(name, "BR")}</div>;
+}
+
+/* ---------- Banner shown while the super admin is inside a branch ---------- */
+function BranchViewBanner({ scope, branches, onBack }) {
+  useLanguage();
+  if (!scope || scope === BR_MAIN) return null;
+  const b = (branches || []).find((x) => x.id === scope);
+  return (
+    <div className="print:hidden flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-2 text-white text-[13px] font-bold" style={{ background: "linear-gradient(90deg,#b45309,#d97706)" }} data-branch-banner={scope}>
+      <span>👁 {t("Aap")} <u>{b ? b.name : scope}</u> {t("branch dekh rahe hain — yahan sab kuch is branch ka hai")}</span>
+      <button type="button" onClick={onBack} className="rounded-lg bg-white text-amber-800 px-3 py-1 text-[12px] font-extrabold">⟵ {t("Wapas Main Branch")}</button>
+    </div>
+  );
+}
+
+/* ---------- Per-branch numbers ---------- */
+function brStats(scope, raw) {
+  const pick = (k) => brScopeList(raw[k] || [], scope, k);
+  const customers = pick("customers"), invoices = pick("invoices"), payments = pick("payments");
+  const returns = pick("returns"), exchanges = pick("exchanges"), promises = pick("promises"), transfers = pick("transfers"), adjustments = pick("adjustments");
+  const today = todayISO(), month = today.slice(0, 7);
+  const live = invoices.filter((i) => !isInvoiceCancelled(i));
+  const livePay = payments.filter((p) => !isPaymentLinkedToCancelledInvoice(p, invoices) && p.kind !== "Refund");
+  const out = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  const udhaar = Object.values(out).reduce((s, v) => s + Math.max(0, Number(v) || 0), 0);
+  const sum = (l, f) => l.reduce((s, x) => s + (Number(x[f]) || 0), 0);
+  return {
+    customers, out,
+    todaySale: sum(live.filter((i) => i.date === today), "total"),
+    monthSale: sum(live.filter((i) => String(i.date).slice(0, 7) === month), "total"),
+    todayCash: sum(livePay.filter((p) => p.date === today), "amount"),
+    monthCash: sum(livePay.filter((p) => String(p.date).slice(0, 7) === month), "amount"),
+    todayCount: live.filter((i) => i.date === today).length,
+    monthCount: live.filter((i) => String(i.date).slice(0, 7) === month).length,
+    udhaar,
+    staff: brScopeList(raw.users || [], scope, "users").filter((u) => u.role !== "customer").length,
+    products: pick("products"),
+  };
+}
+
+/* ---------- Branches page (super admin only) ---------- */
+function BranchesPage({ currentUser, raw, branches, settingsAll, onOpen, onSaveBranch, onToggleBranch }) {
+  useLanguage();
+  const [tab, setTab] = useState("cards");
+  const [form, setForm] = useState(null);
+  if (!brIsSuper(currentUser)) return <HrNoAccess />;
+  const list = [
+    { id: BR_MAIN, name: settingsAll.companyName || "Main Branch", address: settingsAll.companyAddress, logoUrl: settingsAll.logoUrl, isMain: true, color: BR_COLORS[0] },
+    ...(branches || []).filter((b) => b.id !== BR_MAIN).map((b, i) => ({ ...b, name: (b.settings && b.settings.companyName) || b.name, address: (b.settings && b.settings.companyAddress) || b.address, logoUrl: (b.settings && b.settings.logoUrl) || b.logoUrl, color: BR_COLORS[(i + 1) % BR_COLORS.length] })),
+  ];
+  const stats = {};
+  list.forEach((b) => { stats[b.id] = brStats(b.id, raw); });
+  const adminOf = (b) => (raw.users || []).find((u) => (b.isMain ? brIsSuper(u) : u.id === b.adminUserId || (u.role === "admin" && u.branchId === b.id)));
+  const totalToday = list.reduce((s, b) => s + stats[b.id].todaySale, 0);
+
+  // Products & rates side by side (matched by name)
+  const prodRows = (() => {
+    const m = new Map();
+    list.forEach((b) => stats[b.id].products.forEach((p) => {
+      const k = String(p.name || "").trim().toLowerCase();
+      if (!k) return;
+      if (!m.has(k)) m.set(k, { name: p.name, unit: p.unit, rates: {} });
+      m.get(k).rates[b.id] = p.price;
+    }));
+    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name));
+  })();
+
+  // Same customer (same phone) in more than one branch
+  const multi = (() => {
+    const m = new Map();
+    list.forEach((b) => stats[b.id].customers.forEach((c) => {
+      const k = brPhoneKey(c.phone);
+      if (!k) return;
+      if (!m.has(k)) m.set(k, { name: c.name, phone: c.phone, per: {} });
+      const e = m.get(k);
+      e.per[b.id] = (e.per[b.id] || 0) + Math.max(0, Number(stats[b.id].out[c.id]) || 0);
+    }));
+    return [...m.values()].filter((e) => Object.keys(e.per).length > 1)
+      .map((e) => ({ ...e, total: Object.values(e.per).reduce((s, v) => s + v, 0) }))
+      .sort((a, b) => b.total - a.total);
+  })();
+
+  function openNew() {
+    setForm({ id: "", name: "", address: "", phone: "", logoUrl: "", invoicePrefix: "", adminName: "", username: "", password: "", status: "Active" });
+  }
+  function openEdit(b) {
+    const a = adminOf(b);
+    setForm({ id: b.id, name: b.name, address: b.address || "", phone: (b.settings && b.settings.companyPhone) || b.phone || "", logoUrl: b.logoUrl || "",
+      invoicePrefix: (b.settings && b.settings.invoicePrefix) || b.invoicePrefix || "", adminName: a ? a.name || "" : "", username: a ? a.username : "", password: a ? a.password : "", adminId: a ? a.id : "", status: b.status || "Active" });
+  }
+  function submit() {
+    const f = form;
+    if (!f.name.trim()) return alert(t("Branch ka naam likhein."));
+    if (!f.username.trim() || !f.password.trim()) return alert(t("Branch admin ka username aur password zaroori hai."));
+    const taken = (raw.users || []).some((u) => u.username.trim().toLowerCase() === f.username.trim().toLowerCase() && u.id !== f.adminId);
+    if (taken) return alert(t("Ye username pehle se maujood hai."));
+    const prefix = (f.invoicePrefix.trim() || brPrefixFrom(f.name)).toUpperCase().replace(/\s+/g, "");
+    const usedPrefix = list.some((b) => b.id !== f.id && ((b.isMain ? (settingsAll.invoicePrefix || "CT-") : ((b.settings && b.settings.invoicePrefix) || b.invoicePrefix || "")).toUpperCase() === prefix));
+    if (usedPrefix) return alert(t("Ye invoice prefix kisi aur branch ka hai — doosra likhein."));
+    const prev = (branches || []).find((b) => b.id === f.id);
+    const id = f.id || uid("branch");
+    const company = { companyName: f.name.trim(), companyAddress: f.address.trim(), companyPhone: f.phone.trim(), logoUrl: f.logoUrl || "", invoicePrefix: prefix };
+    const branch = {
+      ...(prev || {}), id, name: f.name.trim(), address: f.address.trim(), phone: f.phone.trim(), logoUrl: f.logoUrl || "", invoicePrefix: prefix, status: f.status || "Active",
+      settings: prev ? { ...(prev.settings || {}), ...company } : { ...BR_COUNTERS, ...company },
+      createdAt: (prev && prev.createdAt) || new Date().toISOString(),
+    };
+    const admin = { ...((raw.users || []).find((u) => u.id === f.adminId) || {}), id: f.adminId || uid("u"), username: f.username.trim(), password: f.password.trim(), name: f.adminName.trim() || f.username.trim(), role: "admin", branchId: id };
+    branch.adminUserId = admin.id;
+    onSaveBranch(branch, admin);
+    setForm(null);
+  }
+
+  const card = (b) => {
+    const s = stats[b.id];
+    const a = adminOf(b);
+    const frozen = b.status === "Frozen";
+    return (
+      <div key={b.id} className={`ct-card p-4 relative ${b.isMain ? "ring-2 ring-blue-500/60" : ""}`} data-branch-card={b.id}>
+        <div className="flex items-center gap-3">
+          <BrLogo url={b.logoUrl} name={b.name} color={b.color} />
+          <div className="min-w-0">
+            <div className="font-black ct-h truncate">{b.name}</div>
+            <div className="text-[12px] ct-t3 truncate">{b.isMain ? t("Main Branch") : ""}{b.isMain && b.address ? " · " : ""}{b.address}</div>
+          </div>
+          <span className={`ms-auto text-[10px] font-extrabold tracking-wide px-2 py-0.5 rounded-md ${b.isMain ? "bg-blue-500/15 text-blue-500" : frozen ? "bg-rose-500/15 text-rose-500" : "bg-emerald-500/15 text-emerald-500"}`}>{b.isMain ? "MAIN" : frozen ? t("BAND") : "ACTIVE"}</span>
+        </div>
+        <div className="grid grid-cols-3 gap-2 my-3">
+          <div className="rounded-lg ct-chip p-2"><div className="text-[10px] uppercase ct-t3 font-bold">{t("Aaj sale")}</div><div className="font-black ct-h">{brShortMoney(s.todaySale)}</div></div>
+          <div className="rounded-lg ct-chip p-2"><div className="text-[10px] uppercase ct-t3 font-bold">{t("Udhaar")}</div><div className="font-black text-rose-500">{brShortMoney(s.udhaar)}</div></div>
+          <div className="rounded-lg ct-chip p-2"><div className="text-[10px] uppercase ct-t3 font-bold">{t("Aaj cash")}</div><div className="font-black text-emerald-500">{brShortMoney(s.todayCash)}</div></div>
+        </div>
+        <div className="text-[12px] ct-t3 mb-3">{t("Admin")}: <b className="ct-t2">{a ? a.name || a.username : "—"}</b> · {s.staff} {t("staff")} · {s.customers.length} {t("customers")}</div>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => onOpen(b.isMain ? "" : b.id)} className="flex-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-extrabold text-[13px] py-2" data-open-branch={b.id}>{b.isMain ? t("Main Branch kholein") : t("Open Branch")} →</button>
+          {!b.isMain && <button type="button" onClick={() => openEdit(b)} className="rounded-lg ct-chip ct-t2 font-bold text-[13px] px-3">{t("Edit")}</button>}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div>
+      <FinPageHead title="Branches" sub={`${list.length} ${t("branches")} · ${t("aaj ki total sale")} ${fmtMoney(totalToday)}`}
+        right={<Btn onClick={openNew}>+ {t("New Branch")}</Btn>} />
+      <div className="mb-3"><FinTabs value={tab} onChange={setTab} tabs={[
+        { id: "cards", label: "Branches" }, { id: "compare", label: "Muqabla (is mahine)" },
+        { id: "rates", label: "Products & Rates", count: prodRows.length }, { id: "multi", label: "Mushtarka customers", count: multi.length },
+      ]} /></div>
+
+      {tab === "cards" && <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">{list.map(card)}</div>}
+
+      {tab === "compare" && (
+        <section className="ct-card p-4 overflow-x-auto">
+          <table className="w-full text-[13px] min-w-[720px]">
+            <thead><tr className="ct-t3 text-[11px] uppercase">{["Branch", "Sale (mahina)", "Wasooli (mahina)", "Invoices", "Aaj sale", "Total udhaar"].map((h, i) => <th key={i} className={`py-2 pe-3 font-bold ${i ? "text-end" : "text-start"}`}>{t(h)}</th>)}</tr></thead>
+            <tbody>
+              {list.map((b) => { const s = stats[b.id]; const best = Math.max(...list.map((x) => stats[x.id].monthSale)); return (
+                <tr key={b.id} className="border-t border-slate-200/60">
+                  <td className="py-2.5 pe-3"><div className="flex items-center gap-2"><BrLogo url={b.logoUrl} name={b.name} color={b.color} size={28} /><b className="ct-h">{b.name}</b></div>
+                    <div className="h-1.5 rounded-full bg-slate-400/20 mt-1.5 w-40"><div className="h-1.5 rounded-full" style={{ width: `${best ? (s.monthSale / best) * 100 : 0}%`, background: b.color }} /></div></td>
+                  <td className="py-2.5 pe-3 text-end font-bold ct-h">{fmtMoney(s.monthSale)}</td>
+                  <td className="py-2.5 pe-3 text-end text-emerald-500 font-bold">{fmtMoney(s.monthCash)}</td>
+                  <td className="py-2.5 pe-3 text-end">{s.monthCount}</td>
+                  <td className="py-2.5 pe-3 text-end">{fmtMoney(s.todaySale)}</td>
+                  <td className="py-2.5 pe-3 text-end text-rose-500 font-bold">{fmtMoney(s.udhaar)}</td>
+                </tr>); })}
+              <tr className="border-t-2 border-slate-300/60 font-black ct-h">
+                <td className="py-2.5 pe-3">{t("Total")}</td>
+                {["monthSale", "monthCash", "monthCount", "todaySale", "udhaar"].map((k) => <td key={k} className="py-2.5 pe-3 text-end">{k === "monthCount" ? list.reduce((s, b) => s + stats[b.id][k], 0) : fmtMoney(list.reduce((s, b) => s + stats[b.id][k], 0))}</td>)}
+              </tr>
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {tab === "rates" && (
+        <section className="ct-card p-4 overflow-x-auto">
+          <div className="text-[12.5px] ct-t3 mb-2">{t("Har branch apne products aur rate khud rakhti hai. Ye sirf dekhne ke liye hai.")}</div>
+          {prodRows.length === 0 ? <FinEmpty text="Koi product nahi." /> : (
+            <table className="w-full text-[13px]">
+              <thead><tr className="ct-t3 text-[11px] uppercase"><th className="py-2 pe-3 text-start font-bold">{t("Product")}</th>{list.map((b) => <th key={b.id} className="py-2 pe-3 text-end font-bold">{b.name}</th>)}</tr></thead>
+              <tbody>{prodRows.map((r) => {
+                const vals = list.map((b) => r.rates[b.id]).filter((v) => v != null).map(Number);
+                const lo = Math.min(...vals), hi = Math.max(...vals);
+                return (
+                  <tr key={r.name} className="border-t border-slate-200/60">
+                    <td className="py-2 pe-3 font-bold ct-h">{r.name} <span className="ct-t3 font-normal text-[11px]">{r.unit}</span></td>
+                    {list.map((b) => { const v = r.rates[b.id]; return <td key={b.id} className={`py-2 pe-3 text-end ${v == null ? "ct-t3" : vals.length > 1 && lo !== hi && Number(v) === lo ? "text-emerald-500 font-bold" : vals.length > 1 && lo !== hi && Number(v) === hi ? "text-rose-500 font-bold" : "ct-h"}`}>{v == null ? "—" : Number(v).toLocaleString("en-PK")}</td>; })}
+                  </tr>);
+              })}</tbody>
+            </table>
+          )}
+        </section>
+      )}
+
+      {tab === "multi" && (
+        <section className="ct-card p-4 overflow-x-auto">
+          <div className="text-[12.5px] ct-t3 mb-2">{t("Jo customer (same phone) aik se zyada branch se maal leta hai. Har branch ka khata alag hai — total sirf aapko dikhta hai.")}</div>
+          {multi.length === 0 ? <FinEmpty text="Abhi koi customer aik se zyada branch mein nahi." /> : (
+            <table className="w-full text-[13px]">
+              <thead><tr className="ct-t3 text-[11px] uppercase"><th className="py-2 pe-3 text-start font-bold">{t("Customer")}</th>{list.map((b) => <th key={b.id} className="py-2 pe-3 text-end font-bold">{b.name}</th>)}<th className="py-2 pe-3 text-end font-bold">{t("Total")}</th></tr></thead>
+              <tbody>{multi.map((e) => (
+                <tr key={e.phone} className="border-t border-slate-200/60">
+                  <td className="py-2 pe-3"><b className="ct-h">{e.name}</b><div className="text-[11px] ct-t3">{e.phone}</div></td>
+                  {list.map((b) => <td key={b.id} className={`py-2 pe-3 text-end ${e.per[b.id] == null ? "ct-t3" : "text-rose-500 font-bold"}`}>{e.per[b.id] == null ? "—" : fmtMoney(e.per[b.id])}</td>)}
+                  <td className="py-2 pe-3 text-end font-black ct-h">{fmtMoney(e.total)}</td>
+                </tr>))}</tbody>
+            </table>
+          )}
+        </section>
+      )}
+
+      {form && (
+        <Modal title={form.id ? t("Branch edit") : t("Nayi Branch")} onClose={() => setForm(null)}>
+          <div className="flex items-center gap-3 mb-3">
+            <BrLogo url={form.logoUrl} name={form.name || "BR"} color={BR_COLORS[1]} size={56} />
+            <label className="rounded-lg ct-chip ct-t2 font-bold text-[13px] px-3 py-2 cursor-pointer">{t("Logo lagayein")}
+              <input type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) brResizeLogo(f, (u) => setForm((x) => ({ ...x, logoUrl: u }))); }} />
+            </label>
+            {form.logoUrl && <button type="button" className="text-[12px] font-bold text-rose-500" onClick={() => setForm({ ...form, logoUrl: "" })}>{t("Hatayein")}</button>}
+          </div>
+          <Field label={t("Branch / Company naam")}><input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value, invoicePrefix: form.id || form.prefixTouched ? form.invoicePrefix : brPrefixFrom(e.target.value) })} data-f="br-name" /></Field>
+          <Field label={t("Address")}><input className={inputCls} value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} data-f="br-address" /></Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label={t("Phone / WhatsApp")}><input className={inputCls} value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} /></Field>
+            <Field label={t("Invoice number prefix")}><input className={inputCls} value={form.invoicePrefix} onChange={(e) => setForm({ ...form, invoicePrefix: e.target.value.toUpperCase(), prefixTouched: true })} placeholder="FSD-" data-f="br-prefix" /></Field>
+          </div>
+          <div className="rounded-xl ct-chip p-3 mt-1 mb-3">
+            <div className="text-[11px] uppercase font-extrabold ct-t3 mb-2">{t("Branch Admin (login)")}</div>
+            <Field label={t("Naam")}><input className={inputCls} value={form.adminName} onChange={(e) => setForm({ ...form, adminName: e.target.value })} data-f="br-admin" /></Field>
+            <div className="grid grid-cols-2 gap-3">
+              <Field label={t("Username")}><input className={inputCls} value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} data-f="br-user" /></Field>
+              <Field label={t("Password")}><input className={inputCls} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} data-f="br-pass" /></Field>
+            </div>
+          </div>
+          {form.id && (
+            <label className="flex items-center gap-2 text-[13px] font-bold ct-t2 mb-3">
+              <input type="checkbox" checked={form.status === "Frozen"} onChange={(e) => setForm({ ...form, status: e.target.checked ? "Frozen" : "Active" })} />
+              {t("Branch band karein (is branch ke users login nahi kar sakenge)")}
+            </label>
+          )}
+          <div className="text-[12px] ct-t3 mb-3">{t("Branch ke customers, invoices, payments, products/rates, stock, kharcha aur staff sab alag rahenge. Branch admin apni settings, logo aur address khud badal sakta hai.")}</div>
+          <div className="flex gap-2"><Btn onClick={submit}>{form.id ? t("Save") : t("Branch banayein")}</Btn><Btn variant="ghost" onClick={() => setForm(null)}>{t("Cancel")}</Btn></div>
+        </Modal>
+      )}
+    </div>
   );
 }
 
