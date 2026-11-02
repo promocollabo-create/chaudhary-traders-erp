@@ -1659,6 +1659,21 @@ function Login({ users, customers, onLogin, companyName, logoUrl, onResetUsers }
   const [resetMsg, setResetMsg] = useState("");
   const [failCount, setFailCount] = useState(0);
   const [showPass, setShowPass] = useState(false);
+  // Signed in online already (secure login screen) → open the app straight away.
+  useEffect(() => {
+    const a = typeof window !== "undefined" ? window.__ctAutoLogin : null;
+    if (!a) return;
+    window.__ctAutoLogin = null;
+    const uname = String(a.username || "").toLowerCase();
+    if (a.role === "staff") {
+      const u = users.find((x) => String(x.username || "").toLowerCase() === uname);
+      if (u) { onLogin(u); return; }
+    }
+    if (a.role === "customer") {
+      const c = customers.find((x) => x.id === a.customerId);
+      if (c) { onLogin({ id: c.id, name: c.name, role: "customer", username: c.portalUsername }); return; }
+    }
+  }, []);
 
   function submit() {
     const uname = username.trim().toLowerCase();
@@ -1828,23 +1843,29 @@ function computeLedgerForCustomer(customer, invoices, payments, returns = [], ex
   const entries = [];
   invoices
     .filter((i) => i.customerId === customer.id && !isInvoiceCancelled(i))
-    .forEach((inv) =>
+    .forEach((inv) => {
       entries.push({
         date: inv.date, type: "Invoice", ref: inv.number, debit: inv.total, credit: 0, id: inv.id,
         qty: roundQty((inv.items || []).reduce((s, it) => s + (Number(it.qty) || 0), 0)),
-      })
-    );
+      });
+      const adv = roundMoney(Number(inv.advanceApplied) || 0);
+      if (adv > 0) entries.push({
+        date: inv.date, type: "Booking Advance Applied", ref: inv.bookingRef || "", debit: 0, credit: adv, id: inv.id + "_ba", jeb: -adv,
+        qty: Number(inv.bookingQty) || 0, unit: ((inv.items || []).find((it) => it.bookingLine) || {}).unit || "", invoiceNumber: inv.number,
+      });
+    });
   payments
     .filter((p) => p.customerId === customer.id && !isPaymentLinkedToCancelledInvoice(p, invoices))
     .forEach((p) => {
       // Advance Booking upgrade: a booking advance is a CREDIT (money in);
       // a booking refund is a DEBIT (money paid back to the customer).
       if (p.kind === "Refund") {
+        if (p.bookingId) { entries.push({ date: p.date, type: "Booking Refund", ref: p.bookingCode || p.method || "Cash", debit: 0, credit: 0, jeb: -(Number(p.amount) || 0), id: p.id, note: p.note }); return; }
         entries.push({ date: p.date, type: "Booking Refund", ref: p.bookingCode || p.method || "Cash", debit: p.amount, credit: 0, id: p.id, note: p.note });
         return;
       }
       if (p.bookingId) {
-        entries.push({ date: p.date, type: "Booking Advance", ref: p.bookingCode || p.method || "Cash", debit: 0, credit: p.amount, id: p.id });
+        entries.push({ date: p.date, type: "Booking Advance", ref: p.bookingCode || p.method || "Cash", debit: 0, credit: 0, jeb: Number(p.amount) || 0, id: p.id });
         return;
       }
       entries.push({ date: p.date, type: p.promiseId ? "Payment Against Promise" : "Payment", ref: p.promiseId ? (promises.find((pr) => pr.id === p.promiseId)?.code || p.method || "Cash") : (p.method || "Cash"), debit: 0, credit: p.amount, id: p.id });
@@ -1897,7 +1918,7 @@ function computeLedgerForCustomer(customer, invoices, payments, returns = [], ex
       entries.push({
         date: a.date, type: `Adjustment — ${a.category}`, ref: a.code,
         debit: a.type === "Add" ? a.amount : 0, credit: a.type === "Reduce" ? a.amount : 0,
-        id: a.id, note: a.reason, adjNote: a.note,
+        id: a.id, note: a.reason, adjNote: a.note, jeb: a.bookingId && a.type === "Reduce" ? -(Number(a.amount) || 0) : 0,
       })
     );
   const ledgerMadeAt = (e) => {
@@ -1913,11 +1934,13 @@ function computeLedgerForCustomer(customer, invoices, payments, returns = [], ex
     return a._seq - b._seq;
   });
   let bal = Number(customer.openingBalance) || 0;
+  let jebBal = 0;
   const withBalance = entries.map((e) => {
     bal = roundMoney(bal + e.debit - e.credit);
-    return { ...e, balance: bal };
+    jebBal = roundMoney(jebBal + (Number(e.jeb) || 0));
+    return { ...e, balance: bal, jebBal };
   });
-  return { entries: withBalance, outstanding: bal };
+  return { entries: withBalance, outstanding: bal, jeb: jebBal };
 }
 
 /* ---------------- Outstanding for many customers (performance) ----------------
@@ -2967,7 +2990,7 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
   const ledgerUrdu = false;
 
   if (!customer) return <div className="text-slate-400">Pehle koi customer add karein.</div>;
-  const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+  const { entries, outstanding, jeb: ledgerJeb } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
   const myPromises = (promises || []).filter((p) => p.customerId === customer.id && p.status !== "Deleted").map(promiseWithComputed);
   const myAdjustments = (adjustments || []).filter((a) => a.customerId === customer.id).sort((a, b) => new Date(b.date) - new Date(a.date));
 
@@ -3260,6 +3283,11 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
                 <span className="font-black uppercase text-blue-700">{printL("Total Outstanding (All Time)", ledgerUrdu)}</span>
                 <span className="font-black text-lg text-blue-700"><PrintLtr>{fmtMoney(outstanding)}</PrintLtr></span>
               </div>
+              {ledgerJeb > 0.5 && (
+                <div className="flex justify-between text-amber-600 font-bold" data-ledger-jeb>
+                  <span>{t("Booking jeb (advance jama)")}</span><span><PrintLtr>{fmtMoney(ledgerJeb)}</PrintLtr></span>
+                </div>
+              )}
             </div>
           </div>
         </div>
@@ -3272,12 +3300,13 @@ function LedgerView({ customers, invoices, payments, returns, exchanges, promise
 
 function InvoiceForm({ customers, products, drivers, bookings, invoices, payments, returns, exchanges, promises, transfers, adjustments, commissionAgents, commissionRules, prefill, editingInvoice, currentUser, onSave, onCancel, nextNumber }) {
   const isEdit = !!editingInvoice;
+  const [pickedBookingId, setPickedBookingId] = useState("");
   // ---- Advance Booking delivery (additive) ----
   // A new invoice opened from "Convert to Invoice", or an existing invoice
   // that was saved as a booking delivery (has bookingQty).
   const bookingSourceId = editingInvoice
     ? (editingInvoice.bookingQty != null ? editingInvoice.fromBookingId : "")
-    : (prefill?.sourceType === "booking" ? prefill.sourceId : "");
+    : (pickedBookingId || (prefill?.sourceType === "booking" ? prefill.sourceId : ""));
   const linkedBooking = bookingSourceId ? (bookings || []).find((b) => b.id === bookingSourceId) : null;
   const bookingMode = !!linkedBooking;
   const bookingState = linkedBooking ? computeBookingState(linkedBooking, invoices, payments, { excludeInvoiceId: editingInvoice?.id }) : null;
@@ -3350,6 +3379,39 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
   const bookingMaxAdvance = bookingState
     ? roundMoney(Math.max(0, Math.min(bookingState.unusedAdvance, total - (Number(paymentReceived) || 0))))
     : 0;
+  const advPrevAdj = isEdit && editingInvoice.advMode !== 2 ? advanceAppliedNum : 0;
+  function pickBooking(b, st, raw) {
+    const q = roundQty(Number(raw) || 0);
+    if (!(q > 0)) { alert(t("Kitne bag dene hain, likhein.")); return; }
+    const rate = st.rate;
+    const avail = Math.max(0, roundMoney(st.unusedAdvance));
+    let covered, extra = 0, adv;
+    if (b.v === 3) {
+      if (q <= st.remainingQty + BOOKING_EPS) { covered = q; adv = Math.min(avail, roundMoney(q * rate)); }
+      else {
+        const whole = Math.floor(st.remainingQty + 1e-6);
+        covered = whole > 0 ? whole : roundQty(st.remainingQty);
+        extra = roundQty(q - covered);
+        adv = avail;
+      }
+    } else {
+      if (q > st.remainingQty + BOOKING_EPS) { alert(`${b.code}: ${t("sirf")} ${fmtQty(st.remainingQty)} ${b.unit || ""} ${t("baqi hain")}`); return; }
+      covered = q; adv = Math.min(avail, roundMoney(q * rate));
+    }
+    const prod = (products || []).find((p) => p.id === b.productId) || (products || []).find((p) => p.name === b.productName);
+    const lines = [];
+    if (covered > 0) lines.push({ id: uid("it"), productId: b.productId || "", name: b.productName, unit: b.unit || "Bag", qty: covered, price: rate, bookingLine: true });
+    if (extra > 0) lines.push({ id: uid("it"), productId: prod ? prod.id : "", name: b.productName, unit: b.unit || "Bag", qty: extra, price: prod ? (Number(prod.price) || rate) : rate });
+    setItems((prev) => [...lines, ...prev.filter((it) => !it.bookingLine && it.name)]);
+    setCustomerId(b.customerId);
+    setPickedBookingId(b.id);
+    setAdvanceApplied(roundMoney(adv));
+  }
+  function unpickBooking() {
+    setPickedBookingId("");
+    setAdvanceApplied(0);
+    setItems((prev) => { const rest = prev.filter((it) => !it.bookingLine); return rest.length ? rest : [{ id: uid("it"), productId: "", name: "", unit: "Bag", qty: 1, price: 0 }]; });
+  }
   // If the invoice gets smaller (partial qty), never keep more advance applied than allowed.
   useEffect(() => {
     if (bookingMode && Number(advanceApplied) > bookingMaxAdvance + 0.005) setAdvanceApplied(bookingMaxAdvance);
@@ -3415,7 +3477,7 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
       bookingFields = {
         fromBookingId: linkedBooking.id, bookingRef: linkedBooking.code,
         bookingQty: bQty, bookingRate: roundMoney(Number(bookingLine.price) || linkedBooking.rate),
-        advanceApplied: advanceAppliedNum,
+        advanceApplied: advanceAppliedNum, advMode: isEdit ? editingInvoice.advMode : 2,
       };
     }
     const issuedTo = issuedToName.trim()
@@ -3486,8 +3548,8 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
         ...base,
         docStatus: "Active",
         editHistory: [],
-        fromBookingId: prefill?.sourceType === "booking" ? prefill.sourceId : "",
-        bookingRef: prefill?.sourceType === "booking" ? prefill.sourceCode : "",
+        fromBookingId: linkedBooking ? linkedBooking.id : (prefill?.sourceType === "booking" ? prefill.sourceId : ""),
+        bookingRef: linkedBooking ? linkedBooking.code : (prefill?.sourceType === "booking" ? prefill.sourceCode : ""),
         fromOrderId: prefill?.sourceType === "order" ? prefill.sourceId : "",
         orderRef: prefill?.sourceType === "order" ? prefill.sourceCode : "",
       });
@@ -3512,6 +3574,12 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
           advanceApplied={advanceApplied} setAdvanceApplied={setAdvanceApplied}
           maxAdvance={bookingMaxAdvance} bookingLineQty={bookingLineQty}
         />
+      )}
+      {pickedBookingId && !isEdit && (
+        <div className="-mt-2 mb-3 text-end"><button type="button" className="text-[12px] font-bold text-rose-500 hover:underline" onClick={unpickBooking} data-unpick-booking>✕ {t("Booking hatao")}</button></div>
+      )}
+      {!isEdit && !bookingMode && customerType === "Regular" && customerId && (
+        <InvoiceBookingPicker bookings={bookings} customerId={customerId} invoices={invoices} payments={payments} onPick={pickBooking} />
       )}
       {canChangeCustomerType ? (
         <Field label="Customer Type">
@@ -3706,18 +3774,18 @@ function InvoiceForm({ customers, products, drivers, bookings, invoices, payment
       </div>
 
       <div className="bg-slate-50 border border-slate-200 p-3 mt-2 text-sm space-y-1">
-        <div className="flex justify-between text-slate-500"><span>Previous Balance</span><span>{fmtMoney(previousOutstanding + advanceAppliedNum)}</span></div>
+        <div className="flex justify-between text-slate-500"><span>Previous Balance</span><span>{fmtMoney(previousOutstanding + advPrevAdj)}</span></div>
         <div className="flex justify-between"><span>New Purchase</span><span className="font-bold">{fmtMoney(subtotal)}</span></div>
         <div className="flex justify-between"><span>Rickshaw + Delivery</span><span className="font-bold">{fmtMoney((Number(rickshawRent) || 0) + (Number(deliveryCharges) || 0))}</span></div>
         <div className="flex justify-between"><span>Discount</span><span className="font-bold">-{fmtMoney(discount)}</span></div>
         <div className="flex justify-between"><span>Payment Received</span><span className="font-bold">-{fmtMoney(paymentReceived)}</span></div>
         {advanceAppliedNum > 0 && (
-          <div className="flex justify-between"><span>Advance Applied ({linkedBooking?.code})</span><span className="font-bold text-emerald-700">-{fmtMoney(advanceAppliedNum)}</span></div>
+          <div className="flex justify-between"><span>{t("Booking Advance")} ({linkedBooking?.code})</span><span className="font-bold text-amber-600">-{fmtMoney(advanceAppliedNum)}</span></div>
         )}
         {bookingMode && (
           <div className="flex justify-between text-slate-500"><span>This Invoice Payable</span><span className="font-bold">{fmtMoney(balanceDue)}</span></div>
         )}
-        <div className="flex justify-between text-base border-t border-slate-300 pt-1"><span className="font-bold">Outstanding Balance</span><span className="font-black text-red-600">{fmtMoney(previousOutstanding + balanceDue + advanceAppliedNum)}</span></div>
+        <div className="flex justify-between text-base border-t border-slate-300 pt-1"><span className="font-bold">Outstanding Balance</span><span className="font-black text-red-600">{fmtMoney(previousOutstanding + balanceDue + advPrevAdj)}</span></div>
       </div>
 
       <div className="flex gap-2 mt-4">
@@ -3747,7 +3815,7 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
     red: "bg-red-50 text-red-700 border-red-200",
     slate: "bg-slate-100 text-slate-600 border-slate-300",
   }[banner.tone];
-  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + invAdvInPrev(invoice);
   const hasDelivery = invoice.rickshawRent > 0 || invoice.deliveryCharges > 0 || invoice.driverName || invoice.receivedBy;
   const isCancelled = invoice.docStatus === "Cancelled";
 
@@ -3854,7 +3922,7 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
 
         <div className="flex justify-end">
           <div className="w-72 text-sm space-y-1.5">
-            <div className="flex justify-between"><span className="text-slate-500">Previous Balance</span><span className="font-bold">{fmtMoney((invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0))}</span></div>
+            <div className="flex justify-between"><span className="text-slate-500">Previous Balance</span><span className="font-bold">{fmtMoney((invoice.previousOutstanding || 0) + invAdvInPrev(invoice))}</span></div>
             <div className="flex justify-between"><span className="text-slate-500">New Purchase</span><span className="font-bold">{fmtMoney(invoice.subtotal)}</span></div>
             <div className="flex justify-between"><span className="text-slate-500">Rickshaw + Delivery</span><span className="font-bold">{fmtMoney((invoice.rickshawRent || 0) + (invoice.deliveryCharges || 0))}</span></div>
             <div className="flex justify-between"><span className="text-slate-500">Discount</span><span className="font-bold">-{fmtMoney(invoice.discount || 0)}</span></div>
@@ -3967,7 +4035,7 @@ function InvoiceDetail({ invoice, settings, returns, exchanges, commissionInfo, 
 }
 
 function buildInvoiceWaMessage(invoice, settings) {
-  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + invAdvInPrev(invoice);
   const lines = [
     `${settings.companyName} — Invoice ${invoice.number}${invoice.docStatus === "Cancelled" ? " (CANCELLED)" : ""}`,
     `Date: ${fmtDate(invoice.date)}`,
@@ -6431,7 +6499,7 @@ function bookingRefundEntries(booking, payments) {
 
 // Single source of truth for every booking number shown anywhere.
 // opts.excludeInvoiceId: leave one invoice out (used while editing it).
-function computeBookingState(booking, invoices, payments, opts = {}) {
+function computeBookingStateBase(booking, invoices, payments, opts = {}) {
   const b = booking || {};
   const isV2 = b.v === 2;
   const bookedQty = roundQty(Number(b.qty) || 0);
@@ -6445,6 +6513,7 @@ function computeBookingState(booking, invoices, payments, opts = {}) {
         invoiceId: i.id, invoiceNumber: i.number, date: i.date, qty, rate: r,
         amount: roundMoney(qty * r), advanceApplied: roundMoney(Number(i.advanceApplied) || 0),
         invoiceTotal: Number(i.total) || 0, paymentReceived: Number(i.paymentReceived) || 0,
+        vehicle: [i.vehicleNumber, i.driverName].filter(Boolean).join(" · "),
       };
     })
     .sort((x, y) => parseDateValue(x.date) - parseDateValue(y.date));
@@ -6592,6 +6661,7 @@ function BookingKV({ label, value, strong, tone }) {
 }
 
 function BookingReceiptBody({ booking, state, settings, customer }) {
+  if (booking && booking.v === 3) return <BookingSlip3 booking={booking} state={state} settings={settings} customer={customer} />;
   const terms = (booking.terms || DEFAULT_BOOKING_TERMS).split("\n").filter((l) => l.trim());
   const balanceLabel = state.remainingAmount > 0.005 ? "Balance Due" : "Fully Paid in Advance";
   return (
@@ -6706,20 +6776,21 @@ function BookingDeliveriesTable({ deliveries, unit, onOpenInvoice }) {
     <table className="w-full text-sm">
       <thead>
         <tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
-          <th className="px-3 py-2">Date</th><th className="px-3 py-2">Invoice #</th>
+          <th className="px-3 py-2">Date</th><th className="px-3 py-2">Invoice #</th><th className="px-3 py-2">{t("Gaari / Driver")}</th>
           <th className="px-3 py-2 text-right">Qty</th><th className="px-3 py-2 text-right">Rate</th>
           <th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2 text-right">Advance Applied</th>
           <th className="px-3 py-2 text-right">Invoice Total</th>
         </tr>
       </thead>
       <tbody>
-        {deliveries.length === 0 && <tr><td colSpan={7} className="px-3 py-4 text-center text-slate-400">No deliveries yet.</td></tr>}
+        {deliveries.length === 0 && <tr><td colSpan={8} className="px-3 py-4 text-center text-slate-400">No deliveries yet.</td></tr>}
         {deliveries.map((d) => (
           <tr key={d.invoiceId} className="border-t border-slate-100">
             <td className="px-3 py-2 text-slate-500">{fmtDate(d.date)}</td>
             <td className="px-3 py-2 font-bold text-blue-700">
               {onOpenInvoice ? <button type="button" className="hover:underline" onClick={() => onOpenInvoice(d.invoiceId)}>{d.invoiceNumber}</button> : d.invoiceNumber}
             </td>
+            <td className="px-3 py-2 text-slate-500 text-xs">{d.vehicle || "-"}</td>
             <td className="px-3 py-2 text-right">{fmtQty(d.qty)} {unit}</td>
             <td className="px-3 py-2 text-right">{fmtMoney(d.rate)}</td>
             <td className="px-3 py-2 text-right font-bold">{fmtMoney(d.amount)}</td>
@@ -6819,7 +6890,7 @@ function InvoiceBookingPanel({ booking, state, products, advanceApplied, setAdva
       </div>
       {applied > maxAdvance + 0.005 && <div className="text-xs font-bold text-red-600 mt-1">Advance applied is more than the allowed maximum ({fmtMoney(maxAdvance)}).</div>}
       <div className="text-[11px] text-slate-500 mt-2">
-        The advance was already credited to the customer's ledger when it was received. Applying it here only settles this invoice — it is not counted a second time.
+        {t("Booking ka advance alag jeb mein hai. Jitna yahan lagayenge, sirf utna is invoice par customer ke khaate mein credit hoga aur jeb se kam hoga.")}
       </div>
     </div>
   );
@@ -6827,7 +6898,7 @@ function InvoiceBookingPanel({ booking, state, products, advanceApplied, setAdva
 
 /* ---------------- Booking: create form ---------------- */
 
-function BookingCreateForm({ customers, products, onSave, onCancel }) {
+function BookingCreateFormV2({ customers, products, onSave, onCancel }) {
   const firstProduct = products[0];
   const [paymentId] = useState(() => uid("pay"));
   const [custSearch, setCustSearch] = useState("");
@@ -7190,6 +7261,8 @@ function BookingDetail({ booking, state, customer, settings, products, currentUs
         {isAdmin && notClosed && <Btn small variant="ghost" onClick={() => setAction({ type: "renew" })}>Renew Booking</Btn>}
         {isAdmin && notClosed && state.remainingQty > 0 && <Btn small variant="ghost" onClick={() => setAction({ type: "rate" })}>Change Rate</Btn>}
         {isAdmin && state.unusedAdvance > 0.005 && <Btn small variant="ghost" onClick={() => setAction({ type: "refund" })}>Refund Advance</Btn>}
+        {isAdmin && booking.v === 3 && state.unusedAdvance > 0.5 && handlers.onBookingToKhata && <Btn small variant="ghost" onClick={() => { const r = prompt(`${fmtMoney(state.unusedAdvance)} ${t("advance customer ke khaate mein daalna hai (udhaar kam hoga). Wajah likhein:")}`); if (r != null) handlers.onBookingToKhata(booking.id, r); }}>{t("Advance khaate mein")}</Btn>}
+        {(customer?.phone || booking.customerPhone) && <Btn small variant="ghost" onClick={() => window.open(waLink(customer?.phone || booking.customerPhone, bk3WaText(booking, state, settings)), "_blank")}>WhatsApp</Btn>}
         {isAdmin && notClosed && <Btn small variant="danger" onClick={() => setAction({ type: "cancel" })}>Cancel Booking</Btn>}
       </div>
       {!isAdmin && <div className="text-[11px] text-slate-400 mb-4">Renewal, rate change, refund, cancellation and advance edits need an Admin login.</div>}
@@ -7479,7 +7552,7 @@ function Bookings({
   customers, products, bookings, invoices, payments, settings, currentUser, branches,
   onCreateAdvanceBooking, onConvertToInvoice, onOpenInvoice,
   onReceiveAdvance, onEditAdvance, onRefundAdvance, onCancelBooking, onRenewBooking,
-  onChangeBookingRate, onUpdateBookingDetails, onPostLegacyAdvance,
+  onChangeBookingRate, onUpdateBookingDetails, onPostLegacyAdvance, onBookingToKhata,
 }) {
   const [tab, setTab] = useState("bookings");
   const [showForm, setShowForm] = useState(false);
@@ -7563,7 +7636,9 @@ function Bookings({
     return true;
   }
 
-  const handlers = { onReceiveAdvance, onEditAdvance, onRefundAdvance, onCancelBooking, onRenewBooking, onChangeBookingRate, onUpdateBookingDetails, onPostLegacyAdvance };
+  const handlers = { onReceiveAdvance, onEditAdvance, onRefundAdvance, onCancelBooking, onRenewBooking, onChangeBookingRate, onUpdateBookingDetails, onPostLegacyAdvance, onBookingToKhata };
+  const [reqApprove, setReqApprove] = useState(null);
+  const bkrActor = (currentUser && (currentUser.name || currentUser.username)) || "Staff";
 
   return (
     <div>
@@ -7576,13 +7651,14 @@ function Bookings({
         </div>
       </div>
       <div className="text-xs text-slate-400 mb-4 max-w-3xl">
-        Customer advance de kar rate lock kara sakta hai — booking ke 1 mahine ke andar wahi rate milega. Advance customer ledger mein credit hota hai, har delivery ki alag invoice banti hai, aur remaining qty / unused advance apne aap update hote hain.
+        {t("Customer advance de kar rate lock karata hai. Advance alag jeb mein rehta hai — sirf jab us product ki invoice banti hai tab utna khaate mein lagta hai. Advance khatam hone ke baad baqi maal aaj ke rate par. Customer app se bhi booking request bhej sakta hai.")}
       </div>
 
       {tab === "reports" ? (
         <BookingReports rows={rows} payments={payments} settings={settings} onPrint={setPrintDoc} />
       ) : (
         <>
+          <BookingRequestsPanel actor={bkrActor} onApprove={setReqApprove} />
           {soonRows.length > 0 && (
             <div className="bg-amber-50 border border-amber-300 p-3 mb-4 text-sm cursor-pointer hover:bg-amber-100" onClick={() => setStatusFilter("Expiring Soon")}>
               <div className="text-[11px] uppercase tracking-wide font-black text-amber-700 mb-1">{t("Expiring Soon")} ({BOOKING_EXPIRY_WARN_DAYS} days)</div>
@@ -7678,6 +7754,22 @@ function Bookings({
         </>
       )}
 
+      {reqApprove && (
+        <Modal title={`${t("Approve")} ${reqApprove.code} — ${reqApprove.customerName}`} onClose={() => setReqApprove(null)} wide>
+          <div className="mb-3 rounded-xl bg-emerald-500/10 border border-emerald-500/40 px-3 py-2 text-[13px] ct-h">
+            📨 {t("Customer ki request")}: <b>{fmtQty(reqApprove.qty)} {reqApprove.unit} {reqApprove.productName}</b> · {fmtMoney(reqApprove.amount)} · {reqApprove.method}{reqApprove.txnId ? ` (${reqApprove.txnId})` : ""}. {t("Advance mil gaya ho to lock rate check kar ke save karein.")}
+          </div>
+          <BookingCreateForm customers={customers} products={products} initial={bkrInitial(reqApprove)} onCancel={() => setReqApprove(null)}
+            onSave={(data) => {
+              const created = onCreateAdvanceBooking(data);
+              if (!created) return false;
+              bkrMarkApproved(reqApprove, created, bkrActor);
+              setReqApprove(null);
+              setDetailId(created.id);
+              return true;
+            }} />
+        </Modal>
+      )}
       {showForm && (
         <Modal title="New Advance Booking" onClose={() => setShowForm(false)} wide>
           <BookingCreateForm customers={customers} products={products} onSave={handleCreate} onCancel={() => setShowForm(false)} />
@@ -9433,6 +9525,7 @@ function App() {
   const commissionTransactions = brScopeList(commissionTransactions__all, brScopeNow, "commissionTransactions");
   const commissionPayments = brScopeList(commissionPayments__all, brScopeNow, "commissionPayments");
   const settings = brSettingsFor(settings__all, branches, brScopeNow);
+  invMonthSrc = { invoices, returns, exchanges, bookings, payments };
 
   useEffect(() => {
     let cancelled = false;
@@ -9894,7 +9987,8 @@ function App() {
     if (!(qty > 0)) { alert("Booked quantity must be more than 0."); return false; }
     if (!(rate > 0)) { alert("Locked rate must be more than 0."); return false; }
     if (advance < 0) { alert("Advance cannot be negative."); return false; }
-    if (advance > roundMoney(qty * rate) + 0.005) { alert("Advance cannot be more than the booking value."); return false; }
+    if (data.mode !== "v3" && advance > roundMoney(qty * rate) + 0.005) { alert("Advance cannot be more than the booking value."); return false; }
+    if (data.mode === "v3" && !(advance > 0)) { alert("Advance ki raqam likhein."); return false; }
     if (!data.date) { alert("Booking date is required."); return false; }
     if (data.advancePaymentId && payments.some((p) => p.id === data.advancePaymentId)) { alert("This booking was already saved."); return false; }
     let n = Number(settings.bookingCounter) || 1;
@@ -9903,11 +9997,12 @@ function App() {
     const history = [bookingHistoryEntry("Created", `${fmtQty(qty)} ${data.unit || ""} ${productName} @ ${fmtMoney(rate)} = ${fmtMoney(qty * rate)}`)];
     if (advance > 0) history.push(bookingHistoryEntry("Advance Received", `${fmtMoney(advance)} (${data.advanceMethod || "Cash"})`));
     const record = {
-      id: uid("bk"), v: 2, code, status: "Booked",
+      id: uid("bk"), v: data.mode === "v3" ? 3 : 2, code, status: "Booked",
+      ...(data.mode === "v3" ? { durationDays: data.durationDays || 30, khataMoves: [] } : {}),
       customerId: customer.id, customerName: customer.name, customerPhone: customer.phone || "",
       productId: data.productId || "", productName, unit: data.unit || "",
       qty, rate, originalRate: rate, advanceAmount: 0,
-      date: data.date, expiryDate: addOneMonth(data.date),
+      date: data.date, expiryDate: data.mode === "v3" && data.expiryDate ? data.expiryDate : addOneMonth(data.date),
       notes: data.notes || "", terms: data.terms || "",
       branchId: customer.branchId || currentUser?.branchId || "",
       createdBy: bookingActor(), createdAt: new Date().toISOString(),
@@ -9916,7 +10011,7 @@ function App() {
     persist.bookings([...bookings, record]);
     persist.settings({ ...settings, bookingCounter: n });
     if (advance > 0) {
-      persist.payments([...payments, bookingPaymentRecord(record, { id: data.advancePaymentId, amount: advance, date: data.date, method: data.advanceMethod })]);
+      persist.payments([...payments, { ...bookingPaymentRecord(record, { id: data.advancePaymentId, amount: advance, date: data.date, method: data.advanceMethod }), ...(data.advanceReference ? { reference: data.advanceReference } : {}) }]);
     }
     logAudit("Advance Booking Created", code, `${customer.name} — ${fmtQty(qty)} ${data.unit || ""} @ ${fmtMoney(rate)}`);
     if (advance > 0) logAudit("Booking Advance Received", code, fmtMoney(advance));
@@ -9927,11 +10022,11 @@ function App() {
     const b = findBookingOrAlert(bookingId); if (!b) return false;
     if (data.id && payments.some((p) => p.id === data.id)) { alert("This advance was already recorded."); return false; }
     const st = computeBookingState(b, invoices, payments);
-    if (st.status === "Cancelled" || st.status === "Completed") { alert(`Booking ${b.code} is ${st.status}.`); return false; }
+    if (st.status === "Cancelled" || (st.status === "Completed" && b.v !== 3)) { alert(`Booking ${b.code} is ${st.status}.`); return false; }
     const amount = roundMoney(Number(data.amount) || 0);
     if (!(amount > 0)) { alert("Amount 0 se zyada hona chahiye."); return false; }
     if (!data.date) { alert("Date is required."); return false; }
-    if (amount > st.remainingAmount + 0.005) { alert(`Advance cannot be more than the remaining booking amount (${fmtMoney(st.remainingAmount)}).`); return false; }
+    if (b.v !== 3 && amount > st.remainingAmount + 0.005) { alert(`Advance cannot be more than the remaining booking amount (${fmtMoney(st.remainingAmount)}).`); return false; }
     const pay = bookingPaymentRecord(b, { id: data.id, amount, date: data.date, method: data.method, note: data.note });
     persist.payments([...payments, pay]);
     commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Advance Received", `${fmtMoney(amount)} (${pay.method}) — ${paymentReceiptNo(pay)}`)]));
@@ -9953,7 +10048,7 @@ function App() {
     if (roundMoney(st.unusedAdvance - oldAmount + amount) < -0.005) {
       alert(`Part of this advance is already applied to invoices or refunded. Minimum allowed is ${fmtMoney(Math.max(0, oldAmount - st.unusedAdvance))}.`); return false;
     }
-    if (amount - oldAmount > st.remainingAmount + 0.005) {
+    if (b.v !== 3 && amount - oldAmount > st.remainingAmount + 0.005) {
       alert(`Total advance cannot be more than the booking value. Maximum allowed is ${fmtMoney(oldAmount + st.remainingAmount)}.`); return false;
     }
     updatePayment(p, {
@@ -10031,7 +10126,7 @@ function App() {
     const newRate = roundMoney(Number(data.newRate) || 0);
     if (!(newRate > 0)) { alert("Rate must be more than 0."); return false; }
     const newValue = roundMoney(st.deliveredAmount + st.remainingQty * newRate);
-    if (st.netAdvance + st.legacyAdvance > newValue + 0.005) { alert(`Advance received (${fmtMoney(st.netAdvance + st.legacyAdvance)}) would be more than the new booking value (${fmtMoney(newValue)}). Refund the difference first.`); return false; }
+    if (b.v !== 3 && st.netAdvance + st.legacyAdvance > newValue + 0.005) { alert(`Advance received (${fmtMoney(st.netAdvance + st.legacyAdvance)}) would be more than the new booking value (${fmtMoney(newValue)}). Refund the difference first.`); return false; }
     const change = { oldRate: b.rate, newRate, reason, by: bookingActor(), at: new Date().toISOString() };
     commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Rate Changed", `${fmtMoney(b.rate)} → ${fmtMoney(newRate)} — ${reason}`)], {
       rate: newRate, originalRate: b.originalRate != null ? b.originalRate : b.rate, rateHistory: [...(b.rateHistory || []), change],
@@ -10060,6 +10155,24 @@ function App() {
   }
 
   function saveBooking(b) { persist.bookings(bookings.map((x) => (x.id === b.id ? b : x))); }
+  // Unused booking advance → customer's khata (reduces udhaar). Admin only.
+  function onBookingToKhata(bookingId, reason) {
+    if (!bookingIsAdmin()) { alert("Sirf Admin ye kar sakta hai."); return false; }
+    const b = findBookingOrAlert(bookingId); if (!b) return false;
+    const st = computeBookingState(b, invoices, payments);
+    const amount = roundMoney(Math.max(0, st.unusedAdvance));
+    if (!(amount > 0.5)) { alert("Is booking mein advance nahi bacha."); return false; }
+    const why = String(reason || "").trim();
+    if (!why) { alert("Reason likhna zaroori hai."); return false; }
+    const adjId = uid("adj");
+    const code = "ADJ-" + String(settings.adjustmentCounter).padStart(4, "0");
+    persist.adjustments([...adjustments, { id: adjId, code, status: "Active", createdBy: currentUser?.name || currentUser?.username, customerId: b.customerId, customerName: b.customerName,
+      date: todayISO(), type: "Reduce", amount, category: "Booking Advance", reason: `${b.code} advance khaate mein — ${why}`, note: "", bookingId: b.id, branchId: b.branchId || "" }]);
+    persist.settings({ ...settings, adjustmentCounter: settings.adjustmentCounter + 1 });
+    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Advance Khaate Mein", `${fmtMoney(amount)} — ${why}`)], { khataMoves: [...(b.khataMoves || []), { id: uid("km"), adjustmentId: adjId, amount, date: todayISO(), by: bookingActor(), reason: why }] }));
+    logAudit("Booking Advance Khaate Mein", b.code, `${fmtMoney(amount)} — ${why}`);
+    return true;
+  }
   // Booking status is now derived from real delivery invoices, so nothing is
   // marked "Completed" by hand here any more (delivery is logged in saveInvoice).
   function onBookingFulfilled() {}
@@ -10346,6 +10459,7 @@ function App() {
     const due = finAllKishts(finLive.vouchers).filter(({ v, k }) => v.status === "Approved" && k.status !== "Paid" && k.date <= today);
     const portalPend = finLive.portalPay.filter((c) => c.status === "Pending");
     const portalMsg = finLive.portalMsgs.filter((m) => m.status === "Open");
+    const bkReq = (finLive.bookingReqs || []).filter((r) => r.status === "Pending");
     const delToday = [];
     (bookings || []).forEach((b) => {
       const plan = finLive.deliveryPlans[b.id];
@@ -10370,7 +10484,9 @@ function App() {
       crCount: crPend.length + crUnsent,
       portalCount: portalPend.length + portalMsg.length,
       deliveryCount: delToday.length,
+      bkCount: bkReq.length,
       list: [
+        ...bkReq.map((r) => ({ id: "bq" + r.id, icon: "calendar", tone: "text-emerald-400", page: "bookings", title: `${r.customerName} — ${fmtQty(r.qty)} ${r.unit} ${r.productName}`, sub: `${r.code} · ${t("Booking request — approve karein")}` })),
         ...crPend.map((r) => ({ id: "cr" + r.id, icon: "shield", tone: "text-rose-400", page: "creditControl", title: `${r.customerName} — ${t("udhaar")} ${fmtMoney(r.amount)}`, sub: `${r.number} · ${t("Credit approval chahiye")}` })),
         ...crMine.map((r) => ({ id: "cm" + r.id, icon: "shield", tone: r.status === "Approved" ? "text-emerald-400" : "text-rose-400", page: "invoices", title: `${r.number} ${r.customerName}: ${t(r.status)}${r.status === "Approved" ? " · max " + fmtMoney(r.approvedCredit) : ""}`, sub: `${r.decision.by} · ${t("ab invoice dobara Save karein")}` })),
         ...(crUnsent ? [{ id: "cw", icon: "wa", tone: "text-orange-400", page: "creditControl", title: `${crUnsent} ${t("payment warnings WhatsApp par bhejni hain")}`, sub: t("Credit Control") }] : []),
@@ -10383,7 +10499,7 @@ function App() {
         ...due.map(({ v, k, idx, n }) => ({ id: "vk" + v.id + k.id, icon: "calendar", tone: k.date < today ? "text-rose-400" : "text-emerald-400", page: "paymentsDue", title: `${v.number}${n > 1 ? ` (${idx + 1}/${n})` : ""} — ${v.payee} · ${fmtMoney(k.amount)}`, sub: k.date < today ? `${t("Overdue")} · ${fmtDate(k.date)}` : t("Payment due today") })),
       ],
     };
-  }, [loading, currentUser, finLive.vouchers, finLive.settings, finLive.portalPay, finLive.portalMsgs, finLive.deliveryPlans, finLive.leaves, finLive.advances, finLive.employees, finLive.creditRequests, finLive.creditState, bookings, invoices, payments]);
+  }, [loading, currentUser, finLive.vouchers, finLive.settings, finLive.portalPay, finLive.portalMsgs, finLive.deliveryPlans, finLive.leaves, finLive.advances, finLive.employees, finLive.creditRequests, finLive.creditState, finLive.bookingReqs, bookings, invoices, payments]);
 
   // Credit rules: warnings / Red List / Watch update by themselves (any staff device).
   useEffect(() => {
@@ -10491,6 +10607,7 @@ function App() {
     setCameraOpen(false);
     if (parsed.kind === "w") { setScanOpen(null); setPage("creditControl"); return; }
     if (parsed.kind === "c") { setScanOpen(null); setFocusCustomerId(parsed.id); setPage("ledger"); return; }
+    if (parsed.kind === "b") { setScanOpen(null); const bk = bookings.find((x) => x.id === parsed.id); if (bk) deliverFromBooking(bk); else alert(t("Booking nahi mili.")); return; }
     if (["e", "l", "a", "s"].includes(parsed.kind)) { setScanOpen(null); setHrScan({ kind: parsed.kind, id: parsed.id, n: Date.now() }); return; }
     if (parsed.kind === "hn") {
       const num = parsed.number;
@@ -10551,7 +10668,10 @@ function App() {
     setViewBranchId("");
     setCurrentUser(user);
   }
-  function handleLogout() { setCurrentUser(null); setViewBranchId(""); setPage("dashboard"); }
+  function handleLogout() {
+    setCurrentUser(null); setViewBranchId(""); setPage("dashboard");
+    if (typeof window !== "undefined" && window.__ctGate) window.__ctGate.logout();
+  }
   function openBranchView(id) { setViewBranchId(id && id !== BR_MAIN ? id : ""); setPage("dashboard"); }
   function saveBranchFull(branch, admin) {
     const exists = branches.some((b) => b.id === branch.id);
@@ -10588,7 +10708,7 @@ function App() {
       <>
         <ThemeStyles />
         <DocVerifyPage target={verifyTarget} invoices={invoices} settings={settings}
-          ledgerData={{ customers, invoices, payments, returns, exchanges, promises, transfers, adjustments }} onOpen={() => {
+          ledgerData={{ bookings, customers, invoices, payments, returns, exchanges, promises, transfers, adjustments }} onOpen={() => {
           // Staff login first; after login the same document opens inside the app.
           setVerifyDeferred(true);
           applyThemeClass(themeState);
@@ -10719,7 +10839,7 @@ function App() {
         onOpenInvoice={(id) => { setFocusInvoiceId(id); setPage("invoices"); }}
         onReceiveAdvance={onReceiveAdvance} onEditAdvance={onEditAdvance} onRefundAdvance={onRefundAdvance}
         onCancelBooking={onCancelBooking} onRenewBooking={onRenewBooking} onChangeBookingRate={onChangeBookingRate}
-        onUpdateBookingDetails={onUpdateBookingDetails} onPostLegacyAdvance={onPostLegacyAdvance}
+        onUpdateBookingDetails={onUpdateBookingDetails} onPostLegacyAdvance={onPostLegacyAdvance} onBookingToKhata={onBookingToKhata}
       />
     ),
     orders: (
@@ -10800,7 +10920,7 @@ function App() {
         <Sidebar
           page={page} setPage={goPage} role={currentUser.role} onLogout={handleLogout}
           companyName={settings.companyName} logoUrl={settings.logoUrl}
-          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount, portalRequests: finAlerts.portalCount, deliverySchedule: finAlerts.deliveryCount, hrRequests: finAlerts.hrCount, creditControl: finAlerts.crCount }}
+          open={navOpen} onClose={() => setNavOpen(false)} branchLabel={branchLabel} badges={{ ...shellAlerts.badges, vouchers: finAlerts.count, paymentsDue: finAlerts.dueCount, portalRequests: finAlerts.portalCount, deliverySchedule: finAlerts.deliveryCount, bookings: finAlerts.bkCount, hrRequests: finAlerts.hrCount, creditControl: finAlerts.crCount }}
         />
         <div className="flex-1 min-w-0 flex flex-col">
           {brIsSuper(currentUser) && <BranchViewBanner scope={brScopeNow} branches={branches} onBack={() => openBranchView("")} />}
@@ -12954,8 +13074,8 @@ const PRINT_THERMAL_IMG = { display: "block", width: "100%", maxHeight: "120mm",
 
 function InvoiceThermalDoc({ invoice, settings, size, include, copies, urdu, recvProofs }) {
   const L = (k) => printL(k, urdu);
-  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
-  const prevBal = (invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0);
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + invAdvInPrev(invoice);
+  const prevBal = (invoice.previousOutstanding || 0) + invAdvInPrev(invoice);
   const delivery = (Number(invoice.rickshawRent) || 0) + (Number(invoice.deliveryCharges) || 0);
   return (
     <div style={printDocStyle(size, urdu)}>
@@ -13036,8 +13156,8 @@ function InvoiceThermalDoc({ invoice, settings, size, include, copies, urdu, rec
 
 function InvoicePaperDoc({ invoice, settings, size, include, copies, urdu, recvProofs, rs, fit = true }) {
   const L = (k) => printL(k, urdu);
-  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
-  const prevBal = (invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0);
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + invAdvInPrev(invoice);
+  const prevBal = (invoice.previousOutstanding || 0) + invAdvInPrev(invoice);
   const delivery = (Number(invoice.rickshawRent) || 0) + (Number(invoice.deliveryCharges) || 0);
   const banner = invoiceStatusBanner(invoice);
   const rows = rs && rs.status !== "Normal" ? rs.breakdown : invoice.items || [];
@@ -13313,11 +13433,23 @@ function PrintToggle({ on, onChange, label, sub, disabled }) {
   );
 }
 
-function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, renderDoc, onClose, sizeOrder, defaultSize, copyLabels, initialInclude }) {
+// Customer portal: printing shows only the Urdu switch (A4, defaults for the rest).
+let printSimpleMode = false;
+function PrintDialog({ kind, title, subtitle, includeDefs: includeDefsAll, fileName, waHref, renderDoc, onClose, sizeOrder, defaultSize, copyLabels, initialInclude }) {
   useLanguage();
+  const simple = printSimpleMode;
+  const includeDefs = simple ? (includeDefsAll || []).filter((d) => d.key === "urdu") : includeDefsAll;
   const order = sizeOrder || PRINT_SIZE_ORDER;
   const copyOpts = copyLabels || [[1, "1 Copy"], [2, "2 Copies (Customer + Office)"]];
-  const [prefs, setPrefs] = useState(() => { const p = printLoadPrefs(kind, includeDefs, order, defaultSize); if (initialInclude) p.include = { ...p.include, ...initialInclude }; return p; });
+  const [prefs, setPrefs] = useState(() => {
+    const p = printLoadPrefs(kind, includeDefsAll, order, defaultSize);
+    if (initialInclude) p.include = { ...p.include, ...initialInclude };
+    if (simple) {
+      const inc = {}; (includeDefsAll || []).forEach((d) => { inc[d.key] = d.disabled ? false : !!d.default; });
+      return { ...p, size: order.includes("full") ? "full" : (defaultSize && order.includes(defaultSize) ? defaultSize : order[0]), copies: 1, include: { ...inc, urdu: !!p.include.urdu } };
+    }
+    return p;
+  });
   const [busy, setBusy] = useState("");
   const previewBoxRef = React.useRef(null);
   const previewDocRef = React.useRef(null);
@@ -13326,7 +13458,7 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
   const [docH, setDocH] = useState(0);
   const size = PRINT_SIZES[prefs.size];
 
-  useEffect(() => { printSavePrefs(kind, prefs); }, [kind, prefs]);
+  useEffect(() => { if (!simple) printSavePrefs(kind, prefs); }, [kind, prefs]);
 
   // Fit the preview into its column (the document keeps its real mm width).
   useEffect(() => {
@@ -13422,7 +13554,7 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
       <div className="text-[12.5px] ct-t2 -mt-2 mb-4">{subtitle}</div>
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_340px] gap-5">
         <div className="min-w-0">
-          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{t("Paper Size")}</div>
+          {!simple && <><div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{t("Paper Size")}</div>
           <div className="grid gap-2.5" style={{ gridTemplateColumns: `repeat(${order.length}, minmax(0, 1fr))` }}>
             {order.map((id) => {
               const s = PRINT_SIZES[id];
@@ -13438,24 +13570,24 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
                 </button>
               );
             })}
-          </div>
+          </div></>}
 
-          {(includeDefs || []).length > 0 && <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Include")}</div>}
+          {!simple && (includeDefs || []).length > 0 && <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Include")}</div>}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {includeDefs.filter((d) => !d.sizes || d.sizes.includes(prefs.size)).map((d) => (
               <PrintToggle key={d.key} on={!!prefs.include[d.key]} onChange={(v) => setInc(d.key, v)} label={d.label} sub={d.disabled ? d.disabledNote : d.sub} disabled={d.disabled} />
             ))}
           </div>
 
-          <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Copies")}</div>
+          {!simple && <><div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mt-5 mb-2">{t("Copies")}</div>
           <div className="flex flex-wrap gap-2">
             {copyOpts.map(([n, l]) => (
               <button key={n} type="button" onClick={() => setCopies(n)}
                 className={`rounded-xl px-4 py-2.5 text-[13px] font-semibold transition ${prefs.copies === n ? "border-2 border-emerald-400 bg-emerald-400/10 ct-h" : "ct-chip border-2 border-transparent ct-t2"}`}>{t(l)}</button>
             ))}
-          </div>
+          </div></>}
 
-          <div className="mt-5 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+          <div className={`mt-5 grid grid-cols-1 ${simple ? "sm:grid-cols-2" : "sm:grid-cols-3"} gap-2.5`}>
             <button type="button" onClick={() => doPrint(false)} disabled={!!busy}
               className="ct-em-btn flex items-center justify-center gap-2 rounded-xl py-3 text-[14px] font-bold hover:brightness-110 active:scale-[.98] transition disabled:opacity-60">
               <UiIcon name="printer" className="w-4 h-4" />{busy === "print" ? t("Preparing…") : t("Print")}
@@ -13464,14 +13596,14 @@ function PrintDialog({ kind, title, subtitle, includeDefs, fileName, waHref, ren
               className="ct-chip flex items-center justify-center gap-2 rounded-xl py-3 text-[14px] font-bold ct-h hover:opacity-90 active:scale-[.98] transition disabled:opacity-60">
               <UiIcon name="download" className="w-4 h-4" />{busy === "pdf" ? t("Preparing…") : t("Save PDF")}
             </button>
-            {waHref ? (
+            {simple ? null : waHref ? (
               <a href={waHref} target="_blank" rel="noreferrer"
                 className="ct-chip flex items-center justify-center gap-2 rounded-xl py-3 text-[14px] font-bold text-emerald-400 hover:opacity-90 active:scale-[.98] transition">
                 <UiIcon name="wa" className="w-4 h-4" />{t("WhatsApp")}
               </a>
             ) : <span />}
           </div>
-          <div className="mt-3 text-[11.5px] ct-t3 space-y-0.5">
+          <div className="mt-3 text-[11.5px] ct-t3 space-y-0.5" style={simple ? { display: "none" } : undefined}>
             <div>• {t("PDF is saved in the selected size — a thermal slip stays a slip, A5 stays one invoice page.")}</div>
             {prefs.size === "full" && <div>• {t("A4 width (210 mm), and the page ends right after the invoice — no blank space. In the print window keep Margins: None.")}</div>}
             <div>• {t("In the print window choose “Save as PDF” as the printer.")}</div>
@@ -13526,7 +13658,7 @@ function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProof
     red: "bg-red-50 text-red-700 border-red-200",
     slate: "bg-slate-100 text-slate-600 border-slate-300",
   }[banner.tone];
-  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + (Number(invoice.advanceApplied) || 0);
+  const outstandingNow = (invoice.previousOutstanding || 0) + invoice.balanceDue + invAdvInPrev(invoice);
   const hasDelivery = invoice.rickshawRent > 0 || invoice.deliveryCharges > 0 || invoice.driverName || invoice.receivedBy;
   const showRs = rs && rs.status !== "Normal" ? rs : null;
   return (
@@ -13634,7 +13766,7 @@ function InvoiceClassicDoc({ invoice, settings, size, include, copies, recvProof
 
             <div className="flex justify-end">
               <div className={`${urdu ? "w-80" : "w-72"} text-sm space-y-1.5`}>
-                <div className="flex justify-between"><span className="text-slate-500">{L("Previous Balance")}</span><span className="font-bold"><PrintLtr>{fmtMoney((invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0))}</PrintLtr></span></div>
+                <div className="flex justify-between"><span className="text-slate-500">{L("Previous Balance")}</span><span className="font-bold"><PrintLtr>{fmtMoney((invoice.previousOutstanding || 0) + invAdvInPrev(invoice))}</PrintLtr></span></div>
                 <div className="flex justify-between"><span className="text-slate-500">{L("New Purchase")}</span><span className="font-bold"><PrintLtr>{fmtMoney(invoice.subtotal)}</PrintLtr></span></div>
                 <div className="flex justify-between"><span className="text-slate-500">{L("Rickshaw + Delivery")}</span><span className="font-bold"><PrintLtr>{fmtMoney((invoice.rickshawRent || 0) + (invoice.deliveryCharges || 0))}</PrintLtr></span></div>
                 <div className="flex justify-between"><span className="text-slate-500">{L("Discount")}</span><span className="font-bold"><PrintLtr>-{fmtMoney(invoice.discount || 0)}</PrintLtr></span></div>
@@ -13676,6 +13808,7 @@ function InvoicePrintDialog({ invoice, settings, rs, onClose }) {
     { key: "recvProof", label: "Receiving Proof", sub: "Signed slip photo", default: true, disabled: proofs.length === 0, disabledNote: "Not Uploaded" },
     { key: "issuedTo", label: "Material Issued To", sub: "Who collected the material", default: true },
     { key: "signature", label: "Signature Line", sub: "Customer / authorized signature", default: true },
+    { key: "monthMaal", label: "Is mahine ka maal", sub: "Customer ne is mahine ab tak kitna maal liya", default: true, disabled: invoice.customerType === "Cash", disabledNote: "Cash Customer / Walk-In" },
     { key: "qr", label: "QR Code", sub: "Scan to see invoice details", default: true },
     { key: "urdu", label: "Urdu Print", sub: "Print the document in Urdu", default: false },
   ];
@@ -13690,7 +13823,7 @@ function InvoicePrintDialog({ invoice, settings, rs, onClose }) {
       waHref={invoice.customerPhone ? waLink(invoice.customerPhone, buildInvoiceWaMessage(invoice, settings)) : ""}
       onClose={onClose}
       renderDoc={(p) => {
-        const inc = { ...p.include, prevBalance: p.include.prevBalance && invoice.customerType !== "Cash", recvProof: p.include.recvProof && proofs.length > 0 };
+        const inc = { ...p.include, monthMaal: p.include.monthMaal !== false && invoice.customerType !== "Cash", prevBalance: p.include.prevBalance && invoice.customerType !== "Cash", recvProof: p.include.recvProof && proofs.length > 0 };
         if (p.size === "full") return <InvoiceProDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} rs={rs} />;
         return PRINT_SIZES[p.size].thermal
           ? <InvoiceThermalProDoc invoice={invoice} settings={settings} {...p} include={inc} recvProofs={proofs} />
@@ -13764,10 +13897,11 @@ function invProNumbers(invoice) {
   const total = Number(invoice.total) || 0;
   const cash = invoice.customerType === "Cash";
   const advance = Number(invoice.advanceApplied) || 0;
-  const previous = cash ? 0 : (Number(invoice.previousOutstanding) || 0) + advance;
+  const advPrev = invAdvInPrev(invoice);
+  const previous = cash ? 0 : (Number(invoice.previousOutstanding) || 0) + advPrev;
   const grand = previous + total;
   const paid = Number(invoice.paymentReceived) || 0;
-  const outstanding = cash ? Math.max(0, total - paid) : (Number(invoice.previousOutstanding) || 0) + (Number(invoice.balanceDue) || 0) + advance;
+  const outstanding = cash ? Math.max(0, total - paid) : (Number(invoice.previousOutstanding) || 0) + (Number(invoice.balanceDue) || 0) + advPrev;
   const billDue = Number(invoice.balanceDue) || 0;
   const paidPct = total > 0 ? Math.max(0, Math.min(100, Math.round(((paid + advance) / total) * 100))) : 100;
   const cancelled = isInvoiceCancelled(invoice);
@@ -13816,6 +13950,40 @@ function printWords(amount, urdu) { return urdu ? urduAmountInWords(amount) : fi
 
 /* ---------------- A4 ---------------- */
 
+/* ---------- "Is mahine ab tak" — customer's goods this month ---------- */
+// App sets this every render (active branch lists) so print docs can look up
+// the customer's other bills of the same month.
+let invMonthSrc = { invoices: [], returns: [], exchanges: [] };
+function invMadeAt(x) { const m = String((x && x.id) || "").match(/_([0-9a-z]{8})/); return m ? parseInt(m[1], 36) : 0; }
+const INV_MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+function invMonthMaal(invoice) {
+  if (!invoice || invoice.customerType === "Cash" || !invoice.customerId || isInvoiceCancelled(invoice)) return null;
+  const mon = String(invoice.date || "").slice(0, 7);
+  if (mon.length !== 7) return null;
+  const at = invMadeAt(invoice);
+  const src = invMonthSrc || {};
+  const before = (src.invoices || []).filter((i) => i.id !== invoice.id && i.customerId === invoice.customerId && String(i.date).slice(0, 7) === mon
+    && !isInvoiceCancelled(i) && (i.date < invoice.date || (i.date === invoice.date && invMadeAt(i) < at)));
+  const map = new Map();
+  const add = (inv, field) => {
+    let rows;
+    try { rows = computeInvoiceItemBreakdown(inv, src.returns || [], src.exchanges || []); } catch { rows = (inv.items || []).map((it) => ({ ...it, remainingQty: it.qty })); }
+    rows.forEach((it) => {
+      const key = String(it.name || "").trim().toLowerCase() + "|" + String(it.unit || "").toLowerCase();
+      if (!map.has(key)) map.set(key, { name: it.name, unit: it.unit, before: 0, now: 0 });
+      map.get(key)[field] += Number(it.remainingQty ?? it.qty) || 0;
+    });
+  };
+  before.forEach((i) => add(i, "before"));
+  add(invoice, "now");
+  const rows = [...map.values()].map((r) => ({ ...r, before: roundQty(r.before), now: roundQty(r.now), total: roundQty(r.before + r.now) }))
+    .filter((r) => r.total > 0).sort((a, b) => (b.now > 0) - (a.now > 0) || b.total - a.total);
+  if (!rows.length) return null;
+  const [y, m] = mon.split("-");
+  return { label: `${INV_MONTHS[Number(m) - 1]} ${y}`, bills: before.length + 1, rows: rows.slice(0, 8), more: Math.max(0, rows.length - 8) };
+}
+function invQty(v, unit, D) { return <><PrintLtr>{Number(v).toLocaleString("en-PK", { maximumFractionDigits: 2 })}</PrintLtr> {D(unit || "")}</>; }
+
 function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urdu, fit }) {
   const L = (k) => printL(k, urdu);
   const D = (x) => printD(x, urdu);
@@ -13828,6 +13996,8 @@ function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urd
   const time = invProTime(invoice);
   const st = INV_PRO_STATUS[n.status];
   const banner = invoiceStatusBanner(invoice);
+  const mm = include.monthMaal !== false ? invMonthMaal(invoice) : null;
+  const bkInfo = bk3InvoiceInfo(invoice);
   const navy = "#0f172a", blue = "#1d4ed8";
   const k = { fontSize: "7.5px", fontWeight: 800, letterSpacing: urdu ? 0 : ".14em", textTransform: "uppercase", color: "#64748b" };
   const card = { border: "1px solid #e2e8f0", borderRadius: "2.6mm", padding: "3mm 3.6mm" };
@@ -13931,7 +14101,7 @@ function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urd
                   {items.map((it, i) => (
                     <tr key={i}>
                       <td style={{ ...td, color: "#94a3b8", fontWeight: 700 }}>{i + 1}</td>
-                      <td style={td}><b>{D(it.name)}</b></td>
+                      <td style={td}><b>{D(it.name)}</b>{invoice.bookingRef && it.bookingLine ? <span style={{ marginInlineStart: "1.4mm", background: "#fef3c7", color: "#92400e", fontSize: "7px", fontWeight: 800, padding: ".2mm 1.2mm", borderRadius: "1mm", ...INV_EXACT }}><PrintLtr>{invoice.bookingRef}</PrintLtr> · {L("LOCK RATE")}</span> : invoice.bookingRef && invoice.items && invoice.items.some((x) => x.bookingLine && x.name === it.name) ? <span style={{ marginInlineStart: "1.4mm", background: "#e2e8f0", color: "#334155", fontSize: "7px", fontWeight: 800, padding: ".2mm 1.2mm", borderRadius: "1mm", ...INV_EXACT }}>{L("AAJ KA RATE")}</span> : null}</td>
                       <td style={{ ...td, textAlign: "end" }}><PrintLtr>{fmtQty(it.qty)}</PrintLtr></td>
                       <td style={{ ...td, textAlign: "center" }}>{D(it.unit || "-")}</td>
                       <td style={{ ...td, textAlign: "end" }}><PrintLtr>{fmtMoney(it.price)}</PrintLtr></td>
@@ -13957,6 +14127,7 @@ function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urd
             {/* delivery + totals */}
             <div style={{ padding: "4.6mm 10mm 0", display: "flex", gap: "6mm", alignItems: "flex-start" }}>
               <div style={{ flex: 1, minWidth: 0 }}>
+                {bkInfo && <InvBookingBox info={bkInfo} L={L} D={D} />}
                 {include.delivery !== false && hasDelivery && (
                   <div style={{ border: "1px solid #e2e8f0", borderRadius: "2.6mm", overflow: "hidden" }}>
                     <div style={{ background: "#f8fafc", padding: "1.8mm 3mm", fontWeight: 800, fontSize: "10.5px", borderBottom: "1px solid #e2e8f0", ...INV_EXACT }}>{L("Rickshaw & Delivery Details")}</div>
@@ -13973,6 +14144,30 @@ function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urd
                   <div style={k}>{L("Amount in words (this purchase)")}</div>
                   <div style={{ marginTop: ".8mm", fontWeight: 700 }}>{printWords(n.total, urdu)}</div>
                 </div>
+                {include.monthMaal !== false && mm && (
+                  <div style={{ marginTop: "3.4mm", border: "1px solid #e2e8f0", borderRadius: "2.6mm", overflow: "hidden" }} data-month-maal>
+                    <div style={{ background: "#f8fafc", padding: "1.8mm 3mm", fontWeight: 800, fontSize: "10px", borderBottom: "1px solid #e2e8f0", display: "flex", justifyContent: "space-between", ...INV_EXACT }}>
+                      <span>{L("Is mahine ab tak")} — {printMonth(mm.label, urdu)}</span>
+                      <span style={{ color: "#64748b", fontWeight: 600 }}><PrintLtr>{mm.bills}</PrintLtr> {L(mm.bills === 1 ? "bill" : "bills")}</span>
+                    </div>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "9.5px" }}>
+                      <thead><tr style={{ color: "#64748b", fontSize: "7.5px", textTransform: "uppercase", letterSpacing: urdu ? 0 : ".08em" }}>
+                        <th style={{ textAlign: "start", padding: "1.4mm 3mm", fontWeight: 800 }}>{L("Maal")}</th>
+                        <th style={{ textAlign: tr, padding: "1.4mm 2mm", fontWeight: 800 }}>{L("Pehle")}</th>
+                        <th style={{ textAlign: tr, padding: "1.4mm 2mm", fontWeight: 800 }}>{L("Is bill mein")}</th>
+                        <th style={{ textAlign: tr, padding: "1.4mm 3mm", fontWeight: 800 }}>{L("Ab tak total")}</th>
+                      </tr></thead>
+                      <tbody>{mm.rows.map((r, i) => (
+                        <tr key={i} style={{ borderTop: "1px solid #f1f5f9" }}>
+                          <td style={{ padding: "1.3mm 3mm" }}>{D(r.name)}</td>
+                          <td style={{ padding: "1.3mm 2mm", textAlign: tr, color: "#475569" }}>{r.before ? invQty(r.before, r.unit, D) : "—"}</td>
+                          <td style={{ padding: "1.3mm 2mm", textAlign: tr, fontWeight: 700 }}>{r.now ? <>+ {invQty(r.now, r.unit, D)}</> : "—"}</td>
+                          <td style={{ padding: "1.3mm 3mm", textAlign: tr, fontWeight: 800, color: blue }}>{invQty(r.total, r.unit, D)}</td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                )}
               </div>
               <div style={{ width: "76mm", flexShrink: 0 }}>
                 <div style={{ borderRadius: "3mm", overflow: "hidden", border: "1px solid #e2e8f0" }}>
@@ -13989,8 +14184,8 @@ function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urd
                     </>
                   )}
                   <div style={{ padding: "1.6mm 3.6mm 1mm" }}>
+                    {n.advance > 0 && row(`${L("Booking Advance")}${invoice.bookingRef ? ` (${invoice.bookingRef})` : ""}`, `− ${fmtMoney(n.advance)}`, { color: "#b45309" })}
                     {row(L("Payment Received"), `− ${fmtMoney(n.paid)}`, { color: "#047857" })}
-                    {n.advance > 0 && row(`${L("Advance Applied")}${invoice.bookingRef ? ` (${invoice.bookingRef})` : ""}`, `− ${fmtMoney(n.advance)}`, { color: "#047857" })}
                   </div>
                   {sumBar(
                     !n.cash && include.prevBalance !== false ? L("OUTSTANDING BALANCE") : L("Is bill ka baqi"),
@@ -14049,6 +14244,8 @@ function InvoiceThermalProDoc({ invoice, settings, size, include, copies, urdu, 
   const D = (x) => printD(x, urdu);
   const n = invProNumbers(invoice);
   const small = size === "t58";
+  const tmm = include.monthMaal !== false ? invMonthMaal(invoice) : null;
+  const tbk = bk3InvoiceInfo(invoice);
   const time = invProTime(invoice);
   const st = INV_PRO_STATUS[n.status];
   const m = (x) => fmtMoney(x).replace("Rs ", "");
@@ -14099,8 +14296,8 @@ function InvoiceThermalProDoc({ invoice, settings, size, include, copies, urdu, 
                 <div style={{ borderBottom: "1px dashed #000", paddingBottom: ".4mm" }}><PrintRow l={L("TOTAL")} v={m(n.grand)} bold /></div>
               </>
             )}
+            {n.advance > 0 && <PrintRow l={L("Booking Advance")} v={`-${m(n.advance)}`} />}
             <PrintRow l={L("Payment Received")} v={`-${m(n.paid)}`} />
-            {n.advance > 0 && <PrintRow l={L("Advance Applied")} v={`-${m(n.advance)}`} />}
             <div style={{ border: "1.5px solid #000", padding: small ? ".8mm 1mm" : "1.2mm 1.6mm", margin: "1.4mm 0" }}>
               {small ? (
                 <>
@@ -14119,6 +14316,18 @@ function InvoiceThermalProDoc({ invoice, settings, size, include, copies, urdu, 
               </>
             )}
             {!small && <>{rule()}<div style={{ textAlign: "center", fontSize: ".9em" }}>{printWords(n.total, urdu)}</div></>}
+            {tbk && <InvBookingThermal info={tbk} L={L} D={D} small={small} rule={rule} />}
+            {include.monthMaal !== false && tmm && (
+              <>{rule()}
+                <div style={{ textAlign: "center", fontWeight: 800 }}>{L("Is mahine ab tak")} — {printMonth(tmm.label, urdu)}</div>
+                {tmm.rows.slice(0, small ? 4 : 6).map((r, i) => (
+                  <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: "2mm", fontSize: small ? ".9em" : "1em" }}>
+                    <span>{D(r.name)}{r.now ? <span style={{ fontSize: ".85em" }}> (+<PrintLtr>{Number(r.now).toLocaleString("en-PK")}</PrintLtr>)</span> : null}</span>
+                    <b>{invQty(r.total, r.unit, D)}</b>
+                  </div>
+                ))}
+              </>
+            )}
             {include.recvProof && recvProofs && recvProofs.length > 0 && (
               <>{rule()}<div style={{ textAlign: "center", fontWeight: 700 }}>{L("Receiving Proof")}</div>{recvProofs.map((p) => <img key={p.receiving_id} src={recvSafeImageSrc(p.proof_image)} alt="" style={PRINT_THERMAL_IMG} />)}</>
             )}
@@ -14152,6 +14361,7 @@ Object.entries({
   "Customer signature": "گاہک کے دستخط", "For": "منجانب", "Shukriya! · QR scan karke invoice check karein · Computer generated": "شکریہ! · QR اسکین کر کے انوائس چیک کریں · کمپیوٹر سے تیار",
   "Purchase": "خریداری", "Rickshaw": "رکشہ", "DELIVERY": "ڈیلیوری", "Rent": "کرایہ", "Recv": "وصول", "Scan = invoice check": "اسکین = انوائس چیک",
   "Scan karke invoice check karein": "اسکین کر کے انوائس چیک کریں", "Shukriya!": "شکریہ!", "Payment Received": "وصول شدہ ادائیگی",
+  "Is mahine ab tak": "اس مہینے اب تک", "Maal": "مال", "Pehle": "پہلے", "Is bill mein": "اس بل میں", "Ab tak total": "اب تک کل", "bill": "بل", "bills": "بل",
 }).forEach(([en, ur]) => { if (!PRINT_URDU[en]) PRINT_URDU[en] = ur; });
 
 /* ============================================================
@@ -14461,7 +14671,7 @@ function QrSvg({ text, sizeMm = 20, style }) {
    same time do not overwrite each other's vouchers.
    ============================================================ */
 
-const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests", urduDict: "ct-urdu-dict" };
+const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests", urduDict: "ct-urdu-dict", bookingReqs: "ct-booking-requests" };
 
 const FIN_DEFAULT_SETTINGS = {
   categories: [
@@ -14518,11 +14728,11 @@ Object.entries(FIN_URDU).forEach(([en, ur]) => {
 
 /* ---------------- Store ---------------- */
 
-const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [], urduDict: {} };
+const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [], urduDict: {}, bookingReqs: [] };
 const finListeners = new Set();
 // Full (all-branch) copies; finState holds the active branch's view.
 const finRaw = {};
-const FIN_BR_ARRAYS = ["vouchers", "closings", "moves", "portalPay", "portalMsgs", "employees", "attendance", "leaves", "advances", "salarySheets", "creditLog", "creditRequests"];
+const FIN_BR_ARRAYS = ["vouchers", "closings", "moves", "portalPay", "portalMsgs", "employees", "attendance", "leaves", "advances", "salarySheets", "creditLog", "creditRequests", "bookingReqs"];
 function finBrView(name, v) {
   return FIN_BR_ARRAYS.includes(name) && typeof brScopeList === "function" ? brScopeList(v, brScope, name) : v;
 }
@@ -16503,7 +16713,7 @@ function VoucherWorkspace({ voucherId, focusK, rev, currentUser, users, branches
 // What a scanner typed: a voucher / invoice QR link, or a plain voucher / invoice number.
 function finParseScan(text) {
   const s = String(text || "").trim();
-  const m = s.match(/verify=([ivelaswc])\.([^&\s]+)/);
+  const m = s.match(/verify=([ivelaswcb])\.([^&\s]+)/);
   if (m) {
     const k = s.match(/[&?]k=(\d+)/);
     const r = s.match(/[&?]r=(\d+)/);
@@ -17463,7 +17673,7 @@ function docVerifyUrl(kind, id) {
 function docVerifyParse() {
   try {
     const h = String(window.location.hash || "");
-    const m = h.match(/verify=([ivelaswc])\.([^&]+)/);
+    const m = h.match(/verify=([ivelaswcb])\.([^&]+)/);
     if (!m) return null;
     const k = h.match(/[&?]k=(\d+)/);
     const r = h.match(/[&?]r=(\d+)/);
@@ -17533,7 +17743,7 @@ function InvoiceVerifyView({ invoice, settings, onOpen }) {
   }
   const cancelled = isInvoiceCancelled(invoice);
   const banner = invoiceStatusBanner(invoice);
-  const prev = (invoice.previousOutstanding || 0) + (Number(invoice.advanceApplied) || 0);
+  const prev = (invoice.previousOutstanding || 0) + invAdvInPrev(invoice);
   const outstanding = prev + (Number(invoice.balanceDue) || 0);
   return (
     <VerifyShell settings={settings} tone={cancelled ? "bad" : "ok"} title={cancelled ? "Cancelled invoice" : "Genuine invoice"}
@@ -17620,6 +17830,7 @@ function DocVerifyPage({ target, invoices, settings, onOpen, ledgerData }) {
     const inv = (invoices || []).find((i) => i.id === target.id) || null;
     return <InvoiceVerifyView invoice={inv} settings={settings} onOpen={onOpen} />;
   }
+  if (target.kind === "b") return <BookingVerifyView bookingId={target.id} {...(ledgerData || {})} settings={settings} onOpen={onOpen} />;
   if (target.kind === "c") return <CustomerBalanceVerifyView customerId={target.id} {...(ledgerData || {})} settings={settings} onOpen={onOpen} />;
   if (target.kind === "w") return <CrVerifyView target={target} settings={settings} onOpen={onOpen} />;
   if (["e", "l", "a", "s"].includes(target.kind)) return <HrVerifyView target={target} settings={settings} onOpen={onOpen} />;
@@ -17991,7 +18202,7 @@ function portalLevel(yearTotal) {
 function portalLedgerRows(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments) {
   const { entries, outstanding } = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
   let bal = Number(customer.openingBalance) || 0;
-  const rows = [...entries].sort((a, b) => String(a.date).localeCompare(String(b.date))).map((e) => {
+  const rows = [...entries].filter((e) => (Number(e.debit) || 0) > 0 || (Number(e.credit) || 0) > 0).sort((a, b) => String(a.date).localeCompare(String(b.date))).map((e) => {
     bal += (Number(e.debit) || 0) - (Number(e.credit) || 0);
     return { ...e, balance: bal };
   });
@@ -18059,7 +18270,7 @@ function PSec({ title, right, children, className = "" }) {
   );
 }
 function PPill({ s }) {
-  const map = { Paid: "bg-emerald-100 text-emerald-700", Partial: "bg-amber-100 text-amber-700", Unpaid: "bg-rose-100 text-rose-700", Pending: "bg-amber-100 text-amber-700", Verified: "bg-emerald-100 text-emerald-700", Rejected: "bg-rose-100 text-rose-700", Processing: "bg-sky-100 text-sky-700", Completed: "bg-emerald-100 text-emerald-700", Cancelled: "bg-slate-200 text-slate-600", Open: "bg-amber-100 text-amber-700", Resolved: "bg-emerald-100 text-emerald-700" };
+  const map = { Paid: "bg-emerald-100 text-emerald-700", Partial: "bg-amber-100 text-amber-700", Unpaid: "bg-rose-100 text-rose-700", Pending: "bg-amber-100 text-amber-700", Verified: "bg-emerald-100 text-emerald-700", Rejected: "bg-rose-100 text-rose-700", Processing: "bg-sky-100 text-sky-700", Completed: "bg-emerald-100 text-emerald-700", Cancelled: "bg-slate-200 text-slate-600", Open: "bg-amber-100 text-amber-700", Resolved: "bg-emerald-100 text-emerald-700", Approved: "bg-emerald-100 text-emerald-700" };
   const label = { Pending: "Pending", Verified: "Verified" }[s] || s;
   return <span className={`rounded-full px-2 py-0.5 text-[10.5px] font-extrabold uppercase whitespace-nowrap ${map[s] || "bg-slate-100 text-slate-600"}`}>{t(label)}</span>;
 }
@@ -18260,6 +18471,7 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
   const [msg, setMsg] = useState("");
   const [orderDone, setOrderDone] = useState("");
 
+  printSimpleMode = true;
   useEffect(() => { applyThemeClass("light"); }, []);
   if (!customer) return <div className="p-6 text-slate-500">{t("Account not found — please contact the shop.")}</div>;
 
@@ -18579,6 +18791,8 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
       )}
       {sheet && sheet.type === "bookings" && (
         <PSheet title="Booking" onClose={() => setSheet(null)}>
+          <div className="mx-3.5 mt-2"><button type="button" data-bkr-new className={`${P_EM} w-full`} onClick={() => setSheet({ type: "bookreq" })}>＋ {t("Nayi booking request")}</button></div>
+          <PortalBookingRequestList fin={fin} customer={customer} />
           {myBookings.length === 0 && <PSec><div className="text-[13px] text-slate-400 text-center py-3">{t("No bookings.")}</div></PSec>}
           {myBookings.map((b) => {
             const st = computeBookingState(b, invoices, payments);
@@ -18604,6 +18818,7 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
           })}
         </PSheet>
       )}
+      {sheet && sheet.type === "bookreq" && <PortalBookingRequestSheet customer={customer} products={products} fin={fin} onClose={() => setSheet({ type: "bookings" })} />}
       {sheet && sheet.type === "promise" && <PortalPromiseSheet customer={customer} outstanding={outstanding} onCreatePromise={onCreatePromise} onClose={() => setSheet(null)} />}
       {sheet && sheet.type === "notes" && (
         <PSheet title="Notifications" onClose={() => setSheet(null)}>
@@ -18629,11 +18844,12 @@ function CustomerPortal2({ currentUser, customers, invoices, payments, returns, 
           </PSec>
         </PSheet>
       )}
-      {stmtPrint && (
-        <PrintDialog kind="statement" title="Statement" subtitle={`${customer.name} · ${fmtDate(range.from)} — ${fmtDate(range.to)}`} includeDefs={[]}
-          sizeOrder={["full", "t80", "t58"]} defaultSize="full" fileName={`Statement - ${customer.name} - ${printFileDate(range.from)} to ${printFileDate(range.to)}`} onClose={() => setStmtPrint(false)}
-          renderDoc={(p) => <StatementDoc customer={customer} company={settings} from={range.from} to={range.to} opening={opening} rows={stmtRows} closing={closing} {...p} />} />
-      )}
+      {stmtPrint && (() => {
+        const lg = computeLedgerForCustomer(customer, invoices, payments, returns, exchanges, promises, transfers, adjustments);
+        return <LedgerStatementDialog customer={customer} entries={lg.entries} outstanding={lg.outstanding} monthFilter="" monthLabel={t("All Time")}
+          invoices={invoices} payments={payments} promises={promises} bookings={bookings} settings={settings} currentUser={currentUser}
+          urdu={false} onClose={() => setStmtPrint(false)} />;
+      })()}
     </div>
   );
 }
@@ -22592,6 +22808,8 @@ function lsKind(e) {
   if (String(e.type).startsWith("Exchange")) return { code: "EX", tone: ["#f5f3ff", "#6d28d9"] };
   if (String(e.type).startsWith("Adjustment")) return { code: "JV", tone: ["#f1f5f9", "#334155"] };
   if (String(e.type).startsWith("Outstanding Transfer")) return { code: "TR", tone: ["#f1f5f9", "#334155"] };
+  if (e.type === "Booking Advance") return { code: "BK", tone: ["#fff7ed", "#c2410c"] };
+  if (e.type === "Booking Advance Applied") return { code: "BA", tone: ["#fffbeb", "#b45309"] };
   if (e.type === "Booking Refund") return { code: "PV", tone: ["#fef2f2", "#b91c1c"] };
   if (/bank|cheque|easypaisa|jazz/i.test(String(e.ref || ""))) return { code: "BR", tone: ["#eff6ff", "#1d4ed8"] };
   return { code: "RV", tone: ["#ecfdf5", "#047857"] };
@@ -22614,7 +22832,19 @@ function lsNarration(e, invById, payById, urdu) {
     if (inv && (inv.vehicleNumber || inv.driverName)) parts.push([inv.vehicleType && D(inv.vehicleType), inv.vehicleNumber, inv.driverName && `(${D(inv.driverName)})`].filter(Boolean).join(" "));
     return { title, sub: parts.join(" · ") };
   }
-  if (e.type === "Payment" || e.type === "Payment Against Promise" || e.type === "Booking Advance") {
+  if (e.type === "Booking Advance") {
+    const p = payById.get(e.id);
+    const b = p && ((invMonthSrc && invMonthSrc.bookings) || []).find((x) => x.id === p.bookingId);
+    return {
+      title: `${L("Advance Booking")} — ${b ? D(b.productName) : e.ref}${b ? ` @ ${lsMoney(b.rate)}` : ""}`,
+      sub: [`${L("Advance")} ${lsMoney(e.jeb)} (${D((p && p.method) || "Cash")})`, L("udhaar par asar nahi — booking jeb mein")].join(" · "),
+    };
+  }
+  if (e.type === "Booking Advance Applied") {
+    return { title: L("Booking advance laga"), sub: [e.qty ? `${fmtQty(e.qty)} ${D(e.unit || "")}` : "", e.invoiceNumber ? `${L("Invoice")} ${e.invoiceNumber}` : ""].filter(Boolean).join(" · ") };
+  }
+  if (e.type === "Booking Refund") return { title: L("Booking advance wapas"), sub: L("udhaar par asar nahi") };
+  if (e.type === "Payment" || e.type === "Payment Against Promise") {
     const p = payById.get(e.id);
     const method = (p && p.method) || e.ref || "Cash";
     const title = /bank/i.test(method) ? `${L("Bank transfer")}` : /cheque/i.test(method) ? L("Cheque received") : /easy|jazz/i.test(method) ? L(method) : L("Cash received");
@@ -22645,17 +22875,18 @@ function lsAvgPayDays(allEntries, today) {
   return recent.length ? Math.round(recent.reduce((s, d) => s + d, 0) / recent.length) : null;
 }
 
-function lsPaginate(rows) {
+function lsPaginate(rows, firstCap) {
   const pages = [];
   let i = 0;
-  let cap = LS_FIRST_ROWS;
+  const FIRST = firstCap || LS_FIRST_ROWS;
+  let cap = FIRST;
   while (i < rows.length || pages.length === 0) {
     pages.push(rows.slice(i, i + cap));
     i += cap;
     cap = LS_NEXT_ROWS;
   }
   const last = pages[pages.length - 1];
-  const lastCap = pages.length === 1 ? LS_FIRST_ROWS : LS_NEXT_ROWS;
+  const lastCap = pages.length === 1 ? FIRST : LS_NEXT_ROWS;
   if (last.length > lastCap - LS_LAST_RESERVE) pages.push([]);
   return pages;
 }
@@ -22672,7 +22903,9 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
   const L = (k) => printL(k, urdu);
   const D = (x) => printD(x, urdu);
   const { customer, rows, opening, closing, periodLabel, stmtNo, totals, status, snapshot, limit, statusText } = data;
-  const pages = lsPaginate(rows);
+  const bks = data.bookings || [];
+  const hasJeb = bks.length > 0 || rows.some((r) => Math.abs(Number(r.jeb) || 0) > 0.005);
+  const pages = lsPaginate(rows, bks.length ? LS_FIRST_ROWS - 1 - Math.ceil(bks.length * 0.6) : LS_FIRST_ROWS);
   const total = pages.length;
   const font = urdu ? '"Noto Naskh Arabic", "Noto Nastaliq Urdu", Arial, sans-serif' : "Inter, Arial, sans-serif";
   const usedPct = limit > 0 ? Math.max(0, Math.min(100, Math.round((Math.max(0, closing) / limit) * 100))) : 0;
@@ -22692,14 +22925,16 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
       <th style={{ ...thR, width: "22mm" }}>{L("Debit")}</th>
       <th style={{ ...thR, width: "22mm" }}>{L("Credit")}</th>
       <th style={{ ...thR, width: "30mm" }}>{L("Balance")}</th>
+      {hasJeb && <th style={{ ...thR, width: "18mm", color: "#b45309" }}>{L("Jeb")}</th>}
     </tr>
   );
-  const sumRow = (label, a, b, bal, dark) => (
+  const sumRow = (label, a, b, bal, dark, jebShow) => (
     <tr style={dark ? { background: LS_NAVY, color: "#fff", ...LS_EXACT } : { background: "#f8fafc", ...LS_EXACT }}>
       <td colSpan={3} style={{ padding: "2mm 1.4mm", fontWeight: 800, textAlign: dark ? "end" : "start", fontSize: "10px" }}>{label}</td>
       <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800 }}>{a != null ? <PrintLtr>{lsMoney(a)}</PrintLtr> : ""}</td>
       <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800 }}>{b != null ? <PrintLtr>{lsMoney(b)}</PrintLtr> : ""}</td>
       <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800 }}><PrintLtr>{lsMoney(bal)} {lsDrCr(bal)}</PrintLtr></td>
+      {hasJeb && <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800, color: dark ? "#fcd34d" : "#b45309" }}>{jebShow != null ? <PrintLtr>{lsMoney(jebShow)}</PrintLtr> : ""}</td>}
     </tr>
   );
   let runDr = 0, runCr = 0;
@@ -22712,7 +22947,7 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
         pageRows.forEach((r) => { runDr += r.debit; runCr += r.credit; });
         let prevDate = "";
         return (
-          <div key={pi} style={{ width: "210mm", height: "297mm", position: "relative", overflow: "hidden", boxSizing: "border-box", breakAfter: isLast ? "auto" : "page", pageBreakAfter: isLast ? "auto" : "always", background: "#fff" }}>
+          <div key={pi} style={{ width: "210mm", height: "296mm", position: "relative", overflow: "hidden", boxSizing: "border-box", breakAfter: isLast ? "auto" : "page", pageBreakAfter: isLast ? "auto" : "always", background: "#fff" }}>
             <div style={{ position: "absolute", left: "50%", top: "55%", transform: "translate(-50%,-50%) rotate(-24deg)", fontSize: "70px", fontWeight: 900, color: "rgba(11,19,36,.028)", whiteSpace: "nowrap", pointerEvents: "none" }}>{D(settings.companyName)}</div>
             {isFirst ? (
               <>
@@ -22732,6 +22967,7 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
                     <div style={{ borderRadius: "3.5mm", background: "linear-gradient(160deg,rgba(212,169,79,.16),rgba(255,255,255,.03))", border: "1px solid rgba(212,169,79,.4)", padding: "2.6mm 3.6mm", textAlign: "end", minWidth: "50mm", ...LS_EXACT }}>
                       <div style={{ ...k, color: "#cbd5e1" }}>{L("Aap ka baqaya")}</div>
                       <div style={{ fontSize: "22px", fontWeight: 900, lineHeight: 1.15 }}><PrintLtr>Rs {lsMoney(closing)}</PrintLtr> <span style={{ fontSize: "10px", color: "#94a3b8" }}>{lsDrCr(closing)}</span></div>
+                      {bks.length > 0 && <div style={{ fontSize: "8.5px", fontWeight: 800, color: "#fcd34d", marginTop: ".4mm" }} data-ls-jeb>{L("Booking jeb")}: <PrintLtr>Rs {lsMoney(data.jebNow)}</PrintLtr> · {bks.map(({ b, st }) => `${fmtQty(st.remainingQty)} ${D(b.unit || "")}`).join(" + ")} {L("baqi")}</div>}
                       <div style={{ fontSize: "8px", color: "#cbd5e1" }}>{printDate(data.asOf, urdu)} {L("tak")}{snapshot.promise ? <> · <b style={{ color: "#f5d98b" }}>{L("Payment ka wada")} {printDate(snapshot.promise.date, urdu)}</b></> : null}</div>
                       {status && <div style={{ marginTop: "1.4mm" }}>
                         <span style={{ display: "inline-block", borderRadius: "99px", padding: ".4mm 2.2mm", fontSize: "8px", fontWeight: 800, background: status.bad ? "rgba(244,63,94,.2)" : "rgba(16,185,129,.18)", color: status.bad ? "#fda4af" : "#34d399", ...LS_EXACT }}>● {statusText}</span>{" "}
@@ -22786,6 +23022,24 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
                     </div>
                   )))}
                 </div>
+                {bks.length > 0 && (
+                  <div style={{ margin: "3mm 8mm 0", border: "1.5px solid #fcd34d", background: "#fffbeb", borderRadius: "2.6mm", padding: "2mm 3mm", ...LS_EXACT }} data-ls-bookings>
+                    <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, fontSize: "9.5px" }}><span>📦 {L("Advance Booking")}</span><span style={{ color: "#64748b", fontWeight: 600, fontSize: "8px" }}>{L("bag aur advance alag — udhaar mein nahi milte")}</span></div>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "9px", marginTop: "1mm" }}>
+                      <thead><tr style={{ color: "#64748b", fontSize: "6.8px", textTransform: "uppercase", letterSpacing: urdu ? 0 : ".08em" }}>
+                        <td>{L("Booking")}</td><td>{L("Maal")}</td><td style={{ textAlign: "end" }}>{L("Lock rate")}</td><td style={{ textAlign: "end" }}>{L("Bag (booking / liye / baqi)")}</td><td style={{ textAlign: "end" }}>{L("Advance / laga / bacha")}</td><td style={{ textAlign: "end" }}>{L("Status")}</td>
+                      </tr></thead>
+                      <tbody>{bks.map(({ b, st }) => (
+                        <tr key={b.id} style={{ fontWeight: 700 }}>
+                          <td><PrintLtr>{b.code}</PrintLtr></td><td>{D(b.productName)}</td><td style={{ textAlign: "end" }}><PrintLtr>{lsMoney(st.rate)}</PrintLtr></td>
+                          <td style={{ textAlign: "end" }}><PrintLtr>{fmtQty(st.bookedQty)} / {fmtQty(st.deliveredQty)} / </PrintLtr><b><PrintLtr>{fmtQty(st.remainingQty)}</PrintLtr></b></td>
+                          <td style={{ textAlign: "end" }}><PrintLtr>{lsMoney(st.advancePosted)} / {lsMoney(st.advanceApplied)} / </PrintLtr><b><PrintLtr>{lsMoney(Math.max(0, st.unusedAdvance))}</PrintLtr></b></td>
+                          <td style={{ textAlign: "end", color: st.status === "Completed" ? "#047857" : st.status === "Expired" ? "#b91c1c" : "#b45309" }}>{st.status === "Completed" ? `${L("POORI")} ✓` : L(st.status)}</td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                )}
               </>
             ) : (
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "3.4mm 8mm", background: LS_NAVY, color: "#fff", borderBottom: `.8mm solid ${LS_GOLD}`, ...LS_EXACT }}>
@@ -22819,8 +23073,8 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
                             <div style={{ fontSize: "6px", color: "#94a3b8", fontWeight: 700 }}>{urdu ? LS_WD_UR[d.getDay()] : LS_WD[d.getDay()]}</div>
                           </>}
                         </td>
-                        <td style={{ padding: "0 1.4mm" }}>
-                          <span style={{ whiteSpace: "nowrap", fontFamily: "Consolas, monospace", fontSize: "8px", fontWeight: 700, borderRadius: "1.2mm", padding: ".4mm 1.4mm", background: kd.tone[0], color: kd.tone[1], ...LS_EXACT }}><PrintLtr>{kd.code} · {r.ref}</PrintLtr></span>
+                        <td style={{ padding: "0 1.4mm", overflow: "hidden" }}>
+                          <span style={{ whiteSpace: "nowrap", fontFamily: "Consolas, monospace", fontSize: "8px", fontWeight: 700, borderRadius: "1.2mm", padding: ".4mm 1.4mm", background: kd.tone[0], color: kd.tone[1], display: "inline-block", maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis", verticalAlign: "middle", ...LS_EXACT }}><PrintLtr>{kd.code} · {r.ref}</PrintLtr></span>
                         </td>
                         <td style={{ padding: "0 1.4mm", overflow: "hidden" }}>
                           <div style={{ fontWeight: 700, fontSize: "10px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{nar.title}</div>
@@ -22832,17 +23086,18 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
                           <b style={{ fontSize: "10px" }}><PrintLtr>{lsMoney(r.balance)}</PrintLtr></b><span style={{ fontSize: "7.5px", color: "#94a3b8", fontWeight: 700, marginInlineStart: ".6mm" }}>{lsDrCr(r.balance)}</span>
                           <div style={{ height: ".9mm", borderRadius: "1mm", background: "#eef2f7", marginTop: ".6mm", overflow: "hidden", ...LS_EXACT }}><i style={{ display: "block", width: `${barW(r.balance)}%`, height: "100%", background: barColor(r.balance), marginInlineStart: "auto", ...LS_EXACT }} /></div>
                         </td>
+                        {hasJeb && <td style={{ padding: "0 1.4mm", textAlign: "end", color: "#b45309", fontWeight: Math.abs(Number(r.jeb) || 0) > 0.005 ? 800 : 500 }}>{Math.abs(Number(r.jeb) || 0) > 0.005 || Math.abs(Number(r.jebBal) || 0) > 0.5 ? <PrintLtr>{lsMoney(r.jebBal || 0)}</PrintLtr> : ""}</td>}
                       </tr>
                     );
                   })}
                   {isLast
-                    ? sumRow(L("Is muddat ka total"), totals.debit, totals.credit, closing, true)
+                    ? sumRow(L("Is muddat ka total"), totals.debit, totals.credit, closing, true, data.jebNow)
                     : sumRow(`${L("Carried forward")} → ${L("page")} ${pi + 2}`, runDr, runCr, pageRows.length ? pageRows[pageRows.length - 1].balance : bf.bal, true)}
                 </tbody>
               </table>
               {isFirst && (
                 <div style={{ display: "flex", gap: "3mm", fontSize: "7.5px", color: "#64748b", marginTop: "1.6mm" }}>
-                  {[["SI", "#fef2f2", "#b91c1c", "sale"], ["RV", "#ecfdf5", "#047857", "cash"], ["BR", "#eff6ff", "#1d4ed8", "bank"], ["CN", "#fffbeb", "#b45309", "return"]].map(([c, bg, fg, l]) => (
+                  {[["SI", "#fef2f2", "#b91c1c", "sale"], ["RV", "#ecfdf5", "#047857", "cash"], ["BR", "#eff6ff", "#1d4ed8", "bank"], ["CN", "#fffbeb", "#b45309", "return"], ...(hasJeb ? [["BK", "#fff7ed", "#c2410c", "booking"], ["BA", "#fffbeb", "#b45309", "booking advance laga"]] : [])].map(([c, bg, fg, l]) => (
                     <span key={c}><span style={{ fontFamily: "Consolas, monospace", fontWeight: 700, background: bg, color: fg, borderRadius: "1mm", padding: "0 1mm", ...LS_EXACT }}>{c}</span> {L(l)}</span>
                   ))}
                 </div>
@@ -22896,7 +23151,7 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
 // Everything the statement needs, worked out from the ledger.
 function lsBuildData({ customer, entries, outstanding, monthFilter, invoices, payments, promises, settings, currentUser, bookings }) {
   const today = todayISO();
-  const nonZero = entries.filter((e) => (Number(e.debit) || 0) > 0 || (Number(e.credit) || 0) > 0);
+  const nonZero = entries.filter((e) => (Number(e.debit) || 0) > 0 || (Number(e.credit) || 0) > 0 || Math.abs(Number(e.jeb) || 0) > 0.005);
   const inPeriod = monthFilter ? nonZero.filter((e) => String(e.date).slice(0, 7) === monthFilter) : nonZero;
   const before = monthFilter ? nonZero.filter((e) => String(e.date).slice(0, 7) < monthFilter) : [];
   const opening = before.length ? before[before.length - 1].balance : Number(customer.openingBalance) || 0;
@@ -22910,7 +23165,8 @@ function lsPrepare({ customer, entries, outstanding, monthFilter, invoices, paym
   const rows = inPeriod.map((e) => {
     const pay = payById.get(e.id);
     let ref = e.ref;
-    if (pay && /Payment|Booking/.test(e.type)) { try { ref = paymentReceiptNo(pay); } catch {} }
+    if (pay && /Payment|Booking Refund/.test(e.type)) { try { ref = paymentReceiptNo(pay); } catch {} }
+    if (e.type === "Booking Advance" && pay && pay.bookingCode) ref = pay.bookingCode;
     return { ...e, ref, nar: lsNarration(e, invById, payById, urdu) };
   });
   const totals = {
@@ -22918,7 +23174,7 @@ function lsPrepare({ customer, entries, outstanding, monthFilter, invoices, paym
     credit: roundMoney(rows.reduce((s, r) => s + (Number(r.credit) || 0), 0)),
     bills: rows.filter((r) => r.type === "Invoice").length,
     qty: roundQty(rows.filter((r) => r.type === "Invoice").reduce((s, r) => s + (Number(r.qty) || 0), 0)),
-    pays: rows.filter((r) => /Payment|Booking Advance/.test(r.type)).length,
+    pays: rows.filter((r) => /Payment|Booking Advance Applied/.test(r.type)).length,
     returns: rows.filter((r) => r.type === "Sales Return").length,
   };
   const [y, m] = (monthFilter || "").split("-").map(Number);
@@ -22964,6 +23220,8 @@ function lsPrepare({ customer, entries, outstanding, monthFilter, invoices, paym
     openingNote: monthFilter ? `${printDate(openingDate, urdu)} ${printL("tak", urdu)}` : printL("shuru ka", urdu),
     snapshot: { lastPay, avgDays: lsAvgPayDays(allNonZero, today), promise: prom ? { date: prom.expectedDate, amount: prom.remainingAmount } : null, delivery },
     printedBy: (currentUser && (currentUser.name || currentUser.username)) || "",
+    bookings: lsBookingSummary(customer, bookings || (invMonthSrc && invMonthSrc.bookings), invoices, payments),
+    jebNow: entries.length ? roundMoney(Number(entries[entries.length - 1].jebBal) || 0) : 0,
   };
 }
 
@@ -23362,6 +23620,610 @@ function BranchesPage({ currentUser, raw, branches, settingsAll, onOpen, onSaveB
       )}
     </div>
   );
+}
+
+/* ============================================================
+   ADVANCE BOOKING v3 — "paisa + lock rate"
+   ------------------------------------------------------------
+   - A v3 booking has a product, a locked rate, a delivery period
+     and advance payments. The advance buys bags at the locked
+     rate: bags = unused advance ÷ rate.
+   - The advance sits in a separate "jeb" (booking wallet). It is
+     NOT credited to the customer's udhaar when received. It is
+     credited ("Booking advance laga") only on the invoice that
+     delivers the booked product.
+   - When the advance runs out, the rest of the bags on that
+     invoice go at the day's rate (a normal line).
+   - Unused advance at expiry: renew, refund, or move to khata.
+   ============================================================ */
+
+const BK3_DURATIONS = [15, 30, 45, 60, 90];
+
+function computeBookingState(b, invoices, payments, opts = {}) {
+  const st = computeBookingStateBase(b, invoices, payments, opts);
+  if (!b || b.v !== 3) return st;
+  const rate = st.rate || roundMoney(Number(b.rate) || 0);
+  const khataMoved = roundMoney((b.khataMoves || []).reduce((s, m) => s + (Number(m.amount) || 0), 0));
+  const unused = roundMoney(st.advancePosted - st.advanceApplied - st.refunded - khataMoved);
+  const isCancelled = b.status === "Cancelled";
+  const remainingQty = isCancelled || rate <= 0 ? 0 : roundQty(Math.max(0, unused) / rate);
+  const bookedQty = roundQty(st.deliveredQty + remainingQty);
+  let status;
+  if (isCancelled) status = "Cancelled";
+  else if (st.advancePosted > 0.005 && unused <= 0.5) status = "Completed";
+  else if (st.expired) status = "Expired";
+  else if (st.deliveredQty > 0) status = "Partially Delivered";
+  else status = "Booked";
+  const isOpen = (status === "Booked" || status === "Partially Delivered") && unused > 0.5;
+  return {
+    ...st, isV3: true, rate, khataMoved, unusedAdvance: unused, netAdvance: roundMoney(st.advancePosted - st.refunded - khataMoved),
+    remainingQty, bookedQty, pendingQty: isCancelled ? 0 : remainingQty,
+    bookingValue: roundMoney(st.deliveredAmount + remainingQty * rate), remainingAmount: 0, outstandingValue: 0,
+    status, isOpen, expiringSoon: isOpen && st.daysToExpiry != null && st.daysToExpiry <= BOOKING_EXPIRY_WARN_DAYS,
+  };
+}
+
+// Invoices made before the booking-wallet change carry the booking advance
+// inside "previousOutstanding"; newer ones (advMode 2) do not.
+function invAdvInPrev(invoice) {
+  return invoice && invoice.advMode === 2 ? 0 : (Number(invoice && invoice.advanceApplied) || 0);
+}
+
+function bk3MadeAt(x) { const m = String((x && x.id) || "").match(/_([0-9a-z]{8})/); return m ? parseInt(m[1], 36) : 0; }
+
+// Booking numbers as they stood on one invoice (for the invoice print).
+function bk3InvoiceInfo(invoice, src) {
+  if (!invoice || !invoice.fromBookingId || invoice.bookingQty == null) return null;
+  src = src || invMonthSrc || {};
+  const b = (src.bookings || []).find((x) => x.id === invoice.fromBookingId);
+  if (!b) return null;
+  const at = bk3MadeAt(invoice);
+  const before = bookingLinkedInvoices(b, src.invoices || [], invoice.id)
+    .filter((i) => i.date < invoice.date || (i.date === invoice.date && bk3MadeAt(i) < at));
+  const qtyBefore = roundQty(before.reduce((s, i) => s + (Number(i.bookingQty) || 0), 0));
+  const advBefore = roundMoney(before.reduce((s, i) => s + (Number(i.advanceApplied) || 0), 0));
+  const qtyNow = roundQty(Number(invoice.bookingQty) || 0);
+  const advNow = roundMoney(Number(invoice.advanceApplied) || 0);
+  const upTo = (p) => String(p.date) <= String(invoice.date);
+  const pays = (src.payments || []).filter((p) => p.bookingId === b.id && upTo(p));
+  const posted = roundMoney(pays.filter((p) => p.kind !== "Refund").reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const refunded = roundMoney(pays.filter((p) => p.kind === "Refund").reduce((s, p) => s + (Number(p.amount) || 0), 0));
+  const moved = roundMoney((b.khataMoves || []).filter((m) => String(m.date) <= String(invoice.date)).reduce((s, m) => s + (Number(m.amount) || 0), 0));
+  const left = roundMoney(Math.max(0, posted - refunded - moved - advBefore - advNow));
+  const rate = roundMoney(Number(invoice.bookingRate) || Number(b.rate) || 0);
+  const total = b.v === 3 ? roundQty(qtyBefore + qtyNow + (rate > 0 ? left / rate : 0)) : roundQty(Number(b.qty) || 0);
+  const qtyLeft = roundQty(Math.max(0, total - qtyBefore - qtyNow));
+  return {
+    code: b.code, product: b.productName, unit: b.unit || "", rate, v3: b.v === 3,
+    total, qtyBefore, qtyNow, qtyLeft, posted: roundMoney(posted - refunded - moved), advBefore, advNow, left,
+    done: qtyLeft <= BOOKING_EPS && (b.v !== 3 || left <= 0.5), trip: before.length + 1, date: b.date, expiry: b.expiryDate,
+  };
+}
+
+/* ---------- A4 invoice box ---------- */
+function InvBookingBox({ info, L, D }) {
+  if (!info) return null;
+  const cell = (label, val, style, lstyle) => (
+    <div style={{ padding: "1.2mm 1mm", textAlign: "center", borderInlineEnd: "1px solid #e2e8f0", ...style }}>
+      <div style={{ fontSize: "6.5px", fontWeight: 800, letterSpacing: ".06em", textTransform: "uppercase", color: "#64748b", ...lstyle }}>{L(label)}</div>
+      <b style={{ fontSize: "12px" }}><PrintLtr>{val}</PrintLtr></b>
+    </div>
+  );
+  const grid = { display: "grid", gridTemplateColumns: "repeat(4,1fr)", border: "1px solid #e2e8f0", borderRadius: "1.8mm", overflow: "hidden", marginTop: ".8mm" };
+  const q = (n) => Number(n).toLocaleString("en-PK", { maximumFractionDigits: 2 });
+  const m = (n) => Math.round(Number(n) || 0).toLocaleString("en-PK");
+  const dark = { background: "#0f172a", color: "#fff", WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" };
+  const amber = { background: "#fffbeb", WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" };
+  return (
+    <div style={{ border: "1.5px solid #fcd34d", borderRadius: "2.6mm", overflow: "hidden", marginBottom: "3mm" }} data-booking-box>
+      <div style={{ background: "#fffbeb", padding: "1.6mm 3mm", fontWeight: 800, fontSize: "10px", borderBottom: "1px solid #fde68a", display: "flex", justifyContent: "space-between", WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+        <span>📦 {L("Advance Booking")} — <PrintLtr>{info.code}</PrintLtr> · {D(info.product)}</span>
+        {info.done ? <span style={{ color: "#047857" }}>{L("POORI")} ✓</span> : <span style={{ color: "#64748b", fontWeight: 600 }}>{L("Delivery")} #{info.trip}</span>}
+      </div>
+      <div style={{ padding: "2mm 3mm" }}>
+        <div style={{ fontSize: "7px", fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: ".1em" }}>{D(info.unit) || L("Qty")}</div>
+        <div style={grid}>
+          {cell("Booking", q(info.total))}
+          {cell("Pehle gaye", q(info.qtyBefore))}
+          {cell("Is bill", q(info.qtyNow), { ...amber, color: "#b45309" })}
+          {cell("Baqi", q(info.qtyLeft), { ...dark, borderInlineEnd: 0 }, { color: "#93c5fd" })}
+        </div>
+        {info.posted > 0 && <>
+          <div style={{ fontSize: "7px", fontWeight: 800, color: "#64748b", textTransform: "uppercase", letterSpacing: ".1em", marginTop: "1.6mm" }}>{L("Advance (Rs)")}</div>
+          <div style={grid}>
+            {cell("Advance", m(info.posted))}
+            {cell("Pehle laga", m(info.advBefore))}
+            {cell("Is bill", m(info.advNow), { ...amber, color: "#b45309" })}
+            {cell("Bacha", m(info.left), { ...dark, borderInlineEnd: 0 }, { color: "#93c5fd" })}
+          </div>
+        </>}
+        <div style={{ fontSize: "8px", color: "#64748b", marginTop: "1.2mm" }}>{L("Lock rate")} <PrintLtr>{m(info.rate)}</PrintLtr> · {L("booking")} {printDate(info.date, false)}{info.expiry ? <> · {L("delivery tak")} {printDate(info.expiry, false)}</> : null}</div>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Thermal lines ---------- */
+function InvBookingThermal({ info, L, D, small, rule }) {
+  if (!info) return null;
+  const q = (n) => Number(n).toLocaleString("en-PK", { maximumFractionDigits: 2 });
+  const m = (n) => Math.round(Number(n) || 0).toLocaleString("en-PK");
+  const row = (l, v, b) => <div style={{ display: "flex", justifyContent: "space-between" }}><span>{l}</span>{b ? <b><PrintLtr>{v}</PrintLtr></b> : <span><PrintLtr>{v}</PrintLtr></span>}</div>;
+  return (
+    <>
+      {rule()}
+      <div style={{ textAlign: "center", fontWeight: 800 }}>{L("BOOKING")} <PrintLtr>{info.code}</PrintLtr>{info.done ? " ✓" : ""}</div>
+      <div style={{ textAlign: "center", fontSize: ".9em" }}>{D(info.product)} @ <PrintLtr>{m(info.rate)}</PrintLtr></div>
+      {row(L("Booking"), `${q(info.total)} ${info.unit}`)}
+      {row(L("Pehle gaye"), q(info.qtyBefore))}
+      {row(L("Is bill"), q(info.qtyNow), true)}
+      {row(L("Baqi"), `${q(info.qtyLeft)} ${info.unit}`, true)}
+      {info.posted > 0 && !small && row(L("Advance bacha"), m(info.left))}
+    </>
+  );
+}
+
+/* ---------- Invoice form: pick a booking ---------- */
+function InvoiceBookingPicker({ bookings, customerId, invoices, payments, onPick }) {
+  useLanguage();
+  const [qty, setQty] = useState({});
+  const mine = (bookings || []).filter((b) => b.customerId === customerId && b.status !== "Cancelled")
+    .map((b) => ({ b, st: computeBookingState(b, invoices, payments) }))
+    .filter(({ st }) => st.status !== "Completed" && st.status !== "Cancelled" && (st.remainingQty > BOOKING_EPS || st.unusedAdvance > 0.5));
+  if (!mine.length) return null;
+  return (
+    <div className="mb-3 rounded-xl border-2 border-amber-400/70 bg-amber-400/10 p-3" data-booking-picker>
+      <div className="font-black text-amber-600 text-sm mb-2">📦 {t("Is customer ki advance booking")}</div>
+      {mine.map(({ b, st }) => {
+        const pct = st.bookedQty > 0 ? Math.min(100, Math.round((st.deliveredQty / st.bookedQty) * 100)) : 0;
+        const def = st.isV3 ? Math.max(1, Math.floor(st.remainingQty + 1e-6)) : st.remainingQty;
+        const v = qty[b.id] ?? String(def || "");
+        return (
+          <div key={b.id} className="rounded-lg ct-card p-2.5 mb-2" data-pick-booking={b.code}>
+            <div className="flex flex-wrap justify-between gap-2 text-[13px]">
+              <b className="ct-h">{b.code} · {b.productName}</b>
+              <span className="ct-t3 text-[12px]">{st.expired ? <span className="text-rose-500 font-bold">{t("Muddat khatam")} {fmtDate(b.expiryDate)}</span> : <>{t("Delivery tak")} {fmtDate(b.expiryDate)}</>}</span>
+            </div>
+            <div className="h-1.5 rounded bg-slate-400/20 my-1.5 overflow-hidden"><i className="block h-full bg-amber-500" style={{ width: `${pct}%` }} /></div>
+            <div className="text-[12px] ct-t2">
+              {t("Kul")} <b>{fmtQty(st.bookedQty)}</b> · {t("Pehle gaye")} <b>{fmtQty(st.deliveredQty)}</b> · {t("Baqi")} <b className="text-amber-600">{fmtQty(st.remainingQty)} {b.unit}</b> · {t("Rate")} <b>{fmtMoney(st.rate)}</b> · {t("Advance bacha")} <b className="text-emerald-600">{fmtMoney(Math.max(0, st.unusedAdvance))}</b>
+            </div>
+            {st.isOpen ? (
+              <div className="flex flex-wrap items-center gap-2 mt-2">
+                <span className="text-[12px] ct-t2">{t("Aaj kitne")} {b.unit}?</span>
+                <input type="number" step="any" min="0" className={`${inputCls} !w-28 !py-1.5`} value={v} onChange={(e) => setQty({ ...qty, [b.id]: e.target.value })} data-pick-qty={b.code} />
+                <button type="button" className="rounded-lg bg-amber-500 hover:bg-amber-600 text-amber-950 font-extrabold text-[12.5px] px-3 py-1.5" onClick={() => onPick(b, st, v)} data-pick-go={b.code}>{t("Booking se maal do")}</button>
+                {st.isV3 && <span className="text-[11px] ct-t3">{t("Advance se zyada bag aaj ke rate par lagenge")}</span>}
+              </div>
+            ) : <div className="text-[12px] text-rose-500 font-bold mt-1">{t("Admin pehle muddat barhaye (Renew), phir maal de sakte hain.")}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---------- New booking form (v3) ---------- */
+function BookingCreateForm({ customers, products, onSave, onCancel, initial }) {
+  useLanguage();
+  const firstProduct = (initial && products.find((p) => p.id === initial.productId)) || products[0];
+  const [paymentId] = useState(() => uid("pay"));
+  const [custSearch, setCustSearch] = useState("");
+  const [form, setForm] = useState({
+    customerId: customers[0]?.id || "", productId: firstProduct?.id || "", customName: "",
+    unit: firstProduct?.unit || "Bag", rate: firstProduct ? String(firstProduct.price ?? "") : "",
+    date: todayISO(), days: "30", advanceAmount: "", advanceMethod: "Cash", reference: "", notes: "", terms: DEFAULT_BOOKING_TERMS,
+    ...(initial || {}),
+  });
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const product = products.find((p) => p.id === form.productId);
+  const selectedCustomer = customers.find((c) => c.id === form.customerId);
+  const qs = custSearch.trim().toLowerCase();
+  const filteredCustomers = customers.filter((c) => !qs || c.name.toLowerCase().includes(qs) || (c.phone || "").includes(qs) || c.id === form.customerId);
+  const rate = roundMoney(Number(form.rate) || 0);
+  const advance = roundMoney(Number(form.advanceAmount) || 0);
+  const days = Math.max(1, Math.round(Number(form.days) || 30));
+  const expiry = finAddDays(form.date || todayISO(), days);
+  const bags = rate > 0 ? roundQty(advance / rate) : 0;
+
+  function pickProduct(productId) {
+    const p = products.find((x) => x.id === productId);
+    setForm((f) => ({ ...f, productId, unit: p ? p.unit : f.unit, rate: p ? String(p.price ?? "") : f.rate }));
+  }
+  function submit() {
+    if (busy) return;
+    if (!selectedCustomer) { setError(t("Customer select karein.")); return; }
+    const productName = product ? product.name : form.customName.trim();
+    if (!productName) { setError(t("Product chunein ya naam likhein.")); return; }
+    if (!(rate > 0)) { setError(t("Lock rate 0 se zyada ho.")); return; }
+    if (!(advance > 0)) { setError(t("Advance ki raqam likhein.")); return; }
+    if (!form.date) { setError(t("Booking ki tareekh zaroori hai.")); return; }
+    setError(""); setBusy(true);
+    const ok = onSave({
+      mode: "v3", customerId: selectedCustomer.id, productId: product ? product.id : "", productName,
+      unit: String(form.unit || "").trim(), qty: advance / rate, rate, date: form.date, durationDays: days, expiryDate: expiry,
+      advanceAmount: advance, advanceMethod: form.advanceMethod, advanceReference: form.reference.trim(), advancePaymentId: paymentId,
+      notes: form.notes.trim(), terms: form.terms.trim(),
+    });
+    if (!ok) setBusy(false);
+  }
+  return (
+    <div data-booking-form="v3">
+      <Field label="Customer">
+        <input className={`${inputCls} mb-1`} placeholder={t("Search customer...")} value={custSearch} onChange={(e) => setCustSearch(e.target.value)} />
+        <select className={inputCls} value={form.customerId} onChange={(e) => setForm({ ...form, customerId: e.target.value })} data-f="bk-customer">
+          <option value="">{t("Select Customer")}</option>
+          {filteredCustomers.map((c) => <option key={c.id} value={c.id}>{c.name}{c.phone ? ` — ${c.phone}` : ""}</option>)}
+        </select>
+      </Field>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="sm:col-span-2"><Field label="Product">
+          <select className={inputCls} value={form.productId} onChange={(e) => pickProduct(e.target.value)} data-f="bk-product">
+            <option value="">{t("Custom Item")}</option>
+            {products.map((p) => <option key={p.id} value={p.id}>{p.name} ({p.unit}) — {fmtMoney(p.price)}</option>)}
+          </select>
+        </Field></div>
+        <Field label="Unit"><input className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} /></Field>
+      </div>
+      {!product && <Field label="Item name"><input className={inputCls} value={form.customName} onChange={(e) => setForm({ ...form, customName: e.target.value })} /></Field>}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="Rate (lock)"><input type="number" step="any" min="0" className={inputCls} value={form.rate} onChange={(e) => setForm({ ...form, rate: e.target.value })} data-f="bk-rate" /></Field>
+        <Field label="Advance (Rs)"><input type="number" step="any" min="0" className={inputCls} value={form.advanceAmount} onChange={(e) => setForm({ ...form, advanceAmount: e.target.value })} data-f="bk-advance" /></Field>
+        <Field label="Payment Method">
+          <select className={inputCls} value={form.advanceMethod} onChange={(e) => setForm({ ...form, advanceMethod: e.target.value })}>
+            {BOOKING_PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
+          </select>
+        </Field>
+      </div>
+      {product && rate > 0 && Number(form.rate) !== Number(product.price) && (
+        <div className="text-xs text-amber-600 font-bold -mt-2 mb-3">{t("Aaj ka rate")} {fmtMoney(product.price)} — {t("booking mein lock")} {fmtMoney(rate)}</div>
+      )}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <Field label="Booking Date"><input type="date" className={inputCls} value={form.date} onChange={(e) => setForm({ ...form, date: e.target.value })} /></Field>
+        <Field label="Delivery agreement (din)">
+          <div className="flex gap-1.5 flex-wrap">
+            {BK3_DURATIONS.map((d) => <button key={d} type="button" onClick={() => setForm({ ...form, days: String(d) })} className={`rounded-lg px-2.5 py-1.5 text-[12.5px] font-bold ${Number(form.days) === d ? "bg-emerald-500 text-emerald-950" : "ct-chip ct-t2"}`}>{d}</button>)}
+            <input type="number" min="1" className={`${inputCls} !w-20 !py-1.5`} value={form.days} onChange={(e) => setForm({ ...form, days: e.target.value })} data-f="bk-days" />
+          </div>
+        </Field>
+        <Field label="Reference (bank / cheque)"><input className={inputCls} value={form.reference} onChange={(e) => setForm({ ...form, reference: e.target.value })} /></Field>
+      </div>
+      <Field label="Notes"><input className={inputCls} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} /></Field>
+      <Field label="Terms"><textarea className={`${inputCls} h-20`} value={form.terms} onChange={(e) => setForm({ ...form, terms: e.target.value })} /></Field>
+      <div className="rounded-xl border border-amber-400/50 bg-amber-400/10 p-3 text-sm space-y-1 mb-3">
+        <div className="flex justify-between"><span>{t("Advance")}</span><b className="text-emerald-600">{fmtMoney(advance)}</b></div>
+        <div className="flex justify-between"><span>{t("Lock rate")}</span><b>{fmtMoney(rate)}</b></div>
+        <div className="flex justify-between border-t border-amber-400/40 pt-1"><span className="font-bold">{t("Is paisay ke")} {form.unit || ""}</span><b className="text-amber-600 text-base" data-bk-bags>{fmtQty(bags)}</b></div>
+        <div className="text-[11.5px] ct-t3">{t("Delivery tak")}: <b>{fmtDate(expiry)}</b> ({days} {t("din")}) · {t("Advance alag jeb mein rahega — sirf is maal ki invoice par katega. Advance khatam hone ke baad baqi maal aaj ke rate par.")}</div>
+      </div>
+      {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
+      <div className="flex gap-2">
+        <Btn onClick={submit} disabled={busy}>{busy ? t("Saving...") : t("Booking save + slip")}</Btn>
+        <Btn variant="ghost" onClick={onCancel}>{t("Cancel")}</Btn>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Booking slip (print) with QR ---------- */
+function BookingSlip3({ booking, state, settings, customer }) {
+  const terms = (booking.terms || DEFAULT_BOOKING_TERMS).split("\n").filter((l) => l.trim());
+  return (
+    <div className="bg-white text-slate-900 text-sm" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }} data-booking-slip={booking.code}>
+      <BookingPrintHeader settings={settings} title="Advance Booking Slip" />
+      <div className="flex justify-between items-start gap-4 mb-3">
+        <div>
+          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400">Customer</div>
+          <div className="font-bold text-base">{booking.customerName}</div>
+          {(customer?.phone || booking.customerPhone) && <div className="text-slate-500">{customer?.phone || booking.customerPhone}</div>}
+          {customer?.address && <div className="text-slate-500">{customer.address}</div>}
+        </div>
+        <div className="text-right text-xs">
+          <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{booking.code}</div>
+          <div className="mt-1 text-slate-500">Booking: <b className="text-slate-700">{fmtDate(booking.date)}</b></div>
+          <div className="text-slate-500">Delivery tak: <b className="text-red-700">{fmtDate(booking.expiryDate)}</b>{booking.durationDays ? ` (${booking.durationDays} din)` : ""}</div>
+        </div>
+      </div>
+      <table className="w-full text-sm mb-3">
+        <thead><tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
+          <th className="py-2 px-2 text-left">Maal</th><th className="py-2 px-2 text-right">Lock rate</th><th className="py-2 px-2 text-right">Advance</th><th className="py-2 px-2 text-right">Is paisay ke {booking.unit || ""}</th>
+        </tr></thead>
+        <tbody><tr className="border-b border-slate-200">
+          <td className="py-2 px-2 font-bold">{booking.productName}</td>
+          <td className="py-2 px-2 text-right">{fmtMoney(state.rate)}</td>
+          <td className="py-2 px-2 text-right">{fmtMoney(state.advancePosted)}</td>
+          <td className="py-2 px-2 text-right font-black">{fmtQty(roundQty(state.advancePosted / (state.rate || 1)))}</td>
+        </tr></tbody>
+      </table>
+      <div className="flex justify-between items-end gap-4 mb-3">
+        <div className="text-center">
+          <QrSvg text={docVerifyUrl("b", booking.id)} sizeMm={24} />
+          <div className="text-[9px] text-slate-500 font-bold mt-0.5">SCAN = LIVE BAQI</div>
+        </div>
+        <div className="w-80 space-y-1">
+          <BookingKV label="Advance mila" value={fmtMoney(state.advancePosted)} tone="text-emerald-700" />
+          {state.deliveredQty > 0 && <BookingKV label="Diya gaya" value={`${fmtQty(state.deliveredQty)} ${booking.unit || ""}`} />}
+          {state.advanceApplied > 0 && <BookingKV label="Advance laga" value={fmtMoney(state.advanceApplied)} />}
+          <div className="flex justify-between border-t-2 border-slate-900 pt-1.5 mt-1">
+            <span className="font-black uppercase text-blue-700">Baqi {booking.unit || ""}</span>
+            <span className="font-black text-lg text-blue-700">{fmtQty(state.remainingQty)} · {fmtMoney(Math.max(0, state.unusedAdvance))}</span>
+          </div>
+        </div>
+      </div>
+      <div className="text-[11px] text-slate-600 mb-2">Advance khatam hone ke baad baqi maal us din ke rate par milega. Maal lene par ye slip dikhayein.</div>
+      {booking.notes && <div className="text-xs text-slate-600 mb-2"><span className="font-bold">Notes:</span> {booking.notes}</div>}
+      <div className="border border-slate-300 p-2 text-[11px] text-slate-600 mb-8">
+        <div className="font-black uppercase text-slate-700 mb-1">Terms & Conditions</div>
+        {terms.map((line, idx) => <div key={idx}>{line}</div>)}
+      </div>
+      <div className="flex justify-between gap-8 text-xs pt-6">
+        <div className="flex-1 border-t border-slate-900 pt-1 text-center">Customer Signature</div>
+        <div className="flex-1 border-t border-slate-900 pt-1 text-center">Authorized Signature</div>
+      </div>
+    </div>
+  );
+}
+
+function bk3WaText(booking, state, settings) {
+  return [
+    `${settings.companyName} — Advance Booking ${booking.code}`,
+    `${booking.customerName}`,
+    `${booking.productName} @ ${fmtMoney(state.rate)} (lock)`,
+    `Advance: ${fmtMoney(state.advancePosted)} · Diya: ${fmtQty(state.deliveredQty)} ${booking.unit || ""}`,
+    `Baqi: ${fmtQty(state.remainingQty)} ${booking.unit || ""} (${fmtMoney(Math.max(0, state.unusedAdvance))})`,
+    `Delivery tak: ${fmtDate(booking.expiryDate)}`,
+    `Live: ${docVerifyUrl("b", booking.id)}`,
+  ].join("\n");
+}
+
+/* ---------- QR verify page ---------- */
+function BookingVerifyView({ bookingId, bookings, invoices, payments, settings, onOpen }) {
+  const b = (bookings || []).find((x) => x.id === bookingId);
+  if (!b) return <VerifyShell settings={settings} tone="bad" title="Booking not found" sub="This QR code does not match our records." onOpen={onOpen}><div className="text-[14px] text-slate-600">The code may not be from this shop.</div></VerifyShell>;
+  const st = computeBookingState(b, invoices || [], payments || []);
+  return (
+    <VerifyShell settings={settings} tone={st.status === "Cancelled" ? "bad" : "ok"} title={`Booking ${b.code} · ${st.status}`} sub={b.customerName} onOpen={onOpen}>
+      <VerifyRow l="Maal" v={`${b.productName} @ ${fmtMoney(st.rate)}`} />
+      <VerifyRow l="Advance" v={fmtMoney(st.advancePosted)} />
+      <VerifyRow l="Diya gaya" v={`${fmtQty(st.deliveredQty)} ${b.unit || ""}`} />
+      <VerifyRow l="Baqi" v={`${fmtQty(st.remainingQty)} ${b.unit || ""}`} strong />
+      <VerifyRow l="Advance bacha" v={fmtMoney(Math.max(0, st.unusedAdvance))} />
+      <VerifyRow l="Delivery tak" v={fmtDate(b.expiryDate)} tone={st.expired ? "text-rose-600" : ""} />
+      {st.deliveries.length > 0 && (
+        <div className="mt-3 text-[12.5px]">
+          {st.deliveries.map((d) => <div key={d.invoiceId} className="flex justify-between border-t border-slate-100 py-1"><span>{fmtDate(d.date)} · {d.invoiceNumber}</span><b>{fmtQty(d.qty)} {b.unit || ""}</b></div>)}
+        </div>
+      )}
+    </VerifyShell>
+  );
+}
+
+/* ---------- Ledger statement: bookings summary ---------- */
+function lsBookingSummary(customer, bookings, invoices, payments) {
+  try {
+    return (bookings || []).filter((b) => b.customerId === customer.id && b.status !== "Cancelled")
+      .map((b) => ({ b, st: computeBookingState(b, invoices || [], payments || []) }))
+      .filter(({ st }) => st.advancePosted > 0.005 || st.deliveredQty > 0)
+      .sort((x, y) => String(y.b.date).localeCompare(String(x.b.date)))
+      .slice(0, 3);
+  } catch { return []; }
+}
+
+Object.entries({
+  "Advance Booking": "ایڈوانس بکنگ", "POORI": "مکمل", "Delivery": "ڈیلیوری", "Booking": "بکنگ", "Pehle gaye": "پہلے گئے", "Is bill": "اس بل", "Baqi": "باقی",
+  "Advance (Rs)": "ایڈوانس (روپے)", "Advance": "ایڈوانس", "Pehle laga": "پہلے لگا", "Bacha": "بچا", "Lock rate": "لاک ریٹ", "booking": "بکنگ", "delivery tak": "ڈیلیوری تک",
+  "BOOKING": "بکنگ", "Advance bacha": "ایڈوانس بچا", "Booking Advance": "بکنگ ایڈوانس", "Booking jeb": "بکنگ جیب", "Jeb": "جیب", "Booking advance laga": "بکنگ ایڈوانس لگا",
+  "bag baqi": "باقی", "Booking advance khaate mein": "بکنگ ایڈوانس کھاتے میں", "LOCK RATE": "لاک ریٹ", "AAJ KA RATE": "آج کا ریٹ",
+}).forEach(([en, ur]) => { if (!PRINT_URDU[en]) PRINT_URDU[en] = ur; });
+
+/* ============================================================
+   PORTAL BOOKING REQUEST
+   Customer (portal / app) asks for an advance booking → staff approve it
+   on the Advance Booking page, which opens the normal v3 booking form
+   already filled (lock rate, advance, days). Approving creates the real
+   booking (slip + QR); rejecting sends the reason back to the customer.
+   Stored in fin key "bookingReqs" (ct-booking-requests).
+   ============================================================ */
+
+const BKR_DAYS = [15, 30, 45, 60];
+
+function PortalBookingRequestSheet({ customer, products, fin, onClose }) {
+  useLanguage();
+  const list = (products || []).filter((p) => p && p.active !== false && Number(p.price) > 0);
+  const accs = portalAccounts(fin.settings);
+  const [pid, setPid] = useState(list[0] ? list[0].id : "");
+  const [by, setBy] = useState("bags");
+  const [bags, setBags] = useState("");
+  const [amount, setAmount] = useState("");
+  const [days, setDays] = useState(30);
+  const [method, setMethod] = useState(accs[0] ? accs[0].id : "shop");
+  const [txn, setTxn] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(null);
+  const p = list.find((x) => x.id === pid);
+  const rate = p ? roundMoney(Number(p.price) || 0) : 0;
+  const qty = by === "bags" ? roundQty(Number(bags) || 0) : rate > 0 ? roundQty((Number(amount) || 0) / rate) : 0;
+  const total = by === "bags" ? roundMoney(qty * rate) : roundMoney(Number(amount) || 0);
+  const acc = accs.find((a) => a.id === method);
+
+  async function submit() {
+    if (!p || !(qty > 0) || !(total > 0)) { alert(t("Product aur bag / raqam likhein.")); return; }
+    setBusy(true);
+    try {
+      let code = "";
+      await finMutate("bookingReqs", (l) => {
+        code = portalCode(l, "BKR");
+        return [...l, {
+          id: uid("bkr"), code, customerId: customer.id, customerName: customer.name, customerPhone: customer.phone || "",
+          branchId: customer.branchId || "", productId: p.id, productName: p.name, unit: p.unit || "Bag",
+          qty, rate, amount: total, days: Number(days) || 30,
+          method: acc ? (acc.type === "wallet" ? "Easypaisa/JazzCash" : "Bank Transfer") : "Cash",
+          accountName: acc ? (acc.bankName || acc.name) : "", txnId: txn.trim(), note: note.trim(),
+          status: "Pending", at: new Date().toISOString(),
+        }];
+      });
+      setDone(code);
+    } catch (e) { console.error(e); alert(t("Could not send. Check your internet connection and try again.")); }
+    setBusy(false);
+  }
+
+  if (done) {
+    return (
+      <PSheet title="Booking request" onClose={onClose}>
+        <PSec><div className="text-center py-4">
+          <div className="text-[44px]">📨</div>
+          <div className="text-[17px] font-extrabold text-slate-900">{t("Request bhej di")} · {done}</div>
+          <div className="text-[13px] text-slate-500 mt-1">{t("Dukaan advance check kar ke booking approve karegi. Approve hote hi rate lock aur slip yahan nazar aayegi.")}</div>
+        </div><button type="button" className={`${P_EM} w-full`} onClick={onClose}>{t("OK")}</button></PSec>
+      </PSheet>
+    );
+  }
+  const chip = (on) => `flex-1 rounded-xl py-2.5 text-[13px] font-extrabold ${on ? "bg-emerald-600 text-white" : "bg-slate-100 text-slate-700"}`;
+  return (
+    <PSheet title="Nayi booking request" onClose={onClose}>
+      <PSec title="Kya book karna hai">
+        {list.length === 0 && <div className="text-[13px] text-slate-500">{t("Abhi koi product booking ke liye nahi.")}</div>}
+        <div className="grid grid-cols-1 gap-2">
+          {list.map((x) => (
+            <button key={x.id} type="button" onClick={() => setPid(x.id)}
+              className={`flex items-center justify-between rounded-xl px-3 py-2.5 text-left border-2 ${pid === x.id ? "border-emerald-500 bg-emerald-50" : "border-transparent bg-slate-50"}`}>
+              <span className="text-[14px] font-bold text-slate-900">{x.name}</span>
+              <span className="text-[13px] font-extrabold text-slate-700">{fmtMoney(x.price)} <span className="text-[11px] text-slate-500 font-semibold">/ {x.unit || "Bag"}</span></span>
+            </button>
+          ))}
+        </div>
+      </PSec>
+      <PSec title="Kitna">
+        <div className="flex gap-2 mb-2">
+          <button type="button" className={chip(by === "bags")} onClick={() => setBy("bags")}>{t("Bag likhein")}</button>
+          <button type="button" className={chip(by === "amount")} onClick={() => setBy("amount")}>{t("Raqam likhein")}</button>
+        </div>
+        {by === "bags"
+          ? <input type="number" inputMode="numeric" data-f="bkr-bags" className={`${P_INPUT} !text-[22px] font-black`} placeholder="0" value={bags} onChange={(e) => setBags(e.target.value)} />
+          : <input type="number" inputMode="decimal" data-f="bkr-amount" className={`${P_INPUT} !text-[22px] font-black`} placeholder="Rs" value={amount} onChange={(e) => setAmount(e.target.value)} />}
+        <div className="mt-2.5 rounded-xl bg-slate-900 text-white px-3.5 py-3 flex items-center justify-between" data-bkr-sum>
+          <div><div className="text-[11px] text-slate-400 font-bold uppercase tracking-wide">{t("Advance")}</div><div className="text-[20px] font-black">{fmtMoney(total)}</div></div>
+          <div className="text-right"><div className="text-[11px] text-slate-400 font-bold uppercase tracking-wide">{p ? p.unit || "Bag" : ""}</div><div className="text-[20px] font-black text-amber-300">{fmtQty(qty)}</div></div>
+        </div>
+        <div className="text-[12px] text-slate-500 mt-1.5">🔒 {t("Aaj ka rate")} {fmtMoney(rate)} · {t("rate dukaan ke approve karne par lock hoga")}</div>
+      </PSec>
+      <PSec title="Maal kitne din mein uthana hai">
+        <div className="flex gap-2">{BKR_DAYS.map((d) => <button key={d} type="button" className={chip(days === d)} onClick={() => setDays(d)}>{d} {t("din")}</button>)}</div>
+      </PSec>
+      <PSec title="Advance kaise denge">
+        {accs.map((a) => (
+          <label key={a.id} className="flex items-center gap-3 py-2.5 border-b border-slate-100 cursor-pointer">
+            <input type="radio" name="bkracc" checked={method === a.id} onChange={() => setMethod(a.id)} className="accent-emerald-600 w-4 h-4" />
+            <div className="flex-1 min-w-0"><div className="text-[13.5px] font-bold text-slate-900">{a.type === "wallet" ? "📱" : "🏦"} {a.bankName || a.name}</div><div className="text-[12px] text-slate-500 truncate">{a.accountTitle || ""} · {a.accountNumber}</div></div>
+          </label>
+        ))}
+        <label className="flex items-center gap-3 py-2.5 cursor-pointer"><input type="radio" name="bkracc" checked={method === "shop"} onChange={() => setMethod("shop")} className="accent-emerald-600 w-4 h-4" /><span className="text-[13.5px] font-bold text-slate-900">💵 {t("Dukaan par cash dunga")}</span></label>
+        {method !== "shop" && <input className={`${P_INPUT} mt-1`} placeholder={t("Transaction ID (agar bhej diye)")} value={txn} onChange={(e) => setTxn(e.target.value)} />}
+        <input className={`${P_INPUT} mt-2`} placeholder={t("Note (optional)")} value={note} onChange={(e) => setNote(e.target.value)} />
+      </PSec>
+      <div className="mx-3.5 mt-3">
+        <button type="button" data-bkr-send className={`${P_EM} w-full`} disabled={busy || !p || !(qty > 0)} onClick={submit}>📨 {busy ? t("Bhej rahe hain…") : t("Booking request bhejein")}</button>
+      </div>
+    </PSheet>
+  );
+}
+
+function PortalBookingRequestList({ fin, customer }) {
+  useLanguage();
+  const mine = (fin.bookingReqs || []).filter((r) => r.customerId === customer.id).sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 8);
+  if (!mine.length) return null;
+  return (
+    <PSec title="Meri booking requests">
+      {mine.map((r) => (
+        <div key={r.id} className="py-2 border-b border-slate-100 last:border-0" data-bkr-row={r.status}>
+          <div className="flex justify-between items-center gap-2"><b className="text-[13.5px]">{r.code} · {r.productName}</b><PPill s={r.status} /></div>
+          <div className="text-[12.5px] text-slate-600 mt-0.5">{fmtQty(r.qty)} {r.unit} · {fmtMoney(r.amount)} · {r.days} {t("din")} · {fmtDate(String(r.at).slice(0, 10))}</div>
+          {r.status === "Approved" && <div className="text-[12.5px] text-emerald-700 font-bold mt-0.5">✓ {t("Booking ban gayi")} {r.bookingCode} · {t("lock rate")} {fmtMoney(r.lockRate || r.rate)}</div>}
+          {r.status === "Rejected" && <div className="text-[12.5px] text-rose-600 font-semibold mt-0.5">✕ {r.reason || t("Dukaan se raabta karein")}</div>}
+        </div>
+      ))}
+    </PSec>
+  );
+}
+
+/* ---------- Staff side: panel on the Advance Booking page ---------- */
+function BookingRequestsPanel({ onApprove, actor }) {
+  useLanguage();
+  const fin = useFin();
+  const [rejectId, setRejectId] = useState("");
+  const [reason, setReason] = useState("");
+  const pend = (fin.bookingReqs || []).filter((r) => r.status === "Pending").sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  if (!pend.length) return null;
+  async function reject(r) {
+    const why = reason.trim() || "Dukaan se raabta karein";
+    await finMutate("bookingReqs", (l) => l.map((x) => (x.id === r.id ? { ...x, status: "Rejected", reason: why, decidedBy: actor || "Staff", decidedAt: new Date().toISOString() } : x)));
+    setRejectId(""); setReason("");
+  }
+  return (
+    <div className="mb-5 rounded-2xl border-2 border-emerald-500/50 bg-emerald-500/5 p-3.5" data-bkr-panel>
+      <div className="flex items-center gap-2 mb-2.5">
+        <span className="rounded-full bg-emerald-600 text-white text-[12px] font-black px-2.5 py-0.5">{pend.length}</span>
+        <div className="text-[13px] font-black uppercase tracking-wide ct-h">{t("Portal booking requests")}</div>
+        <div className="text-[12px] ct-t3">{t("customer ne app se bheji — advance confirm kar ke approve karein")}</div>
+      </div>
+      <div className="grid gap-2">
+        {pend.map((r) => (
+          <div key={r.id} className="rounded-xl ct-card p-3 flex flex-wrap items-center gap-x-5 gap-y-2" data-bkr-req={r.code}>
+            <div className="min-w-[180px]"><div className="font-black ct-h">{r.customerName}</div><div className="text-[12px] ct-t3">{r.code} · {fmtDateTime(r.at)}</div></div>
+            <div><div className="text-[11px] ct-t3 uppercase font-bold">{t("Product")}</div><div className="font-bold ct-h">{r.productName}</div></div>
+            <div><div className="text-[11px] ct-t3 uppercase font-bold">{t("Bag")}</div><div className="font-black ct-h">{fmtQty(r.qty)}</div></div>
+            <div><div className="text-[11px] ct-t3 uppercase font-bold">{t("Rate (us waqt)")}</div><div className="font-bold ct-h">{fmtMoney(r.rate)}</div></div>
+            <div><div className="text-[11px] ct-t3 uppercase font-bold">{t("Advance")}</div><div className="font-black text-emerald-500">{fmtMoney(r.amount)}</div></div>
+            <div><div className="text-[11px] ct-t3 uppercase font-bold">{t("Din")}</div><div className="font-bold ct-h">{r.days}</div></div>
+            <div><div className="text-[11px] ct-t3 uppercase font-bold">{t("Advance kaise")}</div><div className="font-bold ct-h">{r.method}{r.txnId ? ` · ${r.txnId}` : ""}</div></div>
+            {r.note && <div className="text-[12.5px] ct-t2 basis-full">“{r.note}”</div>}
+            <div className="ms-auto flex gap-2 items-center">
+              {rejectId === r.id ? (
+                <>
+                  <input className={`${inputCls} !w-52`} autoFocus placeholder={t("Wajah (customer ko nazar aayegi)")} value={reason} onChange={(e) => setReason(e.target.value)} />
+                  <Btn small variant="danger" onClick={() => reject(r)}>{t("Reject")}</Btn>
+                  <Btn small variant="ghost" onClick={() => setRejectId("")}>✕</Btn>
+                </>
+              ) : (
+                <>
+                  <Btn small variant="ghost" onClick={() => { setRejectId(r.id); setReason(""); }}>{t("Reject")}</Btn>
+                  <Btn small onClick={() => onApprove(r)} data-bkr-approve>{t("Approve → booking banao")}</Btn>
+                </>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+async function bkrMarkApproved(req, booking, actor) {
+  await finMutate("bookingReqs", (l) => l.map((x) => (x.id === req.id ? {
+    ...x, status: "Approved", bookingId: booking.id, bookingCode: booking.code, lockRate: booking.rate,
+    decidedBy: actor || "Staff", decidedAt: new Date().toISOString(),
+  } : x)));
+}
+
+Object.assign(translations.ur, {
+  "Nayi booking request": "نئی بکنگ درخواست", "Booking request": "بکنگ درخواست", "Kya book karna hai": "کیا بک کرنا ہے",
+  "Kitna": "کتنا", "Bag likhein": "بیگ لکھیں", "Raqam likhein": "رقم لکھیں", "Maal kitne din mein uthana hai": "مال کتنے دن میں اٹھانا ہے",
+  "Advance kaise denge": "ایڈوانس کیسے دیں گے", "Dukaan par cash dunga": "دکان پر کیش دوں گا", "Booking request bhejein": "بکنگ درخواست بھیجیں",
+  "Meri booking requests": "میری بکنگ درخواستیں", "Booking ban gayi": "بکنگ بن گئی", "din": "دن", "Aaj ka rate": "آج کا ریٹ",
+  "rate dukaan ke approve karne par lock hoga": "ریٹ دکان کی منظوری پر لاک ہوگا", "Request bhej di": "درخواست بھیج دی",
+  "+ Nayi booking request": "+ نئی بکنگ درخواست", "Portal booking requests": "پورٹل بکنگ درخواستیں", "Approve → booking banao": "منظور → بکنگ بنائیں",
+});
+
+function bkrInitial(r) {
+  const methods = typeof BOOKING_PAYMENT_METHODS !== "undefined" ? BOOKING_PAYMENT_METHODS : ["Cash"];
+  const m = methods.includes(r.method) ? r.method : "Cash";
+  return {
+    customerId: r.customerId, productId: r.productId || "", unit: r.unit || "Bag", rate: String(r.rate || ""),
+    days: String(r.days || 30), advanceAmount: String(r.amount || ""), advanceMethod: m, reference: r.txnId || "",
+    notes: [`Portal request ${r.code}`, r.note].filter(Boolean).join(" · "),
+  };
 }
 
 export default App;
