@@ -1237,6 +1237,7 @@ const NAV_GROUPS = [
     { id: "assistant", label: "Sales Assistant", icon: "chat" },
     { id: "estimator", label: "Cement Estimator", icon: "calc" },
     { id: "urduTranslate", label: "Urdu Translation", icon: "spark" },
+    { id: "website", label: "Website", icon: "globe", adminOnly: true },
     { id: "settings", label: "Settings", icon: "settings", adminOnly: true },
   ]},
 ];
@@ -1670,7 +1671,7 @@ function Login({ users, customers, onLogin, companyName, logoUrl, onResetUsers }
       if (u) { onLogin(u); return; }
     }
     if (a.role === "customer") {
-      const c = customers.find((x) => x.id === a.customerId);
+      const c = customers.find((x) => x.id === a.customerId && !custIsBand(x));
       if (c) { onLogin({ id: c.id, name: c.name, role: "customer", username: c.portalUsername }); return; }
     }
   }, []);
@@ -1680,7 +1681,7 @@ function Login({ users, customers, onLogin, companyName, logoUrl, onResetUsers }
     const pass = password;
     const staffMatch = users.find((x) => x.username.toLowerCase() === uname && x.password === pass);
     if (staffMatch) { setError(""); onLogin(staffMatch); return; }
-    const custMatch = customers.find((c) => c.portalUsername && c.portalUsername.toLowerCase() === uname && c.portalPassword === pass);
+    const custMatch = customers.find((c) => c.portalUsername && c.portalUsername.toLowerCase() === uname && c.portalPassword === pass && !custIsBand(c));
     if (custMatch) { setError(""); onLogin({ id: custMatch.id, name: custMatch.name, role: "customer", username: custMatch.portalUsername }); return; }
     setError("Galat username ya password.");
     setFailCount((n) => n + 1);
@@ -2939,7 +2940,7 @@ function Customers({ customers, invoices, payments, returns, exchanges, promises
             )}
             {rows.map((c) => (
               <tr key={c.id} className="border-t border-slate-100">
-                <td className="px-4 py-2 font-bold cursor-pointer hover:text-blue-700" onClick={() => openLedger(c.id)}>{c.name}</td>
+                <td className="px-4 py-2 font-bold cursor-pointer hover:text-blue-700" onClick={() => openLedger(c.id)}>{c.name}{(c.code || custIsBand(c)) && <div className="text-[11px] font-semibold text-slate-400">{c.code}{custIsBand(c) && <span className="ml-1.5 text-rose-500">· {t("Band")}</span>}</div>}</td>
                 <td className="px-4 py-2 text-slate-500">{c.phone}</td>
                 <td className="px-4 py-2 text-right">{fmtMoney(c.creditLimit)}</td>
                 <td className={`px-4 py-2 text-right font-bold ${c.outstanding > (c.creditLimit || Infinity) ? "text-red-600" : ""}`}>
@@ -9628,6 +9629,7 @@ function App() {
   /* ---------- Customers ---------- */
   function saveCustomer(data) {
     const exists = customers.some((c) => c.id === data.id);
+    if (!exists && !custCodeNum(data)) data = { ...data, code: custNextCode(customers__all), status: data.status || "Active" };
     persist.customers(exists ? customers.map((c) => (c.id === data.id ? data : c)) : [...customers, data]);
     logAudit(exists ? "Customer Updated" : "Customer Created", data.name, "");
   }
@@ -10501,6 +10503,9 @@ function App() {
     };
   }, [loading, currentUser, finLive.vouchers, finLive.settings, finLive.portalPay, finLive.portalMsgs, finLive.deliveryPlans, finLive.leaves, finLive.advances, finLive.employees, finLive.creditRequests, finLive.creditState, finLive.bookingReqs, bookings, invoices, payments]);
 
+  // Website: customer codes + account summaries for the public "Mera account" check.
+  useWebsiteSync({ loading, currentUser, customers: customers__all, setCustomers, invoices: invoices__all, payments: payments__all, returns: returns__all, exchanges: exchanges__all, promises: promises__all, transfers: transfers__all, adjustments: adjustments__all, bookings: bookings__all });
+
   // Credit rules: warnings / Red List / Watch update by themselves (any staff device).
   useEffect(() => {
     if (loading || !currentUser || !finIsStaff(currentUser) || !finLive.loaded) return undefined;
@@ -10882,6 +10887,7 @@ function App() {
         commissionPayments={commissionPayments} settings={settings} />
     ) : null,
     deliverySchedule: <DeliverySchedulePage currentUser={currentUser} bookings={bookings} invoices={invoices} payments={payments} onDeliverFromBooking={deliverFromBooking} />,
+    website: <WebsitePage customers={customers__all} products={products} settings={settings} currentUser={currentUser} saveCustomer={saveCustomer} />,
     portalRequests: <PortalRequestsPage currentUser={currentUser} onVerifyPortalPayment={onVerifyPortalPayment} settings={settings} />,
     paymentsDue: <PaymentsDuePage currentUser={currentUser} users={users} branches={branches} payments={visiblePayments} invoices={visibleInvoices} settings={settings} />,
     cashbook: <CashBookPage currentUser={currentUser} invoices={visibleInvoices} payments={visiblePayments} settings={settings} />,
@@ -14671,7 +14677,7 @@ function QrSvg({ text, sizeMm = 20, style }) {
    same time do not overwrite each other's vouchers.
    ============================================================ */
 
-const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests", urduDict: "ct-urdu-dict", bookingReqs: "ct-booking-requests" };
+const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests", urduDict: "ct-urdu-dict", bookingReqs: "ct-booking-requests", website: "ct-website", webReqs: "ct-web-requests" };
 
 const FIN_DEFAULT_SETTINGS = {
   categories: [
@@ -14728,7 +14734,7 @@ Object.entries(FIN_URDU).forEach(([en, ur]) => {
 
 /* ---------------- Store ---------------- */
 
-const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [], urduDict: {}, bookingReqs: [] };
+const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [], urduDict: {}, bookingReqs: [], website: {}, webReqs: [] };
 const finListeners = new Set();
 // Full (all-branch) copies; finState holds the active branch's view.
 const finRaw = {};
@@ -14760,7 +14766,7 @@ function finNormalizeSettings(s) {
 }
 function finNormalize(name, value) {
   if (name === "settings") return finNormalizeSettings(value);
-  if (name === "costs" || name === "portalProfiles" || name === "deliveryPlans" || name === "creditState" || name === "urduDict") return value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  if (name === "costs" || name === "portalProfiles" || name === "deliveryPlans" || name === "creditState" || name === "urduDict" || name === "website") return value && typeof value === "object" && !Array.isArray(value) ? value : {};
   return Array.isArray(value) ? value : [];
 }
 
@@ -21568,6 +21574,7 @@ function CrCustomerFields({ form, setForm, currentUser, company }) {
           ))}
         </div>
       ) : <div className="text-[12.5px] ct-t2 mb-3">{t(CR_MODES[form.creditMode || "auto"])}</div>}
+      <CustAccountFields form={form} setForm={setForm} currentUser={currentUser} />
     </div>
   );
 }
@@ -23211,7 +23218,7 @@ function lsPrepare({ customer, entries, outstanding, monthFilter, invoices, paym
     status = { bad: ["red", "blocked", "warning"].includes(s.key), grade: g.g };
     statusText = s.key === "green" ? printL("Time par", urdu) : s.key === "warning" ? `${printL("Warning", urdu)} ${s.warningsN}/${s.W}` : printL(s.label, urdu);
   } catch {}
-  const custNo = (() => { const m2 = String(customer.code || customer.id || "").match(/(\d+)/); return `CUST-${String(m2 ? m2[1] : "1").padStart(4, "0").slice(-4)}`; })();
+  const custNo = custCodeNum(customer) ? String(customer.code).toUpperCase() : (() => { const m2 = String(customer.code || customer.id || "").match(/(\d+)/); return `CUST-${String(m2 ? m2[1] : "1").padStart(4, "0").slice(-4)}`; })();
   const stmtNo = `SOA-${String(asOf).slice(2, 4)}${String(asOf).slice(5, 7)}-${String(customer.id || "").replace(/[^A-Za-z0-9]/g, "").slice(-4).toUpperCase()}`;
   const maxBal = Math.max(1, ...rows.map((r) => Number(r.balance) || 0), opening);
   return {
@@ -24225,5 +24232,346 @@ function bkrInitial(r) {
     notes: [`Portal request ${r.code}`, r.note].filter(Boolean).join(" · "),
   };
 }
+
+/* ============================================================
+   WEBSITE (separate public site) — managed from the ERP.
+   - Customer code CT-C-0001 + Active / Band (status "Inactive").
+   - ct-website      { draft, live, publishedAt, publishedBy }
+   - ct-web-requests [ { id, code WR-0001, name, phone, area, note, status, at } ]  (written by the site)
+   - ct-web-accounts { "CT-C-0012": { …summary } }  (written here, read by the
+     site only through account_check(code, last4) — never directly)
+   The ERP look is unchanged: this page uses the ERP's own components.
+   ============================================================ */
+
+function custCodeNum(c) { const m = String((c && c.code) || "").match(/^CT-C-(\d+)$/i); return m ? Number(m[1]) : 0; }
+function custCodeFmt(n) { return "CT-C-" + String(n).padStart(4, "0"); }
+function custNextCode(list) { return custCodeFmt((list || []).reduce((m, c) => Math.max(m, custCodeNum(c)), 0) + 1); }
+// Gives every customer without a code the next number, in list order (same result on every device).
+function custAssignCodes(list) {
+  if (!Array.isArray(list) || list.every((c) => custCodeNum(c))) return null;
+  let max = list.reduce((m, c) => Math.max(m, custCodeNum(c)), 0);
+  return list.map((c) => (custCodeNum(c) ? c : { ...c, code: custCodeFmt(++max) }));
+}
+function custIsBand(c) { return !!c && c.status === "Inactive"; }
+function webLast4(phone) { const d = String(phone || "").replace(/\D/g, ""); return d.length >= 4 ? d.slice(-4) : ""; }
+
+const WEB_SECTIONS = [
+  ["hero", "Upar ka banner", "heading + buttons"],
+  ["rates", "Aaj ka rate", "ERP se live"],
+  ["bestway", "Bestway / booking banner", "tasveer + booking"],
+  ["products", "Hamara maal", "products + rate"],
+  ["app", "App download", "APK + Windows"],
+  ["account", "Mera account", "code + 4 hindse"],
+  ["request", "Naya account", "request form"],
+  ["offer", "Offer / sale", "khaas pesh-kash"],
+  ["contact", "Rabta & ilaqe", "footer"],
+];
+function webDefaultContent(settings) {
+  return {
+    siteUrl: "", title: "Chaudhary Traders — Cement, steel, bricks · Okara",
+    description: "Aaj ka rate, Bestway advance booking, app download aur apna account check — Chaudhary Traders, Okara.",
+    order: WEB_SECTIONS.map(([id]) => id),
+    off: { offer: true },
+    hero: {
+      heading: "Cement, sarya aur bajri — aaj ke rate par, aap ki site tak.",
+      headingUr: "سیمنٹ، سریا، بجری — آج کے ریٹ پر، آپ کی سائٹ تک",
+      text: "Okara aur aas paas ke builders ke liye. Aaj ka rate yahan dekhein, order WhatsApp ya call par dein, aur CT ERP app se apna khaata check karein.",
+    },
+    rates: { productIds: [] },
+    bestway: {
+      tag: "Advance booking khuli hai", heading: "Bestway Cement ab Chaudhary Traders par", headingUr: "بیسٹ وے سیمنٹ اب چوہدری ٹریڈرز پر",
+      text: "Aaj advance dein, aaj ka rate lock. Jitna advance, utne bag aap ke naam — 30 din mein jab chahein uthayein.",
+      productId: "", image: "", until: "",
+    },
+    offer: { heading: "", text: "", until: "" },
+    app: { apkUrl: "downloads/ChaudharyTraders-CT-ERP.apk", apkVer: "1.2", exeUrl: "downloads/ChaudharyTraders-Setup.exe", exeVer: "1.2", appUrl: "" },
+    contact: {
+      phone: (settings && settings.companyPhone) || "0343-1672177", whatsapp: (settings && settings.companyPhone) || "0343-1672177",
+      address: (settings && settings.companyAddress) || "10-KM Faisalabad Road, Okara", hours: "Subah 8 — raat 9",
+      areas: "Okara city, Renala, Depalpur, Haveli Lakha, Basirpur, Satghara",
+    },
+  };
+}
+function webNorm(w, settings) {
+  const d = webDefaultContent(settings);
+  const fix = (c) => {
+    const x = c && typeof c === "object" ? c : {};
+    const order = Array.isArray(x.order) ? x.order.filter((id) => d.order.includes(id)) : [];
+    d.order.forEach((id) => { if (!order.includes(id)) order.push(id); });
+    return { ...d, ...x, order, off: { ...d.off, ...(x.off || {}) }, hero: { ...d.hero, ...(x.hero || {}) }, rates: { ...d.rates, ...(x.rates || {}) },
+      bestway: { ...d.bestway, ...(x.bestway || {}) }, offer: { ...d.offer, ...(x.offer || {}) }, app: { ...d.app, ...(x.app || {}) }, contact: { ...d.contact, ...(x.contact || {}) } };
+  };
+  const src = w && typeof w === "object" ? w : {};
+  return { ...src, draft: fix(src.draft || src.live), live: src.live ? fix(src.live) : null };
+}
+
+// Summary per customer code for the public "Mera account" check (staff device keeps it fresh).
+function webAccountsSnapshot(d) {
+  const out = {};
+  (d.customers || []).forEach((c) => {
+    if (!custCodeNum(c)) return;
+    const key = String(c.code).toUpperCase();
+    const row = { name: c.name, area: String(c.address || "").split(",")[0].trim(), last4: webLast4(c.phone), status: custIsBand(c) ? "Inactive" : "Active" };
+    if (row.status === "Active") {
+      let lg = { outstanding: 0 };
+      try { lg = computeLedgerForCustomer(c, d.invoices, d.payments, d.returns, d.exchanges, d.promises, d.transfers, d.adjustments); } catch {}
+      const pays = (d.payments || []).filter((p) => p.customerId === c.id && Number(p.amount) > 0 && !p.bookingId && !isPaymentLinkedToCancelledInvoice(p, d.invoices)).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+      const bills = (d.invoices || []).filter((i) => i.customerId === c.id && !isInvoiceCancelled(i)).sort((a, b) => String(a.date).localeCompare(String(b.date)));
+      const lp = pays[pays.length - 1], lb = bills[bills.length - 1];
+      row.balance = Math.round(Number(lg.outstanding) || 0);
+      row.creditLimit = Math.round(Number(c.creditLimit) || 0);
+      row.lastPay = lp ? { amount: Math.round(Number(lp.amount) || 0), date: lp.date, method: lp.method || "" } : null;
+      row.lastBill = lb ? { number: lb.number, total: Math.round(Number(lb.total) || 0), date: lb.date } : null;
+      row.bookings = (d.bookings || []).filter((b) => b.customerId === c.id && b.status !== "Cancelled").map((b) => {
+        let st = {}; try { st = computeBookingState(b, d.invoices, d.payments); } catch {}
+        if (st.status === "Completed" || st.status === "Cancelled") return null;
+        return { code: b.code, product: b.productName, unit: b.unit, rate: b.rate, booked: Math.round(Number(st.bookedQty ?? b.qty) || 0), delivered: Math.round(Number(st.deliveredQty) || 0) };
+      }).filter(Boolean).slice(0, 3);
+    }
+    out[key] = row;
+  });
+  return out;
+}
+
+function useWebsiteSync(d) {
+  const ref = React.useRef("");
+  useEffect(() => {
+    if (d.loading || !d.currentUser || d.currentUser.role !== "admin") return undefined;
+    const tm = setTimeout(() => {
+      // 1) codes for customers that have none
+      const coded = custAssignCodes(d.customers);
+      if (coded) { d.setCustomers(coded); storeSet("ct-customers", coded); return; }
+      // 2) account summaries for the website check
+      const snap = webAccountsSnapshot(d);
+      const s = JSON.stringify(snap);
+      if (s === ref.current) return;
+      ref.current = s;
+      storeSet("ct-web-accounts", snap);
+    }, 2500);
+    return () => clearTimeout(tm);
+  }, [d.loading, d.currentUser, d.customers, d.invoices, d.payments, d.bookings, d.returns, d.exchanges, d.adjustments, d.transfers]);
+}
+
+/* ---------------- Customer form: code + Active / Band ---------------- */
+function CustAccountFields({ form, setForm, currentUser }) {
+  useLanguage();
+  const can = currentUser && (currentUser.role === "admin" || hrAllow(currentUser, "credit.block"));
+  const band = custIsBand(form);
+  return (
+    <div className="border-t border-slate-200 mt-3 pt-3" data-cust-account>
+      <div className="flex items-center gap-3 mb-2">
+        <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">{t("Customer code")}</div>
+        <div className="text-[14px] font-black ct-h" data-cust-code>{form.code || t("Save karne par milega")}</div>
+      </div>
+      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500 mb-2">{t("Account")}</div>
+      {can ? (
+        <div className="flex gap-1.5 mb-1">
+          {[["Active", "Active"], ["Inactive", "Band"]].map(([k, l]) => (
+            <button key={k} type="button" onClick={() => setForm({ ...form, status: k })} data-cust-status={k}
+              className={`flex-1 rounded-xl px-2 py-2 text-[12.5px] font-bold border-2 ${(band ? "Inactive" : "Active") === k ? (k === "Active" ? "border-emerald-500 bg-emerald-500/10 ct-h" : "border-rose-500 bg-rose-500/10 text-rose-500") : "border-transparent ct-chip ct-t2"}`}>{t(l)}</button>
+          ))}
+        </div>
+      ) : <div className="text-[12.5px] ct-t2 mb-1">{band ? t("Band") : t("Active")}</div>}
+      {band && <div className="text-[12px] text-rose-500 mb-2">{t("Band account: app login band, website par 'Band' dikhega.")}</div>}
+    </div>
+  );
+}
+
+/* ---------------- ERP page: Website ---------------- */
+function WebsitePage({ customers, products, settings, currentUser, saveCustomer }) {
+  useLanguage();
+  const fin = useFin();
+  const w = webNorm(fin.website, settings);
+  const c = w.draft;
+  const [tab, setTab] = useState("content");
+  const [sel, setSel] = useState("hero");
+  const [msg, setMsg] = useState("");
+  const [lastApproved, setLastApproved] = useState(null);
+  const reqs = (fin.webReqs || []).slice().sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  const pend = reqs.filter((r) => r.status === "Pending");
+  const actor = (currentUser && (currentUser.name || currentUser.username)) || "Admin";
+  const dirty = JSON.stringify(w.draft) !== JSON.stringify(w.live);
+  const save = (patch) => finMutate("website", (cur) => { const n = webNorm(cur, settings); return { ...n, draft: { ...n.draft, ...patch } }; });
+  const saveIn = (k, patch) => save({ [k]: { ...c[k], ...patch } });
+  async function publish() {
+    await finMutate("website", (cur) => { const n = webNorm(cur, settings); return { ...n, live: n.draft, publishedAt: new Date().toISOString(), publishedBy: actor }; });
+    setMsg(t("Website par laga diya.")); setTimeout(() => setMsg(""), 2500);
+  }
+  function move(id, dir) {
+    const o = [...c.order]; const i = o.indexOf(id); const j = i + dir;
+    if (j < 0 || j >= o.length) return; [o[i], o[j]] = [o[j], o[i]]; save({ order: o });
+  }
+  async function pickImage(e) {
+    const f = e.target.files && e.target.files[0]; if (!f) return;
+    const url = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.readAsDataURL(f); });
+    const img = await new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.src = url; });
+    const k = Math.min(1, 700 / Math.max(img.width, img.height)); const cv = document.createElement("canvas");
+    cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k); cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+    saveIn("bestway", { image: cv.toDataURL("image/png") });
+  }
+  async function approve(r) {
+    const all = customers || [];
+    const code = custNextCode(all);
+    const digits = String(r.phone || "").replace(/\D/g, "");
+    let user = digits.slice(-10) || ("c" + Date.now().toString(36));
+    if (all.some((x) => String(x.portalUsername || "").toLowerCase() === user)) user = user + Math.floor(Math.random() * 90 + 10);
+    const pass = String(Math.floor(1000 + Math.random() * 9000));
+    const cust = { id: uid("c"), name: r.name, phone: r.phone, address: r.area || "", creditLimit: 0, openingBalance: 0, audienceType: "Builder",
+      portalUsername: user, portalPassword: pass, branchId: "", code, status: "Active", source: "Website " + r.code };
+    saveCustomer(cust);
+    await finMutate("webReqs", (l) => l.map((x) => (x.id === r.id ? { ...x, status: "Approved", customerId: cust.id, customerCode: code, decidedBy: actor, decidedAt: new Date().toISOString() } : x)), true);
+    setLastApproved({ ...cust });
+  }
+  const reject = (r) => finMutate("webReqs", (l) => l.map((x) => (x.id === r.id ? { ...x, status: "Rejected", decidedBy: actor, decidedAt: new Date().toISOString() } : x)), true);
+  const siteLink = (w.live && w.live.siteUrl) || c.siteUrl || "";
+  const welcome = (cu) => [`*${settings.companyName || "Chaudhary Traders"}*`, `Assalam o Alaikum ${cu.name},`, `Aap ka account ban gaya.`, `Customer code: ${cu.code}`, `App login — Username: ${cu.portalUsername}  Password: ${cu.portalPassword}`, siteLink ? `App download / account check: ${siteLink}` : ""].filter(Boolean).join("\n");
+  const sec = WEB_SECTIONS.find((s) => s[0] === sel) || WEB_SECTIONS[0];
+  const Tab = ({ id, children }) => <Btn small variant={tab === id ? "primary" : "ghost"} onClick={() => setTab(id)}>{children}</Btn>;
+  const fld = (label, value, on, area) => (
+    <Field label={label}>{area ? <textarea rows={3} className={inputCls} value={value || ""} onChange={(e) => on(e.target.value)} /> : <input className={inputCls} value={value || ""} onChange={(e) => on(e.target.value)} />}</Field>
+  );
+  const shown = c.rates.productIds.length ? c.rates.productIds : (products || []).map((p) => p.id);
+
+  return (
+    <div data-web-page>
+      <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+        <h2 className="text-xl font-black uppercase tracking-tight">Website</h2>
+        <div className="flex gap-2 flex-wrap items-center">
+          <Tab id="content">{t("Content")}</Tab><Tab id="rates">{t("Rate board")}</Tab>
+          <Tab id="requests">{t("Requests")}{pend.length ? ` (${pend.length})` : ""}</Tab><Tab id="downloads">{t("Downloads")}</Tab><Tab id="domain">{t("Domain & Google")}</Tab>
+          <Btn onClick={publish} disabled={!dirty}>{dirty ? t("Publish") : t("Published ✓")}</Btn>
+        </div>
+      </div>
+      <div className="text-xs text-slate-400 mb-4 max-w-3xl">
+        {t("Yahan badlein, phir Publish dabayein — website par foran lag jata hai.")}
+        {w.publishedAt ? ` ${t("Aakhri publish")}: ${fmtDateTime(w.publishedAt)} (${w.publishedBy || ""})` : ` ${t("Abhi tak publish nahi hua.")}`}
+        {siteLink && <> · <a href={siteLink} target="_blank" rel="noreferrer" className="font-bold text-blue-600">{t("Website kholein")}</a></>}
+        {msg && <span className="ml-2 font-bold text-emerald-600">{msg}</span>}
+      </div>
+
+      {tab === "content" && (
+        <div className="grid gap-4" style={{ gridTemplateColumns: "minmax(240px, 300px) 1fr" }}>
+          <div className="ct-card rounded-2xl p-2">
+            {c.order.map((id, i) => {
+              const s = WEB_SECTIONS.find((x) => x[0] === id); if (!s) return null;
+              const on = !c.off[id];
+              return (
+                <div key={id} onClick={() => setSel(id)} data-web-sec={id} className={`flex items-center gap-2 px-2.5 py-2 rounded-xl cursor-pointer ${sel === id ? "bg-blue-500/10" : ""}`}>
+                  <div className="flex flex-col text-[10px] ct-t3 leading-none">
+                    <button type="button" onClick={(e) => { e.stopPropagation(); move(id, -1); }} disabled={i === 0}>▲</button>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); move(id, 1); }} disabled={i === c.order.length - 1}>▼</button>
+                  </div>
+                  <div className="min-w-0"><div className="text-[13px] font-bold ct-h">{t(s[1])}</div><div className="text-[11px] ct-t3">{t(s[2])}</div></div>
+                  <label className="flex items-center" style={{ marginLeft: "auto" }} onClick={(e) => e.stopPropagation()}>
+                    <input type="checkbox" className="w-4 h-4 accent-emerald-500" checked={on} onChange={(e) => save({ off: { ...c.off, [id]: !e.target.checked } })} />
+                  </label>
+                </div>
+              );
+            })}
+          </div>
+          <div className="ct-card rounded-2xl p-4" data-web-editor={sel}>
+            <div className="flex items-center gap-2 mb-3"><div className="font-black ct-h">{t(sec[1])}</div><span className={`text-[11px] font-bold rounded-full px-2 py-0.5 ${c.off[sel] ? "bg-slate-200 text-slate-600" : "bg-emerald-100 text-emerald-700"}`}>{c.off[sel] ? t("Chhupa hua") : t("Dikh raha hai")}</span></div>
+            {sel === "hero" && <div className="grid gap-3">
+              {fld("Heading (English)", c.hero.heading, (v) => saveIn("hero", { heading: v }))}
+              {fld("Heading (اردو)", c.hero.headingUr, (v) => saveIn("hero", { headingUr: v }))}
+              {fld("Tafseel", c.hero.text, (v) => saveIn("hero", { text: v }), true)}
+            </div>}
+            {sel === "rates" && <div className="text-[13px] ct-t2">{t("Rate ERP ke Products se khud aate hain. Kaun se products dikhein — 'Rate board' tab mein chunein.")}</div>}
+            {sel === "bestway" && <div className="grid sm:grid-cols-2 gap-3">
+              {fld("Choti line", c.bestway.tag, (v) => saveIn("bestway", { tag: v }))}
+              <Field label="Product (rate is se)"><select className={inputCls} value={c.bestway.productId} onChange={(e) => saveIn("bestway", { productId: e.target.value })}><option value="">—</option>{(products || []).map((p) => <option key={p.id} value={p.id}>{p.name} — {fmtMoney(p.price)}</option>)}</select></Field>
+              {fld("Heading (English)", c.bestway.heading, (v) => saveIn("bestway", { heading: v }))}
+              {fld("Heading (اردو)", c.bestway.headingUr, (v) => saveIn("bestway", { headingUr: v }))}
+              <div className="sm:col-span-2">{fld("Tafseel", c.bestway.text, (v) => saveIn("bestway", { text: v }), true)}</div>
+              <Field label="Tasveer"><div className="flex items-center gap-3 flex-wrap">{c.bestway.image ? <img src={c.bestway.image} alt="" className="h-16 rounded" /> : <span className="text-[12px] ct-t3">{t("Bestway bori (default)")}</span>}<input type="file" accept="image/*" onChange={pickImage} className="text-[12px]" />{c.bestway.image && <button type="button" className="text-[12px] text-rose-500 font-bold" onClick={() => saveIn("bestway", { image: "" })}>{t("Hatao")}</button>}</div></Field>
+              <Field label="Kab tak dikhe (khaali = hamesha)"><input type="date" className={inputCls} value={c.bestway.until || ""} onChange={(e) => saveIn("bestway", { until: e.target.value })} /></Field>
+            </div>}
+            {sel === "products" && <div className="text-[13px] ct-t2">{t("Wahi products jo 'Rate board' mein chune hain, tasveer aur Order button ke saath.")}</div>}
+            {sel === "app" && <div className="text-[13px] ct-t2">{t("Download ke link 'Downloads' tab mein.")}</div>}
+            {sel === "account" && <div className="text-[13px] ct-t2">{t("Customer code (CT-C-0001) + mobile ke aakhri 4 hindse. Band account par sirf 'Band' dikhta hai. Yeh tafseel ERP khulne par khud update hoti hai.")}</div>}
+            {sel === "request" && <div className="text-[13px] ct-t2">{t("Requests 'Requests' tab mein aati hain — Approve par customer, code aur login khud ban jata hai.")}</div>}
+            {sel === "offer" && <div className="grid gap-3">
+              {fld("Heading", c.offer.heading, (v) => saveIn("offer", { heading: v }))}
+              {fld("Tafseel", c.offer.text, (v) => saveIn("offer", { text: v }), true)}
+              <Field label="Kab tak dikhe"><input type="date" className={inputCls} value={c.offer.until || ""} onChange={(e) => saveIn("offer", { until: e.target.value })} /></Field>
+            </div>}
+            {sel === "contact" && <div className="grid sm:grid-cols-2 gap-3">
+              {fld("Phone", c.contact.phone, (v) => saveIn("contact", { phone: v }))}
+              {fld("WhatsApp", c.contact.whatsapp, (v) => saveIn("contact", { whatsapp: v }))}
+              {fld("Pata", c.contact.address, (v) => saveIn("contact", { address: v }))}
+              {fld("Waqt", c.contact.hours, (v) => saveIn("contact", { hours: v }))}
+              <div className="sm:col-span-2">{fld("Delivery ilaqe (comma se alag)", c.contact.areas, (v) => saveIn("contact", { areas: v }))}</div>
+            </div>}
+          </div>
+        </div>
+      )}
+
+      {tab === "rates" && (
+        <div className="ct-card rounded-2xl p-4 max-w-2xl" data-web-rates>
+          <div className="text-[13px] ct-t2 mb-3">{t("Website par kaun se products aur rate dikhein. Rate badalna ho to Products page par badlein — website par khud badal jayega.")}</div>
+          {(products || []).map((p) => (
+            <label key={p.id} className="flex items-center gap-3 py-2 border-b border-slate-200/60 cursor-pointer">
+              <input type="checkbox" className="w-4 h-4 accent-emerald-500" checked={shown.includes(p.id)} onChange={(e) => {
+                const base = c.rates.productIds.length ? c.rates.productIds : (products || []).map((x) => x.id);
+                saveIn("rates", { productIds: e.target.checked ? [...base, p.id] : base.filter((x) => x !== p.id) });
+              }} />
+              <span className="font-bold ct-h">{p.name}</span><span className="font-bold ct-h" style={{ marginLeft: "auto" }}>{fmtMoney(p.price)} <span className="text-[12px] ct-t3">/ {p.unit}</span></span>
+            </label>
+          ))}
+        </div>
+      )}
+
+      {tab === "requests" && (
+        <div className="ct-card rounded-2xl p-4" data-web-requests>
+          {lastApproved && (
+            <div className="mb-3 rounded-xl border-2 border-emerald-500/50 bg-emerald-500/5 p-3 text-[13px] ct-h">
+              ✓ {lastApproved.name} — <b>{lastApproved.code}</b> · {t("Username")}: <b>{lastApproved.portalUsername}</b> · {t("Password")}: <b>{lastApproved.portalPassword}</b>
+              {lastApproved.phone && <a className="ml-3 font-bold text-emerald-600" href={waLink(lastApproved.phone, welcome(lastApproved))} target="_blank" rel="noreferrer">💬 {t("WhatsApp par bhejo")}</a>}
+            </div>
+          )}
+          {reqs.length === 0 ? <div className="text-[13px] ct-t3 py-6 text-center">{t("Abhi koi request nahi.")}</div> : (
+            <table className="w-full text-[13px]">
+              <thead><tr className="text-left text-[11px] uppercase ct-t3"><th className="py-2">#</th><th>{t("Naam")}</th><th>{t("Mobile")}</th><th>{t("Ilaqa")}</th><th>{t("Kab")}</th><th>{t("Status")}</th><th></th></tr></thead>
+              <tbody>{reqs.map((r) => (
+                <tr key={r.id} className="border-t border-slate-200/60" data-web-req={r.status}>
+                  <td className="py-2 font-bold ct-h">{r.code}</td><td className="ct-h font-semibold">{r.name}{r.note ? <div className="text-[11.5px] ct-t3">{r.note}</div> : null}</td><td>{r.phone}</td><td>{r.area}</td><td className="ct-t2">{fmtDateTime(r.at)}</td>
+                  <td className={`font-bold ${r.status === "Approved" ? "text-emerald-600" : r.status === "Rejected" ? "text-rose-500" : "text-amber-500"}`}>{t(r.status)}{r.customerCode ? ` · ${r.customerCode}` : ""}</td>
+                  <td className="text-right whitespace-nowrap space-x-2">{r.status === "Pending" && <><Btn small onClick={() => approve(r)}>{t("Approve")}</Btn><Btn small variant="ghost" onClick={() => reject(r)}>{t("Reject")}</Btn></>}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {tab === "downloads" && (
+        <div className="ct-card rounded-2xl p-4 max-w-2xl grid sm:grid-cols-2 gap-3">
+          {fld("Android APK ka link", c.app.apkUrl, (v) => saveIn("app", { apkUrl: v }))}
+          {fld("APK version", c.app.apkVer, (v) => saveIn("app", { apkVer: v }))}
+          {fld("Windows Setup ka link", c.app.exeUrl, (v) => saveIn("app", { exeUrl: v }))}
+          {fld("Setup version", c.app.exeVer, (v) => saveIn("app", { exeVer: v }))}
+          <div className="sm:col-span-2">{fld("Web app (ERP) ka link — 'browser mein kholein' button", c.app.appUrl, (v) => saveIn("app", { appUrl: v }))}</div>
+          <div className="sm:col-span-2 text-[12px] ct-t3">{t("Website ke 'downloads' folder mein file rakhein to link 'downloads/file-ka-naam' likhein.")}</div>
+        </div>
+      )}
+
+      {tab === "domain" && (
+        <div className="ct-card rounded-2xl p-4 max-w-2xl grid gap-3">
+          {fld("Website ka link (jaise https://www.chaudharytraders.pk)", c.siteUrl, (v) => save({ siteUrl: v.trim() }))}
+          {fld("Google title", c.title, (v) => save({ title: v }))}
+          {fld("Google tafseel", c.description, (v) => save({ description: v }), true)}
+          <div className="text-[12px] ct-t3">{t("Domain Netlify mein aik dafa jorna hota hai (Domain settings → Add domain). Uske baad yahan link likh dein.")}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+Object.assign(translations.ur, {
+  "Customer code": "کسٹمر کوڈ", "Account": "اکاؤنٹ", "Band": "بند", "Website": "ویب سائٹ", "Publish": "شائع کریں",
+  "Rate board": "ریٹ بورڈ", "Requests": "درخواستیں", "Downloads": "ڈاؤن لوڈ", "Domain & Google": "ڈومین اور گوگل",
+});
+
+if (typeof UI_ICON_PATHS !== "undefined" && !UI_ICON_PATHS.globe) UI_ICON_PATHS.globe = "M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M3 12h18M12 3c2.5 2.5 3.8 5.5 3.8 9s-1.3 6.5-3.8 9M12 3C9.5 5.5 8.2 8.5 8.2 12s1.3 6.5 3.8 9";
 
 export default App;
