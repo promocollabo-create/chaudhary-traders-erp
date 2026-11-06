@@ -6386,7 +6386,7 @@ const BOOKING_STATUS_TONE = {
 const DEFAULT_BOOKING_TERMS = [
   "1. The locked rate is valid only until the expiry date shown on this receipt.",
   "2. Quantity not collected by the expiry date is supplied at the market rate unless the booking is renewed.",
-  "3. The advance is adjusted against delivery invoices. Any unused advance can be refunded or adjusted on request.",
+  "3. The advance is adjusted against delivery invoices. Any unused advance can be refunded as per the Refund Policy on this slip.",
   "4. Please bring this receipt (or its reference number) for every delivery.",
 ].join("\n");
 
@@ -6621,9 +6621,12 @@ function bookingFormatCell(type, v) {
 
 /* ---------------- Booking: small UI pieces ---------------- */
 
-function BookingStatusBadge({ status }) {
+function BookingStatusBadge({ status, refunded }) {
   return (
-    <span className={`text-[10px] font-bold uppercase px-2 py-0.5 whitespace-nowrap ${BOOKING_STATUS_TONE[status] || "bg-slate-100 text-slate-500"}`}>{tStatus(status)}</span>
+    <span className="inline-flex flex-wrap gap-1">
+      <span className={`text-[10px] font-bold uppercase px-2 py-0.5 whitespace-nowrap ${BOOKING_STATUS_TONE[status] || "bg-slate-100 text-slate-500"}`}>{tStatus(status)}</span>
+      {refunded > 0.5 && <span className="text-[10px] font-bold uppercase px-2 py-0.5 whitespace-nowrap bg-rose-100 text-rose-700" data-bk-refunded>{tStatus("Refunded")} {fmtMoney(refunded)}</span>}
+    </span>
   );
 }
 
@@ -6679,7 +6682,7 @@ function BookingReceiptBody({ booking, state, settings, customer }) {
           <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{booking.code}</div>
           <div className="mt-1 text-slate-500">Booking Date: <span className="font-bold text-slate-700">{fmtDate(booking.date)}</span></div>
           <div className="text-slate-500">Valid Till: <span className="font-bold text-slate-700">{fmtDate(booking.expiryDate)}</span></div>
-          <div className="mt-1"><BookingStatusBadge status={state.status} /></div>
+          <div className="mt-1"><BookingStatusBadge status={state.status} refunded={state.refunded} /></div>
         </div>
       </div>
       <table className="w-full text-sm mb-3">
@@ -6751,6 +6754,7 @@ function BookingAdvanceReceiptBody({ booking, state, payment, settings, customer
         </div>
         {payment.note && <div className="text-xs text-slate-500 pt-1">{payment.note}</div>}
       </div>
+      {!isRefund && <div className="mt-3"><BkRefundPolicy booking={booking} compact /></div>}
       <div className="flex justify-between gap-8 text-xs pt-12">
         <div className="flex-1 border-t border-slate-900 pt-1 text-center">{t("Customer Signature")}</div>
         <div className="flex-1 border-t border-slate-900 pt-1 text-center">{t("Authorized Signature")}</div>
@@ -7052,6 +7056,7 @@ function BookingActionForm({ type, booking, state, payment, onSubmit, onCancel }
     receive: { min: 0, max: state.remainingAmount },
     editAdvance: { min: roundMoney(Math.max(0, oldAmount - unused)), max: roundMoney(oldAmount + state.remainingAmount) },
     refund: { min: 0, max: unused },
+    refundReq: { min: 0, max: roundMoney(Math.max(0, unused - bkRefundHeld(booking))) },
     cancel: { min: 0, max: unused },
   }[type];
   const amt = roundMoney(Number(amount) || 0);
@@ -7062,16 +7067,16 @@ function BookingActionForm({ type, booking, state, payment, onSubmit, onCancel }
   function submit() {
     if (busy) return;
     let payload;
-    if (type === "receive" || type === "editAdvance" || type === "refund") {
+    if (type === "receive" || type === "editAdvance" || type === "refund" || type === "refundReq") {
       if (!(amt > 0)) { setError("Amount 0 se zyada hona chahiye."); return; }
       if (amt < limits.min - 0.005 || amt > limits.max + 0.005) { setError(`Amount must be between ${fmtMoney(limits.min)} and ${fmtMoney(limits.max)}.`); return; }
       if (!date) { setError("Date is required."); return; }
-      if ((type === "refund" || type === "editAdvance") && !text.trim()) { setError("Reason likhna zaroori hai."); return; }
+      if ((type === "refund" || type === "refundReq" || type === "editAdvance") && !text.trim()) { setError("Reason likhna zaroori hai."); return; }
       payload = { id: opId, amount: amt, date, method, note: text.trim(), reason: text.trim() };
     } else if (type === "cancel") {
       if (!text.trim()) { setError("Reason likhna zaroori hai."); return; }
       if (amt < 0 || amt > limits.max + 0.005) { setError(`Refund cannot be more than ${fmtMoney(limits.max)}.`); return; }
-      payload = { reason: text.trim(), refundAmount: amt, refundMethod: method, refundDate: date || todayISO(), refundId: opId };
+      payload = { reason: text.trim(), refundAmount: 0 };
     } else if (type === "renew") {
       if (!text.trim()) { setError("Reason likhna zaroori hai."); return; }
       payload = { reason: text.trim() };
@@ -7089,7 +7094,7 @@ function BookingActionForm({ type, booking, state, payment, onSubmit, onCancel }
     if (ok) onCancel(); else setBusy(false);
   }
 
-  const showMoney = type === "receive" || type === "editAdvance" || type === "refund" || type === "cancel";
+  const showMoney = type === "receive" || type === "editAdvance" || type === "refund" || type === "refundReq";
   return (
     <div>
       <div className="bg-slate-50 border border-slate-200 p-3 mb-3 text-sm space-y-1">
@@ -7099,19 +7104,25 @@ function BookingActionForm({ type, booking, state, payment, onSubmit, onCancel }
         <BookingKV label="Advance Received" value={fmtMoney(state.advanceReceived)} />
         <BookingKV label="Advance Applied" value={fmtMoney(state.advanceApplied)} />
         {state.refunded > 0 && <BookingKV label="Refunded" value={fmtMoney(state.refunded)} />}
-        <BookingKV label={type === "refund" || type === "cancel" ? "Refundable Balance" : "Unused Advance"} value={fmtMoney(unused)} tone="text-emerald-700" />
+        <BookingKV label={type === "refund" || type === "refundReq" || type === "cancel" ? "Refundable Balance" : "Unused Advance"} value={fmtMoney(unused)} tone="text-emerald-700" />
+        {type === "refundReq" && bkRefundHeld(booking) > 0 && <BookingKV label="Pending / Approved Refund" value={`-${fmtMoney(bkRefundHeld(booking))}`} tone="text-amber-700" />}
         {(type === "receive" || type === "editAdvance") && <BookingKV label="Remaining Amount" value={fmtMoney(state.remainingAmount)} tone="text-red-600" />}
       </div>
 
       {type === "cancel" && (
         <div className="text-xs text-slate-600 mb-3">
           Delivered quantity ({fmtQty(state.deliveredQty)} {booking.unit}) and its invoices stay exactly as they are. Only the undelivered {fmtQty(state.remainingQty)} {booking.unit} is cancelled.
-          {unused > 0 && " Any unused advance not refunded now stays as a credit in the customer's ledger and can be refunded later."}
+          {unused > 0 && ` Unused advance (${fmtMoney(unused)}) booking mein rehta hai — wapas dene ke liye "Refund Request" banayein (approve hone ke baad paisa milta hai).`}
         </div>
       )}
       {type === "renew" && (
         <div className="text-xs text-slate-600 mb-3">
           Current expiry: <span className="font-bold">{fmtDate(booking.expiryDate)}</span> → {t("New Expiry Date")}: <span className="font-bold text-emerald-700">{fmtDate(newExpiry)}</span>. The locked rate ({fmtMoney(booking.rate)}) stays the same.
+        </div>
+      )}
+      {type === "refundReq" && (
+        <div className="text-xs bg-amber-50 border border-amber-200 text-amber-900 px-3 py-2 mb-3 leading-relaxed">
+          <b>Refund rules:</b> darkhwast sirf booking ke {BK_REFUND_WINDOW_DAYS} din ke andar ({fmtDate(bkRefundLastDay(booking))} tak) · Admin / ijazat wala approve karega · approve ke baad {BK_REFUND_PAY_DAYS} din ke andar paisa milega.
         </div>
       )}
       {type === "rate" && (
@@ -7136,10 +7147,10 @@ function BookingActionForm({ type, booking, state, payment, onSubmit, onCancel }
           <Field label={type === "cancel" ? "Refund Amount (Rs)" : "Amount (Rs)"}>
             <input type="number" step="any" min="0" className={inputCls} value={amount} onChange={(e) => setAmount(e.target.value)} autoFocus={type !== "cancel"} placeholder={type === "cancel" ? "0" : ""} />
           </Field>
-          <Field label="Date">
+          {type !== "refundReq" && <Field label="Date">
             <input type="date" className={inputCls} value={date} onChange={(e) => setDate(e.target.value)} />
-          </Field>
-          <Field label={type === "refund" || type === "cancel" ? "Refund Method" : "Payment Method"}>
+          </Field>}
+          <Field label={type === "refund" || type === "refundReq" || type === "cancel" ? "Refund Method" : "Payment Method"}>
             <select className={inputCls} value={method} onChange={(e) => setMethod(e.target.value)}>
               {BOOKING_PAYMENT_METHODS.map((m) => <option key={m}>{m}</option>)}
               {!BOOKING_PAYMENT_METHODS.includes(method) && <option>{method}</option>}
@@ -7160,10 +7171,63 @@ function BookingActionForm({ type, booking, state, payment, onSubmit, onCancel }
       {error && <div className="text-red-600 text-sm font-semibold mb-3">{error}</div>}
       <div className="flex gap-2">
         <Btn variant={type === "cancel" || type === "refund" ? "danger" : "primary"} onClick={submit} disabled={busy}>
-          {busy ? "Saving..." : { receive: "Receive Advance", editAdvance: "Save Changes", refund: "Refund Advance", cancel: "Cancel Booking", renew: "Renew Booking", rate: "Change Rate", details: "Save" }[type]}
+          {busy ? "Saving..." : { receive: "Receive Advance", editAdvance: "Save Changes", refund: "Refund Advance", refundReq: "Refund Request bhejein", cancel: "Cancel Booking", renew: "Renew Booking", rate: "Change Rate", details: "Save" }[type]}
         </Btn>
         <Btn variant="ghost" onClick={onCancel}>Close</Btn>
       </div>
+    </div>
+  );
+}
+
+/* ---------------- Booking: refund requests ---------------- */
+function BookingRefundPanel({ booking, state, currentUser, onOp }) {
+  const reqs = [...bkRefundReqs(booking)].reverse();
+  const can = bkCanRefund(currentUser);
+  const last = bkRefundLastDay(booking);
+  const today = todayISO();
+  const windowOpen = today <= last;
+  if (!reqs.length && !(state.unusedAdvance > 0.5)) return null;
+  const tone = { Pending: "bg-amber-100 text-amber-800", Approved: "bg-blue-100 text-blue-800", Paid: "bg-emerald-100 text-emerald-800", Rejected: "bg-red-100 text-red-700" };
+  return (
+    <div className="mt-2 mb-4 border border-slate-200 overflow-x-auto" data-refund-panel>
+      <div className="px-3 py-2 border-b border-slate-200 flex items-center justify-between gap-2 flex-wrap">
+        <span className="font-black uppercase text-xs tracking-wide text-slate-500">{t("Refund Requests")}</span>
+        <span className={`text-[11px] font-bold ${windowOpen ? "text-slate-500" : "text-red-600"}`}>
+          {windowOpen ? `Darkhwast ${fmtDate(last)} tak (booking ke ${BK_REFUND_WINDOW_DAYS} din)` : `Refund window ${fmtDate(last)} ko khatam`} · approve ke baad {BK_REFUND_PAY_DAYS} din mein payment
+        </span>
+      </div>
+      <table className="w-full text-sm">
+        <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+          <th className="px-3 py-2">Date</th><th className="px-3 py-2 text-right">Amount</th><th className="px-3 py-2">Method</th><th className="px-3 py-2">Reason</th><th className="px-3 py-2">Status</th><th className="px-3 py-2">Pay By</th><th className="px-3 py-2 text-right">Action</th>
+        </tr></thead>
+        <tbody>
+          {reqs.length === 0 && <tr><td colSpan={7} className="px-3 py-4 text-center text-slate-400">Koi refund darkhwast nahi.</td></tr>}
+          {reqs.map((r) => {
+            const overdue = r.status === "Approved" && r.payBy && today > r.payBy;
+            return (
+              <tr key={r.id} className="border-t border-slate-100" data-refund-req={r.status}>
+                <td className="px-3 py-2 text-slate-500">{fmtDate(r.requestedOn)}<div className="text-[10px] text-slate-400">{r.requestedBy}</div></td>
+                <td className="px-3 py-2 text-right font-black">{fmtMoney(r.amount)}</td>
+                <td className="px-3 py-2 text-slate-500">{r.method}</td>
+                <td className="px-3 py-2">{r.reason}{r.rejectReason ? <div className="text-[11px] text-red-600">Reject: {r.rejectReason}</div> : null}</td>
+                <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-[11px] font-bold ${tone[r.status] || ""}`}>{r.status}</span>
+                  <div className="text-[10px] text-slate-400">{r.status === "Approved" ? `${r.approvedBy} · ${fmtDate(r.approvedOn)}` : r.status === "Paid" ? `${r.paidBy} · ${fmtDate(r.paidOn)}` : r.status === "Rejected" ? `${r.rejectedBy} · ${fmtDate(r.rejectedOn)}` : ""}</div></td>
+                <td className={`px-3 py-2 font-bold ${overdue ? "text-red-600" : "text-slate-600"}`}>{r.payBy ? fmtDate(r.payBy) : "—"}{overdue ? <div className="text-[10px]">Late!</div> : null}</td>
+                <td className="px-3 py-2 text-right whitespace-nowrap">
+                  {can && r.status === "Pending" && <>
+                    <Btn small onClick={() => { if (confirm(`${fmtMoney(r.amount)} refund approve? ${BK_REFUND_PAY_DAYS} din mein dena hoga.`)) onOp({ op: "approve", reqId: r.id }); }}>Approve</Btn>{" "}
+                  </>}
+                  {can && r.status === "Approved" && <>
+                    <Btn small variant="dark" onClick={() => { if (confirm(`${fmtMoney(r.amount)} customer ko de diye? (${r.method})`)) onOp({ op: "pay", reqId: r.id }); }}>Pay Refund</Btn>{" "}
+                  </>}
+                  {can && (r.status === "Pending" || r.status === "Approved") && <Btn small variant="ghost" onClick={() => { const why = prompt("Reject ki wajah:"); if (why && why.trim()) onOp({ op: "reject", reqId: r.id, reason: why.trim() }); }}>Reject</Btn>}
+                  {!can && (r.status === "Pending" || r.status === "Approved") && <span className="text-[11px] text-slate-400">Admin approval</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -7193,6 +7257,7 @@ function BookingDetail({ booking, state, customer, settings, products, currentUs
     if (a.type === "receive") return handlers.onReceiveAdvance(booking.id, payload);
     if (a.type === "editAdvance") return handlers.onEditAdvance(booking.id, a.payment.id, payload);
     if (a.type === "refund") return handlers.onRefundAdvance(booking.id, payload);
+    if (a.type === "refundReq") return handlers.onRefundAdvance(booking.id, { ...payload, op: "request" });
     if (a.type === "cancel") return handlers.onCancelBooking(booking.id, payload);
     if (a.type === "renew") return handlers.onRenewBooking(booking.id, payload);
     if (a.type === "rate") return handlers.onChangeBookingRate(booking.id, payload);
@@ -7201,7 +7266,7 @@ function BookingDetail({ booking, state, customer, settings, products, currentUs
   }
 
   const actionTitles = {
-    receive: "Receive Advance", editAdvance: "Edit Advance", refund: "Refund Advance", cancel: "Cancel Booking",
+    receive: "Receive Advance", editAdvance: "Edit Advance", refund: "Refund Advance", refundReq: "Refund Request", cancel: "Cancel Booking",
     renew: "Renew Booking", rate: "Change Rate", details: "Edit Notes / Terms",
   };
 
@@ -7212,7 +7277,7 @@ function BookingDetail({ booking, state, customer, settings, products, currentUs
           <div className="font-black text-lg text-slate-900">{booking.customerName}</div>
           <div className="text-xs text-slate-500">{booking.productName}{booking.unit ? ` (${booking.unit})` : ""} · Booked {fmtDate(booking.date)}{booking.createdBy ? ` · by ${booking.createdBy}` : ""}</div>
         </div>
-        <BookingStatusBadge status={state.status} />
+        <BookingStatusBadge status={state.status} refunded={state.refunded} />
       </div>
 
       {state.expired && notClosed && (
@@ -7261,12 +7326,13 @@ function BookingDetail({ booking, state, customer, settings, products, currentUs
         <Btn small variant="ghost" onClick={() => setAction({ type: "details" })}>Edit Notes / Terms</Btn>
         {isAdmin && notClosed && <Btn small variant="ghost" onClick={() => setAction({ type: "renew" })}>Renew Booking</Btn>}
         {isAdmin && notClosed && state.remainingQty > 0 && <Btn small variant="ghost" onClick={() => setAction({ type: "rate" })}>Change Rate</Btn>}
-        {isAdmin && state.unusedAdvance > 0.005 && <Btn small variant="ghost" onClick={() => setAction({ type: "refund" })}>Refund Advance</Btn>}
+        {state.status !== "Cancelled" && state.unusedAdvance - bkRefundHeld(booking) > 0.5 && todayISO() <= bkRefundLastDay(booking) && <Btn small variant="ghost" onClick={() => setAction({ type: "refundReq" })}>Refund Request</Btn>}
         {isAdmin && booking.v === 3 && state.unusedAdvance > 0.5 && handlers.onBookingToKhata && <Btn small variant="ghost" onClick={() => { const r = prompt(`${fmtMoney(state.unusedAdvance)} ${t("advance customer ke khaate mein daalna hai (udhaar kam hoga). Wajah likhein:")}`); if (r != null) handlers.onBookingToKhata(booking.id, r); }}>{t("Advance khaate mein")}</Btn>}
         {(customer?.phone || booking.customerPhone) && <Btn small variant="ghost" onClick={() => window.open(waLink(customer?.phone || booking.customerPhone, bk3WaText(booking, state, settings)), "_blank")}>WhatsApp</Btn>}
         {isAdmin && notClosed && <Btn small variant="danger" onClick={() => setAction({ type: "cancel" })}>Cancel Booking</Btn>}
       </div>
-      {!isAdmin && <div className="text-[11px] text-slate-400 mb-4">Renewal, rate change, refund, cancellation and advance edits need an Admin login.</div>}
+      {!isAdmin && <div className="text-[11px] text-slate-400 mb-4">Renewal, rate change, cancellation and advance edits need an Admin login. Refund approve / pay: Admin ya "Booking refund" ki ijazat.</div>}
+      <BookingRefundPanel booking={booking} state={state} currentUser={currentUser} onOp={(d) => handlers.onRefundAdvance(booking.id, d)} />
 
       <div className="mt-4 border border-slate-200 overflow-x-auto">
         <div className="px-3 py-2 border-b border-slate-200 flex items-center justify-between">
@@ -7741,7 +7807,7 @@ function Bookings({
                         {fmtDate(b.expiryDate)}
                         {s.expiringSoon && <div className="text-[10px] font-bold text-amber-600 uppercase">{s.daysToExpiry === 0 ? "Today" : `${s.daysToExpiry} days left`}</div>}
                       </td>
-                      <td className="px-3 py-2"><BookingStatusBadge status={s.status} /></td>
+                      <td className="px-3 py-2"><BookingStatusBadge status={s.status} refunded={s.refunded} /></td>
                       <td className="px-3 py-2 text-right whitespace-nowrap space-x-2">
                         <button className="text-xs font-bold text-slate-500 hover:text-blue-700" onClick={() => setDetailId(b.id)}>View</button>
                         {s.isOpen && <button className="text-xs font-bold text-blue-700 hover:underline" onClick={() => onConvertToInvoice(b)}>Convert to Invoice</button>}
@@ -7852,6 +7918,7 @@ const TARGET_URDU = {
   "Yesterday": "گزشتہ کل",
   "Custom Range": "حسبِ ضرورت مدت",
   "Product-wise Report": "بلحاظ مصنوعہ رپورٹ",
+  "Product-wise Sales": "بلحاظ مصنوعہ فروخت",
   "Date-wise Report": "بلحاظ تاریخ رپورٹ",
   "Target Alerts": "ہدف الرٹس",
   "Dismiss": "ہٹائیں",
@@ -8866,6 +8933,31 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
   const totalOrders = orders.filter((o) => inRange(o.date)).length;
   const totalReturnAmount = returns.filter((r) => inRange(r.date) && r.status !== "Deleted").reduce((s, r) => s + r.amount, 0);
 
+  // Product-wise sales in range: net of returns/exchanges, with weight.
+  const productSales = useMemo(() => {
+    const map = new Map();
+    invoices.filter((i) => i.date >= from && i.date <= to && !isInvoiceCancelled(i)).forEach((inv) => {
+      let rows;
+      try { rows = computeInvoiceItemBreakdown(inv, returns || [], exchanges || []); } catch { rows = (inv.items || []).map((it) => ({ ...it, remainingQty: it.qty })); }
+      rows.forEach((it) => {
+        const q = Number(it.remainingQty ?? it.qty) || 0;
+        if (q <= 0) return;
+        const key = String(it.name || "").trim().toLowerCase() + "|" + String(it.unit || "").toLowerCase();
+        if (!map.has(key)) map.set(key, { name: it.name || "-", unit: it.unit || "", qty: 0, kg: 0, amount: 0, bills: new Set() });
+        const r = map.get(key);
+        r.qty += q; r.kg += itemWeightKg({ ...it, qty: q }); r.amount += q * (Number(it.price) || 0); r.bills.add(inv.id);
+      });
+    });
+    return [...map.values()].map((r) => ({ ...r, qty: roundQty(r.qty), bills: r.bills.size })).sort((a, b) => b.amount - a.amount);
+  }, [invoices, returns, exchanges, from, to]);
+  const psTotal = productSales.reduce((t, r) => ({ amount: t.amount + r.amount, kg: t.kg + r.kg }), { amount: 0, kg: 0 });
+  function exportProductSales() {
+    const rows = [["Product", "Unit", "Qty Sold", "Weight (kg)", "Weight (ton)", "Invoices", "Amount"], ...productSales.map((r) => [r.name, r.unit, r.qty, Math.round(r.kg), (r.kg / 1000).toFixed(2), r.bills, Math.round(r.amount)]), ["TOTAL", "", "", Math.round(psTotal.kg), (psTotal.kg / 1000).toFixed(2), "", Math.round(psTotal.amount)]];
+    const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const a = document.createElement("a"); a.href = url; a.download = `product_sales_${from}_to_${to}.csv`; a.click(); URL.revokeObjectURL(url);
+  }
+
   const outstandingCustomers = useMemo(() => {
     const byId = computeOutstandingByCustomer(customers, invoices, payments, returns, exchanges, promises, transfers, adjustments);
     return customers
@@ -8960,6 +9052,41 @@ function Reports({ customers, invoices, payments, returns, exchanges, promises, 
         <Stat label="Total Invoices" value={totalInvoices} />
         <Stat label="Total Orders" value={totalOrders} />
         <Stat label="Total Return Amount" value={fmtMoney(totalReturnAmount)} accent="text-red-600" />
+      </div>
+
+      <div className="bg-white border border-slate-200 overflow-x-auto mb-8" data-product-sales>
+        <div className="px-4 py-2.5 border-b border-slate-200 flex items-center justify-between gap-2 flex-wrap">
+          <span className="font-black uppercase text-xs tracking-wide text-slate-500">{t("Product-wise Sales")} · {fmtDate(from)} – {fmtDate(to)}</span>
+          <Btn small variant="ghost" onClick={exportProductSales}>Export Excel (CSV)</Btn>
+        </div>
+        <table className="w-full text-sm">
+          <thead><tr className="text-left text-[11px] uppercase tracking-wide text-slate-500 border-b border-slate-200">
+            <th className="px-4 py-2">Product</th><th className="px-4 py-2 text-right">Qty Sold</th><th className="px-4 py-2 text-right">Weight</th><th className="px-4 py-2 text-right">Invoices</th><th className="px-4 py-2 text-right">Amount</th><th className="px-4 py-2 text-right">Share</th>
+          </tr></thead>
+          <tbody>
+            {productSales.length === 0 && <tr><td colSpan={6} className="px-4 py-6 text-center text-slate-400">Koi record nahi.</td></tr>}
+            {productSales.map((r) => (
+              <tr key={r.name + r.unit} className="border-t border-slate-100">
+                <td className="px-4 py-2 font-bold">{r.name}</td>
+                <td className="px-4 py-2 text-right font-bold">{fmtQty(r.qty)} <span className="text-slate-500 font-normal">{r.unit}</span></td>
+                <td className="px-4 py-2 text-right">{r.kg > 0 ? <><span className="font-bold text-blue-800">{fmtKg(r.kg)}</span> <span className="text-slate-500 text-xs">· {fmtTon(r.kg)}</span></> : <span className="text-slate-400">—</span>}</td>
+                <td className="px-4 py-2 text-right">{r.bills}</td>
+                <td className="px-4 py-2 text-right font-black">{fmtMoney(r.amount)}</td>
+                <td className="px-4 py-2 text-right text-slate-500">{psTotal.amount > 0 ? Math.round((r.amount / psTotal.amount) * 100) : 0}%</td>
+              </tr>
+            ))}
+            {productSales.length > 0 && (
+              <tr className="border-t-2 border-slate-300 bg-slate-50">
+                <td className="px-4 py-2 font-black uppercase text-xs tracking-wide">Total · {productSales.length} products</td>
+                <td className="px-4 py-2" />
+                <td className="px-4 py-2 text-right">{psTotal.kg > 0 ? <><span className="font-black text-blue-800">{fmtKg(psTotal.kg)}</span> <span className="text-slate-500 text-xs">· {fmtTon(psTotal.kg)}</span></> : "—"}</td>
+                <td className="px-4 py-2" />
+                <td className="px-4 py-2 text-right font-black">{fmtMoney(psTotal.amount)}</td>
+                <td className="px-4 py-2 text-right text-slate-500">100%</td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </div>
 
       <div className="bg-white border border-slate-200 overflow-x-auto mb-8">
@@ -10063,20 +10190,58 @@ function App() {
   }
 
   function onRefundAdvance(bookingId, data) {
-    if (!bookingIsAdmin()) { alert("Only admin can refund a booking advance."); return false; }
     const b = findBookingOrAlert(bookingId); if (!b) return false;
-    if (data.id && payments.some((p) => p.id === data.id)) { alert("This refund was already recorded."); return false; }
-    const reason = String(data.reason || "").trim();
-    if (!reason) { alert("Reason likhna zaroori hai."); return false; }
-    const amount = roundMoney(Number(data.amount) || 0);
+    const op = data.op || "request";
+    const reqs = bkRefundReqs(b);
     const st = computeBookingState(b, invoices, payments);
-    if (!(amount > 0)) { alert("Amount 0 se zyada hona chahiye."); return false; }
-    if (amount > Math.max(0, st.unusedAdvance) + 0.005) { alert(`Refund cannot be more than the refundable balance (${fmtMoney(Math.max(0, st.unusedAdvance))}).`); return false; }
-    const refund = bookingPaymentRecord(b, { id: data.id, amount, date: data.date, method: data.method, note: reason, kind: "Refund" });
-    persist.payments([...payments, refund]);
-    commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Advance Refunded", `${fmtMoney(amount)} (${refund.method}) — ${reason}`)]));
-    logAudit("Booking Advance Refunded", b.code, `${fmtMoney(amount)} — ${reason}`);
-    return true;
+    const unused = Math.max(0, st.unusedAdvance);
+    if (op === "request") {
+      const last = bkRefundLastDay(b);
+      if (todayISO() > last) { alert(`Refund ki darkhwast sirf booking ke ${BK_REFUND_WINDOW_DAYS} din ke andar (${fmtDate(last)} tak) di ja sakti thi.`); return false; }
+      const reason = String(data.reason || "").trim();
+      if (!reason) { alert("Reason likhna zaroori hai."); return false; }
+      const amount = roundMoney(Number(data.amount) || 0);
+      const free = roundMoney(unused - bkRefundHeld(b));
+      if (!(amount > 0)) { alert("Amount 0 se zyada hona chahiye."); return false; }
+      if (amount > free + 0.005) { alert(`Refund ${fmtMoney(Math.max(0, free))} se zyada nahi ho sakta (pehle se pending darkhwast bhi gini jati hai).`); return false; }
+      const req = { id: uid("rfr"), amount, reason, method: data.method || "Cash", status: "Pending", requestedOn: todayISO(), requestedAt: new Date().toISOString(), requestedBy: bookingActor() };
+      commitBooking(bookingWithHistory(b, [bookingHistoryEntry("Refund Requested", `${fmtMoney(amount)} — ${reason}`)], { refundReqs: [...reqs, req] }));
+      logAudit("Booking Refund Requested", b.code, `${fmtMoney(amount)} — ${reason}`);
+      return true;
+    }
+    if (!bkCanRefund(currentUser)) { alert("Refund approve / pay sirf Admin ya jise 'Booking refund' ki ijazat ho wo kar sakta hai."); return false; }
+    const r = reqs.find((x) => x.id === data.reqId);
+    if (!r) { alert("Refund darkhwast nahi mili."); return false; }
+    const upd = (patch, entry) => ({ refundReqs: reqs.map((x) => (x.id === r.id ? { ...x, ...patch } : x)), entry });
+    if (op === "approve") {
+      if (r.status !== "Pending") { alert(`Yeh darkhwast ${r.status} hai.`); return false; }
+      if (r.amount > roundMoney(unused - bkRefundHeld(b, r.id)) + 0.005) { alert(`Booking mein ab sirf ${fmtMoney(unused)} advance bacha hai — refund approve nahi ho sakta.`); return false; }
+      const payBy = bkAddDays(todayISO(), BK_REFUND_PAY_DAYS);
+      const u = upd({ status: "Approved", approvedBy: bookingActor(), approvedOn: todayISO(), payBy }, bookingHistoryEntry("Refund Approved", `${fmtMoney(r.amount)} — ${fmtDate(payBy)} tak dena hai`));
+      commitBooking(bookingWithHistory(b, [u.entry], { refundReqs: u.refundReqs }));
+      logAudit("Booking Refund Approved", b.code, `${fmtMoney(r.amount)} · pay by ${payBy}`);
+      return true;
+    }
+    if (op === "reject") {
+      if (r.status !== "Pending" && r.status !== "Approved") { alert(`Yeh darkhwast ${r.status} hai.`); return false; }
+      const reason = String(data.reason || "").trim();
+      if (!reason) { alert("Reject ki wajah likhein."); return false; }
+      const u = upd({ status: "Rejected", rejectedBy: bookingActor(), rejectedOn: todayISO(), rejectReason: reason }, bookingHistoryEntry("Refund Rejected", `${fmtMoney(r.amount)} — ${reason}`));
+      commitBooking(bookingWithHistory(b, [u.entry], { refundReqs: u.refundReqs }));
+      logAudit("Booking Refund Rejected", b.code, `${fmtMoney(r.amount)} — ${reason}`);
+      return true;
+    }
+    if (op === "pay") {
+      if (r.status !== "Approved") { alert("Pehle refund approve karein."); return false; }
+      if (r.amount > unused + 0.005) { alert(`Booking mein ab sirf ${fmtMoney(unused)} advance bacha hai — itna refund nahi ho sakta.`); return false; }
+      const refund = bookingPaymentRecord(b, { amount: r.amount, date: data.date || todayISO(), method: data.method || r.method, note: r.reason, kind: "Refund" });
+      persist.payments([...payments, refund]);
+      const u = upd({ status: "Paid", paidBy: bookingActor(), paidOn: refund.date, paymentId: refund.id, method: refund.method }, bookingHistoryEntry("Advance Refunded", `${fmtMoney(r.amount)} (${refund.method}) — ${r.reason}`));
+      commitBooking(bookingWithHistory(b, [u.entry], { refundReqs: u.refundReqs }));
+      logAudit("Booking Advance Refunded", b.code, `${fmtMoney(r.amount)} — ${r.reason}`);
+      return true;
+    }
+    return false;
   }
 
   function onCancelBooking(bookingId, data) {
@@ -10087,7 +10252,7 @@ function App() {
     if (st.status === "Completed") { alert(`Booking ${b.code} is fully delivered. Use Refund for any unused advance.`); return false; }
     const reason = String(data.reason || "").trim();
     if (!reason) { alert("Reason likhna zaroori hai."); return false; }
-    const refundAmount = roundMoney(Number(data.refundAmount) || 0);
+    const refundAmount = 0; // refunds only via Refund Request -> Approve -> Pay
     if (refundAmount < 0 || refundAmount > Math.max(0, st.unusedAdvance) + 0.005) { alert(`Refund cannot be more than the refundable balance (${fmtMoney(Math.max(0, st.unusedAdvance))}).`); return false; }
     if (refundAmount > 0 && data.refundId && payments.some((p) => p.id === data.refundId)) { alert("This refund was already recorded."); return false; }
     const entries = [bookingHistoryEntry("Cancelled", `${reason} — undelivered ${fmtQty(st.remainingQty)} ${b.unit || ""}`)];
@@ -12938,8 +13103,25 @@ Object.entries(PRINT_URDU).forEach(([en, ur]) => {
 });
 
 // Label for the PRINTED document (independent of the screen language).
+// English print: Roman Urdu labels shown in proper English (Urdu print uses PRINT_URDU).
+const PRINT_EN = {
+  "AAJ KA RATE": "TODAY'S RATE", "Aap ka baqaya": "Your balance", "AAP KA BAQAYA": "YOUR BALANCE", "Ab tak total": "Total to date", "Akhri payment": "Last payment",
+  "Bag (booking / liye / baqi)": "Bags (booked / taken / left)", "Advance / laga / bacha": "Advance / used / left", "Booking jeb": "Booking advance", "Jeb": "Advance",
+  "Computer generated statement · sign ki zaroorat nahi": "Computer generated statement · no signature required",
+  "Customer ne dukaan ko dena hai": "Amount payable by customer", "Dukaan ne customer ko dena hai (advance)": "Amount payable to customer (advance)",
+  "Is bill ka baqi": "Balance on this bill", "Is bill mein": "This invoice", "Is mahine ab tak": "Month to date", "Is muddat ka total": "Total for this period",
+  "LIVE BAQAYA": "LIVE BALANCE", "Maal": "Item", "Maal liya": "Goods purchased", "Pehle": "Previous", "Payment ka wada": "Payment promise",
+  "Maal check kar ke lein · wapsi 7 din mein is bill ke saath · E. & O.E.": "Please check goods at delivery · Returns within 7 days with this invoice · E. & O.E.",
+  "Maal check kar ke lein · wapsi sirf 7 din mein is bill ke saath · E. & O.E.": "Please check goods at delivery · Returns accepted within 7 days with this invoice only · E. & O.E.",
+  "QR scan = live baqaya": "Scan QR for live balance", "Shukriya!": "Thank you!",
+  "Shukriya! · QR scan karke invoice check karein · Computer generated": "Thank you! · Scan the QR code to verify this invoice · Computer generated",
+  "Wusool": "Received", "bag aur advance alag — udhaar mein nahi milte": "bags and advance are separate — not added to credit",
+  "baqi": "left", "customer ne dena hai": "payable by customer", "dukaan ne dena hai": "payable by shop", "din": "days", "tak": "until", "shuru ka": "opening",
+  "udhaar par asar nahi": "does not affect credit", "udhaar par asar nahi — booking jeb mein": "does not affect credit — held as booking advance",
+  "LOCK RATE": "LOCKED RATE", "Lock rate": "Locked rate", "Scan = invoice check": "Scan to verify", "Scan karke invoice check karein": "Scan to verify this invoice", "Recv": "Received by", "Rent": "Rent",
+};
 function printL(key, urdu) {
-  if (!urdu) return key;
+  if (!urdu) return PRINT_EN[key] || key;
   return PRINT_URDU[key] || translations.ur[key] || key;
 }
 
@@ -13997,6 +14179,8 @@ function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urd
   const showRs = rs && rs.status !== "Normal" ? rs : null;
   const items = showRs ? showRs.breakdown : invoice.items || [];
   const qtyTotal = roundQty(items.reduce((s, it) => s + (Number(it.qty) || 0), 0));
+  const wOf = (it) => itemWeightKg({ ...it, qty: showRs ? (it.remainingQty ?? it.qty) : it.qty });
+  const kgTotal = items.reduce((s, it) => s + wOf(it), 0);
   const units = Array.from(new Set(items.map((it) => it.unit).filter(Boolean)));
   const hasDelivery = n.delivery > 0 || invoice.driverName || invoice.vehicleNumber || invoice.receivedBy;
   const time = invProTime(invoice);
@@ -14097,6 +14281,7 @@ function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urd
                     <th style={th}>{L("Item")}</th>
                     <th style={{ ...th, textAlign: "end" }}>{L("Qty (Sold)")}</th>
                     <th style={{ ...th, textAlign: "center" }}>{L("Unit")}</th>
+                    {kgTotal > 0 && <th style={{ ...th, textAlign: "end" }}>{L("Weight")}</th>}
                     <th style={{ ...th, textAlign: "end" }}>{L("Rate / Unit")}</th>
                     <th style={{ ...th, textAlign: "end" }}>{L("Amount")}</th>
                     {showRs && <th style={{ ...th, textAlign: "end" }}>{L("Returned")}</th>}
@@ -14110,6 +14295,7 @@ function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urd
                       <td style={td}><b>{D(it.name)}</b>{invoice.bookingRef && it.bookingLine ? <span style={{ marginInlineStart: "1.4mm", background: "#fef3c7", color: "#92400e", fontSize: "7px", fontWeight: 800, padding: ".2mm 1.2mm", borderRadius: "1mm", ...INV_EXACT }}><PrintLtr>{invoice.bookingRef}</PrintLtr> · {L("LOCK RATE")}</span> : invoice.bookingRef && invoice.items && invoice.items.some((x) => x.bookingLine && x.name === it.name) ? <span style={{ marginInlineStart: "1.4mm", background: "#e2e8f0", color: "#334155", fontSize: "7px", fontWeight: 800, padding: ".2mm 1.2mm", borderRadius: "1mm", ...INV_EXACT }}>{L("AAJ KA RATE")}</span> : null}</td>
                       <td style={{ ...td, textAlign: "end" }}><PrintLtr>{fmtQty(it.qty)}</PrintLtr></td>
                       <td style={{ ...td, textAlign: "center" }}>{D(it.unit || "-")}</td>
+                      {kgTotal > 0 && <td style={{ ...td, textAlign: "end", lineHeight: 1.25 }}>{wOf(it) > 0 ? <><b>{fmtKg(wOf(it), urdu)}</b><div style={{ fontSize: "8.5px", color: "#64748b" }}>{fmtTon(wOf(it), urdu)}</div></> : "—"}</td>}
                       <td style={{ ...td, textAlign: "end" }}><PrintLtr>{fmtMoney(it.price)}</PrintLtr></td>
                       <td style={{ ...td, textAlign: "end" }}><b><PrintLtr>{fmtMoney(it.total)}</PrintLtr></b></td>
                       {showRs && <td style={{ ...td, textAlign: "end", color: "#94a3b8" }}>{(it.returnedQty || 0) + (it.exchangedQty || 0) > 0 ? <PrintLtr>{fmtQty((it.returnedQty || 0) + (it.exchangedQty || 0))}</PrintLtr> : "—"}</td>}
@@ -14121,6 +14307,7 @@ function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urd
                     <td style={{ ...td, color: "#64748b", fontSize: "9.5px" }}>{L("Total")} · {items.length} {L(items.length === 1 ? "item" : "items")}</td>
                     <td style={{ ...td, textAlign: "end" }}><b><PrintLtr>{fmtQty(qtyTotal)}</PrintLtr></b></td>
                     <td style={{ ...td, textAlign: "center", color: "#64748b" }}>{units.length === 1 ? D(units[0]) : ""}</td>
+                    {kgTotal > 0 && <td style={{ ...td, textAlign: "end", lineHeight: 1.25 }}><b>{fmtKg(kgTotal, urdu)}</b><div style={{ fontSize: "8.5px", color: "#64748b" }}>{fmtTon(kgTotal, urdu)}</div></td>}
                     <td style={td} />
                     <td style={{ ...td, textAlign: "end" }}><b><PrintLtr>{fmtMoney(n.subtotal)}</PrintLtr></b></td>
                     {showRs && <td style={td} />}
@@ -14181,6 +14368,7 @@ function InvoiceProDoc({ invoice, settings, include, copies, recvProofs, rs, urd
                     {row(L("New Purchase"), fmtMoney(n.subtotal))}
                     {row(L("Rickshaw + Delivery"), fmtMoney(n.delivery))}
                     {row(L("Discount"), `− ${fmtMoney(n.discount)}`)}
+                    {kgTotal > 0 && <div style={{ borderTop: "1px dashed #cbd5e1", marginTop: "1mm", paddingTop: ".6mm" }}>{row(L("Total Weight"), fmtW(kgTotal, urdu), { color: "#1e3a8a" })}</div>}
                   </div>
                   {sumBar(L("INVOICE TOTAL"), fmtMoney(n.total), { background: "#f1f5f9", borderTop: "1px solid #e2e8f0", borderBottom: "1px solid #e2e8f0", fontSize: "11.5px" })}
                   {!n.cash && include.prevBalance !== false && (
@@ -14289,12 +14477,14 @@ function InvoiceThermalProDoc({ invoice, settings, size, include, copies, urdu, 
               <div key={i} style={{ marginBottom: ".8mm" }}>
                 <div style={{ fontWeight: 700 }}>{small ? "" : `${i + 1}. `}{D(it.name)}</div>
                 <PrintRow lLtr l={`${fmtQty(it.qty)} ${D(it.unit || "")} x ${m(it.price)}`} v={<b>{m(it.total)}</b>} />
+                {itemWeightKg(it) > 0 && <div style={{ fontSize: ".85em" }}>{L("Weight")}: {fmtW(itemWeightKg(it), urdu)}</div>}
               </div>
             ))}
             {rule(true)}
             <PrintRow l={L(small ? "Purchase" : "New Purchase")} v={m(n.subtotal)} />
             <PrintRow l={L(small ? "Rickshaw" : "Rickshaw + Delivery")} v={m(n.delivery)} />
             <PrintRow l={L("Discount")} v={`-${m(n.discount)}`} />
+            {invWeightKg(invoice) > 0 && <PrintRow l={L(small ? "Weight" : "Total Weight")} v={fmtW(invWeightKg(invoice), urdu)} />}
             <div style={{ borderTop: "1px solid #000", borderBottom: "1px solid #000", padding: ".4mm 0", margin: ".6mm 0" }}><PrintRow l={L("INVOICE TOTAL")} v={m(n.total)} bold /></div>
             {prevOn && (
               <>
@@ -14359,6 +14549,7 @@ function InvoiceThermalProDoc({ invoice, settings, size, include, copies, urdu, 
 }
 
 Object.entries({
+  "Weight": "وزن", "Total Weight": "کل وزن", "Scan = invoice check": "اسکین = انوائس چیک", "Scan karke invoice check karein": "اسکین کر کے انوائس چیک کریں", "Recv": "وصول کنندہ", "Rent": "کرایہ",
   "Credit customer": "ادھار کسٹمر", "ORIGINAL": "اصل", "Time": "وقت", "Payment status": "ادائیگی کی صورتحال", "Status": "حالت", "Paid": "ادا شدہ",
   "Is bill ka baqi": "اس بل کا بقایا", "SCAN · VERIFY": "اسکین · تصدیق", "Total": "کل", "item": "آئٹم", "items": "آئٹمز", "Vehicle": "گاڑی",
   "Amount in words (this purchase)": "رقم الفاظ میں (یہ خریداری)", "INVOICE TOTAL": "انوائس کل", "TOTAL": "کل رقم", "OUTSTANDING BALANCE": "کل بقایا",
@@ -19196,6 +19387,7 @@ const HR_ACTIONS = [
   { id: "customer.login", label: "Customer ka portal login banana" },
   { id: "credit.block", label: "Khata band / chalu, credit status" },
   { id: "credit.override", label: "Red List / band customer ko udhaar ki ijazat" },
+  { id: "booking.refund", label: "Booking refund approve / pay karna" },
 ];
 const HR_NAV_GROUP = {
   title: "HR",
@@ -19210,7 +19402,7 @@ const HR_NAV_GROUP = {
 const HR_TEMPLATES = {
   manager: {
     label: "Manager", desc: "Invoice check, ledger, voucher approve, leave/advance approve",
-    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "deliverySchedule", "returns", "customers", "ledger", "payments", "promises", "vouchers", "paymentsDue", "reports", "attendance", "hrRequests", "creditControl", "voucher.create", "voucher.approve", "hr.approve", "customer.login", "credit.block", "credit.override"],
+    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "deliverySchedule", "returns", "customers", "ledger", "payments", "promises", "vouchers", "paymentsDue", "reports", "attendance", "hrRequests", "creditControl", "voucher.create", "voucher.approve", "hr.approve", "customer.login", "credit.block", "credit.override", "booking.refund"],
   },
   clerk: {
     label: "Clerk", desc: "Invoice banana, payment add, voucher banana",
@@ -22827,6 +23019,19 @@ const LS_WD_UR = ["اتوار", "پیر", "منگل", "بدھ", "جمعرات", 
 const LS_MON_UR = ["جنوری", "فروری", "مارچ", "اپریل", "مئی", "جون", "جولائی", "اگست", "ستمبر", "اکتوبر", "نومبر", "دسمبر"];
 
 // Text for each ledger line (title + small detail line).
+// Weight of goods: KG as is, Ton x1000, Bag 50 kg (cement), or product kgPerUnit when set.
+function itemWeightKg(it) {
+  const q = Number(it && it.qty) || 0, u = String((it && it.unit) || "").trim().toLowerCase(), per = Number(it && it.kgPerUnit) || 0;
+  if (per > 0) return q * per;
+  if (u === "kg" || u === "kgs") return q;
+  if (u === "ton" || u === "tons") return q * 1000;
+  if (u === "bag" || u === "bags") return q * 50;
+  return 0;
+}
+function invWeightKg(inv) { return ((inv && inv.items) || []).reduce((s, it) => s + itemWeightKg(it), 0); }
+function fmtKg(kg, urdu) { const v = Math.round(kg).toLocaleString("en-PK"); return urdu ? `\u2067\u2066${v}\u2069 کلو\u2069` : `${v} kg`; }
+function fmtTon(kg, urdu) { const v = (kg / 1000).toLocaleString("en-PK", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); return urdu ? `\u2067\u2066${v}\u2069 ٹن\u2069` : `${v} ton`; }
+function fmtW(kg, urdu) { const t = `${fmtKg(kg, urdu)} · ${fmtTon(kg, urdu)}`; return urdu ? `\u2067${t}\u2069` : t; }
 function lsNarration(e, invById, payById, urdu) {
   const L = (k) => printL(k, urdu);
   const D = (x) => printD(x, urdu);
@@ -22929,15 +23134,17 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
       <th style={{ ...th, width: "13mm" }}>{L("Date")}</th>
       <th style={{ ...th, width: "27mm" }}>{L("Voucher")}</th>
       <th style={th}>{L("Narration")}</th>
+      <th style={{ ...thR, width: "19mm" }}>{L("Weight")}</th>
       <th style={{ ...thR, width: "22mm" }}>{L("Debit")}</th>
       <th style={{ ...thR, width: "22mm" }}>{L("Credit")}</th>
       <th style={{ ...thR, width: "30mm" }}>{L("Balance")}</th>
       {hasJeb && <th style={{ ...thR, width: "18mm", color: "#b45309" }}>{L("Jeb")}</th>}
     </tr>
   );
-  const sumRow = (label, a, b, bal, dark, jebShow) => (
+  const sumRow = (label, a, b, bal, dark, jebShow, kg) => (
     <tr style={dark ? { background: LS_NAVY, color: "#fff", ...LS_EXACT } : { background: "#f8fafc", ...LS_EXACT }}>
       <td colSpan={3} style={{ padding: "2mm 1.4mm", fontWeight: 800, textAlign: dark ? "end" : "start", fontSize: "10px" }}>{label}</td>
+      <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800, color: dark ? "#93c5fd" : "#1e3a8a", lineHeight: 1.2 }}>{kg > 0 ? <>{fmtKg(kg, urdu)}<div style={{ fontSize: "7.5px", fontWeight: 700, opacity: .85 }}>{fmtTon(kg, urdu)}</div></> : ""}</td>
       <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800 }}>{a != null ? <PrintLtr>{lsMoney(a)}</PrintLtr> : ""}</td>
       <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800 }}>{b != null ? <PrintLtr>{lsMoney(b)}</PrintLtr> : ""}</td>
       <td style={{ padding: "2mm 1.4mm", textAlign: "end", fontWeight: 800 }}><PrintLtr>{lsMoney(bal)} {lsDrCr(bal)}</PrintLtr></td>
@@ -23014,7 +23221,7 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
                   {[
                     [L("Opening"), lsMoney(opening) + (opening < -0.5 ? " Cr" : ""), data.openingNote, null],
                     "+",
-                    [L("Maal liya"), lsMoney(totals.debit), `${totals.bills} ${L("bill")}${totals.qty ? ` · ${fmtQty(totals.qty)} ${L("qty")}` : ""}`, ["#fff5f5", "#fecaca", "#b91c1c"]],
+                    [L("Maal liya"), lsMoney(totals.debit), `${totals.bills} ${L("bill")}${totals.qty ? ` · ${fmtQty(totals.qty)} ${L("qty")}` : ""}${totals.kg > 0 ? ` · ${fmtTon(totals.kg, urdu)}` : ""}`, ["#fff5f5", "#fecaca", "#b91c1c"]],
                     "−",
                     [L("Payment + return"), lsMoney(totals.credit), `${totals.pays} ${L("payment")}${totals.returns ? ` · ${totals.returns} ${L("return")}` : ""}`, ["#f0fdf8", "#a7f3d0", "#047857"]],
                     "=",
@@ -23087,6 +23294,7 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
                           <div style={{ fontWeight: 700, fontSize: "10px", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{nar.title}</div>
                           {nar.sub ? <div style={{ fontSize: "8.2px", color: "#64748b", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{nar.sub}</div> : null}
                         </td>
+                        <td style={{ padding: "0 1.4mm", textAlign: "end", color: "#1e3a8a", lineHeight: 1.25 }}>{r.wkg > 0 ? <><b style={{ fontSize: "9.5px" }}>{fmtKg(r.wkg, urdu)}</b><div style={{ fontSize: "7.5px", color: "#64748b" }}>{fmtTon(r.wkg, urdu)}</div></> : ""}</td>
                         <td style={{ padding: "0 1.4mm", textAlign: "end", color: "#b91c1c", fontWeight: 700 }}>{r.debit ? <PrintLtr>{lsMoney(r.debit)}</PrintLtr> : ""}</td>
                         <td style={{ padding: "0 1.4mm", textAlign: "end", color: "#047857", fontWeight: 700 }}>{r.credit ? <PrintLtr>{lsMoney(r.credit)}</PrintLtr> : ""}</td>
                         <td style={{ padding: "0 1.4mm", textAlign: "end" }}>
@@ -23098,7 +23306,7 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
                     );
                   })}
                   {isLast
-                    ? sumRow(L("Is muddat ka total"), totals.debit, totals.credit, closing, true, data.jebNow)
+                    ? sumRow(L("Is muddat ka total"), totals.debit, totals.credit, closing, true, data.jebNow, totals.kg)
                     : sumRow(`${L("Carried forward")} → ${L("page")} ${pi + 2}`, runDr, runCr, pageRows.length ? pageRows[pageRows.length - 1].balance : bf.bal, true)}
                 </tbody>
               </table>
@@ -23121,6 +23329,7 @@ function LedgerStatementDoc({ data, settings, include, urdu }) {
                         <div>{L("Opening")}<br /><b style={{ color: "#fff", fontSize: "11px" }}><PrintLtr>{lsMoney(opening)}</PrintLtr></b></div>
                         <div>{L("Maal")}<br /><b style={{ color: "#fca5a5", fontSize: "11px" }}><PrintLtr>+{lsMoney(totals.debit)}</PrintLtr></b></div>
                         <div>{L("Wusool")}<br /><b style={{ color: "#6ee7b7", fontSize: "11px" }}><PrintLtr>−{lsMoney(totals.credit)}</PrintLtr></b></div>
+                        {totals.kg > 0 && <div>{L("Weight")}<br /><b style={{ color: "#93c5fd", fontSize: "11px" }}>{fmtTon(totals.kg, urdu)}</b></div>}
                       </div>
                     </div>
                     {include.snapshot !== false && (
@@ -23174,7 +23383,7 @@ function lsPrepare({ customer, entries, outstanding, monthFilter, invoices, paym
     let ref = e.ref;
     if (pay && /Payment|Booking Refund/.test(e.type)) { try { ref = paymentReceiptNo(pay); } catch {} }
     if (e.type === "Booking Advance" && pay && pay.bookingCode) ref = pay.bookingCode;
-    return { ...e, ref, nar: lsNarration(e, invById, payById, urdu) };
+    return { ...e, ref, nar: lsNarration(e, invById, payById, urdu), wkg: e.type === "Invoice" ? invWeightKg(invById.get(e.id)) : 0 };
   });
   const totals = {
     debit: roundMoney(rows.reduce((s, r) => s + (Number(r.debit) || 0), 0)),
@@ -23183,6 +23392,7 @@ function lsPrepare({ customer, entries, outstanding, monthFilter, invoices, paym
     qty: roundQty(rows.filter((r) => r.type === "Invoice").reduce((s, r) => s + (Number(r.qty) || 0), 0)),
     pays: rows.filter((r) => /Payment|Booking Advance Applied/.test(r.type)).length,
     returns: rows.filter((r) => r.type === "Sales Return").length,
+    kg: rows.reduce((s, r) => s + (Number(r.wkg) || 0), 0),
   };
   const [y, m] = (monthFilter || "").split("-").map(Number);
   const firstDate = monthFilter ? `${monthFilter}-01` : (allNonZero[0] ? allNonZero[0].date : today);
@@ -23646,6 +23856,17 @@ function BranchesPage({ currentUser, raw, branches, settingsAll, onOpen, onSaveB
 
 const BK3_DURATIONS = [15, 30, 45, 60, 90];
 
+/* Booking refund rules: request -> approve (admin / "booking.refund") -> pay.
+   - Request only within BK_REFUND_WINDOW_DAYS of the booking date.
+   - Once approved, the money must be paid within BK_REFUND_PAY_DAYS. */
+const BK_REFUND_WINDOW_DAYS = 15;
+const BK_REFUND_PAY_DAYS = 7;
+function bkAddDays(iso, n) { const d = new Date(String(iso || todayISO()).slice(0, 10) + "T00:00:00"); d.setDate(d.getDate() + n); return dateToLocalISO(d); }
+function bkRefundReqs(b) { return Array.isArray(b && b.refundReqs) ? b.refundReqs : []; }
+function bkRefundLastDay(b) { return bkAddDays(b && b.date, BK_REFUND_WINDOW_DAYS); }
+function bkRefundHeld(b, exceptId) { return roundMoney(bkRefundReqs(b).filter((r) => (r.status === "Pending" || r.status === "Approved") && r.id !== exceptId).reduce((s, r) => s + (Number(r.amount) || 0), 0)); }
+function bkCanRefund(user) { return !!user && (user.role === "admin" || hrAllow(user, "booking.refund")); }
+
 function computeBookingState(b, invoices, payments, opts = {}) {
   const st = computeBookingStateBase(b, invoices, payments, opts);
   if (!b || b.v !== 3) return st;
@@ -23914,59 +24135,204 @@ function BookingCreateForm({ customers, products, onSave, onCancel, initial }) {
 }
 
 /* ---------- Booking slip (print) with QR ---------- */
-function BookingSlip3({ booking, state, settings, customer }) {
-  const terms = (booking.terms || DEFAULT_BOOKING_TERMS).split("\n").filter((l) => l.trim());
+// Refund policy printed on booking slips / advance receipts — English + Urdu.
+function BkRefundPolicy({ booking, compact }) {
+  const last = bkRefundLastDay(booking);
+  const en = [
+    `Refund of unused advance can be requested within ${BK_REFUND_WINDOW_DAYS} days of the booking date (last date: ${fmtDate(last)}).`,
+    "The refund is given only after approval by the Admin / authorized person.",
+    `Once approved, the refund is paid within ${BK_REFUND_PAY_DAYS} days.`,
+    "Only the unused advance is refundable; goods already taken stay at the locked rate.",
+    "Please bring this slip when collecting the refund.",
+  ];
+  const ur = [
+    `بچے ہوئے ایڈوانس کی واپسی کی درخواست بکنگ کی تاریخ سے ${BK_REFUND_WINDOW_DAYS} دن کے اندر دی جا سکتی ہے (آخری تاریخ: ${printDate(last, true)})۔`,
+    "ریفنڈ صرف ایڈمن / مجاز شخص کی منظوری کے بعد ملے گا۔",
+    `منظوری کے بعد رقم ${BK_REFUND_PAY_DAYS} دن کے اندر ادا کی جائے گی۔`,
+    "صرف بچا ہوا ایڈوانس واپس ہوگا، جو مال لیا جا چکا وہ لاک ریٹ پر ہی رہے گا۔",
+    "ریفنڈ لیتے وقت یہ سلپ ساتھ لائیں۔",
+  ];
   return (
-    <div className="bg-white text-slate-900 text-sm" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }} data-booking-slip={booking.code}>
-      <BookingPrintHeader settings={settings} title="Advance Booking Slip" />
-      <div className="flex justify-between items-start gap-4 mb-3">
-        <div>
-          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-400">Customer</div>
-          <div className="font-bold text-base">{booking.customerName}</div>
-          {(customer?.phone || booking.customerPhone) && <div className="text-slate-500">{customer?.phone || booking.customerPhone}</div>}
-          {customer?.address && <div className="text-slate-500">{customer.address}</div>}
+    <div className="border border-amber-300 bg-amber-50 p-2 mb-3" style={{ WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }} data-refund-policy>
+      <div className={`grid ${compact ? "grid-cols-1" : "grid-cols-2"} gap-3`}>
+        <div className="text-[10.5px] text-slate-700 leading-snug">
+          <div className="font-black uppercase text-amber-900 mb-1">Refund Policy</div>
+          {en.map((l, i) => <div key={i}>{i + 1}. {l}</div>)}
         </div>
-        <div className="text-right text-xs">
-          <div className="inline-block bg-slate-900 text-white font-black px-3 py-1 text-sm">{booking.code}</div>
-          <div className="mt-1 text-slate-500">Booking: <b className="text-slate-700">{fmtDate(booking.date)}</b></div>
-          <div className="text-slate-500">Delivery tak: <b className="text-red-700">{fmtDate(booking.expiryDate)}</b>{booking.durationDays ? ` (${booking.durationDays} din)` : ""}</div>
+        <div dir="rtl" className="text-[11.5px] text-slate-700" style={{ fontFamily: '"Noto Nastaliq Urdu", "Noto Naskh Arabic", serif', lineHeight: 1.9 }}>
+          <div className="font-bold text-amber-900">ریفنڈ پالیسی</div>
+          {ur.map((l, i) => <div key={i}>{i + 1}۔ {l}</div>)}
         </div>
       </div>
-      <table className="w-full text-sm mb-3">
-        <thead><tr className="bg-slate-900 text-white text-[11px] uppercase tracking-wide">
-          <th className="py-2 px-2 text-left">Maal</th><th className="py-2 px-2 text-right">Lock rate</th><th className="py-2 px-2 text-right">Advance</th><th className="py-2 px-2 text-right">Is paisay ke {booking.unit || ""}</th>
-        </tr></thead>
-        <tbody><tr className="border-b border-slate-200">
-          <td className="py-2 px-2 font-bold">{booking.productName}</td>
-          <td className="py-2 px-2 text-right">{fmtMoney(state.rate)}</td>
-          <td className="py-2 px-2 text-right">{fmtMoney(state.advancePosted)}</td>
-          <td className="py-2 px-2 text-right font-black">{fmtQty(roundQty(state.advancePosted / (state.rate || 1)))}</td>
-        </tr></tbody>
-      </table>
-      <div className="flex justify-between items-end gap-4 mb-3">
-        <div className="text-center">
-          <QrSvg text={docVerifyUrl("b", booking.id)} sizeMm={24} />
-          <div className="text-[9px] text-slate-500 font-bold mt-0.5">SCAN = LIVE BAQI</div>
+    </div>
+  );
+}
+
+function BookingSlip3({ booking, state, settings, customer }) {
+  const terms = (booking.terms || DEFAULT_BOOKING_TERMS).split("\n").filter((l) => l.trim()).map((l) => l.replace(/^\d+\.\s*/, ""));
+  const navy = "#0f172a", blue = "#1d4ed8", gold = "#b7892f";
+  const X = INV_EXACT;
+  const unit = booking.unit || "";
+  const bookedQty = roundQty(state.advancePosted / (state.rate || 1));
+  const delivered = Number(state.deliveredQty) || 0;
+  const remaining = Number(state.remainingQty) || 0;
+  const pct = bookedQty > 0 ? Math.max(0, Math.min(100, Math.round((delivered / Math.max(1, delivered + remaining)) * 100))) : 0;
+  const unused = Math.max(0, state.unusedAdvance);
+  const last = bkRefundLastDay(booking);
+  const statusTone = { Booked: ["#eff6ff", blue], "Partially Delivered": ["#fef3c7", "#92400e"], Completed: ["#dcfce7", "#15803d"], Expired: ["#fee2e2", "#b91c1c"], Cancelled: ["#fee2e2", "#b91c1c"] }[state.status] || ["#f1f5f9", "#334155"];
+  const k = { fontSize: "7.5px", fontWeight: 800, letterSpacing: ".14em", textTransform: "uppercase", color: "#64748b" };
+  const card = { border: "1px solid #e2e8f0", borderRadius: "2.6mm", padding: "3mm 3.6mm", background: "#fff" };
+  const kv = (l, v, vs) => <div style={{ display: "flex", justifyContent: "space-between", gap: "2mm", lineHeight: 1.85, whiteSpace: "nowrap" }}><span style={{ color: "#64748b" }}>{l}</span><b style={vs}>{v}</b></div>;
+  const tile = (label, value, sub, accent) => (
+    <div style={{ ...card, padding: "3mm 3.6mm", borderTop: `1mm solid ${accent}`, ...X }}>
+      <div style={k}>{label}</div>
+      <div style={{ fontSize: "17px", fontWeight: 900, marginTop: "1mm", color: navy, lineHeight: 1.15 }}>{value}</div>
+      {sub && <div style={{ fontSize: "8.5px", color: "#64748b", marginTop: ".6mm" }}>{sub}</div>}
+    </div>
+  );
+  const row = (l, v, vs) => <div style={{ display: "flex", justifyContent: "space-between", fontSize: "10.5px", lineHeight: 2.05 }}><span style={{ color: "#475569" }}>{l}</span><b style={vs}>{v}</b></div>;
+  const enPol = [
+    `Refund of unused advance can be requested within ${BK_REFUND_WINDOW_DAYS} days of the booking date — last date ${fmtDate(last)}.`,
+    "Refund is given only after approval by the Admin / authorized person.",
+    `Once approved, the refund is paid within ${BK_REFUND_PAY_DAYS} days.`,
+    "Only the unused advance is refundable; goods already taken stay at the locked rate.",
+    "Please bring this slip when collecting the refund.",
+  ];
+  const urPol = [
+    `بچے ہوئے ایڈوانس کی واپسی کی درخواست بکنگ کی تاریخ سے ${BK_REFUND_WINDOW_DAYS} دن کے اندر — آخری تاریخ ${printDate(last, true)}۔`,
+    "ریفنڈ صرف ایڈمن / مجاز شخص کی منظوری کے بعد ملے گا۔",
+    `منظوری کے بعد رقم ${BK_REFUND_PAY_DAYS} دن کے اندر ادا کی جائے گی۔`,
+    "صرف بچا ہوا ایڈوانس واپس ہوگا، لیا گیا مال لاک ریٹ پر ہی رہے گا۔",
+    "ریفنڈ لیتے وقت یہ سلپ ساتھ لائیں۔",
+  ];
+  return (
+    <div data-booking-slip={booking.code} style={{ background: "#fff", color: navy, fontFamily: "Inter, Arial, sans-serif", fontSize: "10.5px", lineHeight: 1.45, fontVariantNumeric: "tabular-nums", ...X }}>
+      <div style={{ height: "1.6mm", background: `linear-gradient(90deg,${navy} 70%,${blue})`, ...X }} />
+      {/* header */}
+      <div style={{ padding: "5mm 2mm 4mm", display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: `1.1mm solid ${navy}` }}>
+        <div style={{ display: "flex", gap: "3.4mm", alignItems: "center" }}>
+          {settings.logoUrl ? <img src={settings.logoUrl} alt="" style={{ width: "15mm", height: "15mm", objectFit: "contain" }} /> : (
+            <div style={{ width: "15mm", height: "15mm", background: navy, color: "#fff", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "17px", ...X }}>{uiInitials(settings.companyName)}</div>
+          )}
+          <div>
+            <div style={{ fontSize: "20px", fontWeight: 900, textTransform: "uppercase", lineHeight: 1.1 }}>{settings.companyName}</div>
+            <div style={{ fontSize: "8.5px", fontWeight: 800, letterSpacing: ".06em", color: blue, marginTop: ".6mm" }}>CONSTRUCTION MATERIALS SUPPLIER</div>
+          </div>
         </div>
-        <div className="w-80 space-y-1">
-          <BookingKV label="Advance mila" value={fmtMoney(state.advancePosted)} tone="text-emerald-700" />
-          {state.deliveredQty > 0 && <BookingKV label="Diya gaya" value={`${fmtQty(state.deliveredQty)} ${booking.unit || ""}`} />}
-          {state.advanceApplied > 0 && <BookingKV label="Advance laga" value={fmtMoney(state.advanceApplied)} />}
-          <div className="flex justify-between border-t-2 border-slate-900 pt-1.5 mt-1">
-            <span className="font-black uppercase text-blue-700">Baqi {booking.unit || ""}</span>
-            <span className="font-black text-lg text-blue-700">{fmtQty(state.remainingQty)} · {fmtMoney(Math.max(0, state.unusedAdvance))}</span>
+        <div style={{ textAlign: "right", fontSize: "9px", color: "#475569", lineHeight: 1.65 }}>
+          <div>{settings.companyAddress}</div>
+          {settings.companyPhone && <div>Ph: {settings.companyPhone}</div>}
+        </div>
+      </div>
+
+      {/* title band */}
+      <div style={{ margin: "4mm 2mm 0", display: "flex", justifyContent: "space-between", alignItems: "center", background: navy, color: "#fff", borderRadius: "2.6mm", padding: "3mm 4mm", ...X }}>
+        <div>
+          <div style={{ fontSize: "7.5px", letterSpacing: ".22em", color: "#e0b04a", fontWeight: 800 }}>ADVANCE BOOKING SLIP · <span style={{ fontFamily: '"Noto Nastaliq Urdu", "Noto Naskh Arabic", serif', letterSpacing: 0, fontSize: "10px" }}>ایڈوانس بکنگ سلپ</span></div>
+          <div style={{ fontSize: "15px", fontWeight: 900, marginTop: ".6mm" }}>{booking.productName} <span style={{ color: "#93c5fd", fontWeight: 700 }}>· Locked rate {fmtMoney(state.rate)}</span></div>
+        </div>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ display: "inline-block", background: "#fff", color: navy, fontWeight: 900, fontSize: "13px", padding: ".8mm 3mm", borderRadius: "1.4mm", ...X }}>{booking.code}</div>
+          <div style={{ marginTop: "1mm" }}><span style={{ background: statusTone[0], color: statusTone[1], fontSize: "8px", fontWeight: 800, padding: ".4mm 2mm", borderRadius: "1.2mm", letterSpacing: ".06em", textTransform: "uppercase", ...X }}>{state.status}</span></div>
+        </div>
+      </div>
+
+      {/* cards */}
+      <div style={{ padding: "3.6mm 2mm 0", display: "grid", gridTemplateColumns: "1.2fr 1fr 0.8fr", gap: "3.2mm" }}>
+        <div style={card}>
+          <div style={k}>Customer</div>
+          <div style={{ fontSize: "14px", fontWeight: 800, marginTop: "1mm" }}>{booking.customerName}</div>
+          <div style={{ color: "#475569", lineHeight: 1.6 }}>
+            {(customer?.phone || booking.customerPhone) && <div>{customer?.phone || booking.customerPhone}</div>}
+            {customer?.address && <div>{customer.address}</div>}
+          </div>
+          {customer?.code && <span style={{ display: "inline-block", marginTop: "1.4mm", background: "#eff6ff", color: blue, borderRadius: "1.4mm", padding: ".4mm 2mm", fontSize: "8.5px", fontWeight: 700, ...X }}>{customer.code}</span>}
+        </div>
+        <div style={card}>
+          <div style={k}>Booking</div>
+          <div style={{ marginTop: "1mm" }}>
+            {kv("Booking date", fmtDate(booking.date))}
+            {kv("Valid till", fmtDate(booking.expiryDate), { color: "#b91c1c" })}
+            {booking.durationDays ? kv("Period", `${booking.durationDays} days`) : null}
+            {kv("Refund request by", fmtDate(last), { color: "#92400e" })}
+          </div>
+        </div>
+        <div style={{ ...card, textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+          <QrSvg text={docVerifyUrl("b", booking.id)} sizeMm={21} />
+          <div style={{ fontSize: "6.5px", color: "#94a3b8", letterSpacing: ".1em", marginTop: ".8mm", fontWeight: 700 }}>SCAN · LIVE BALANCE</div>
+        </div>
+      </div>
+
+      {/* tiles */}
+      <div style={{ padding: "3.6mm 2mm 0", display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: "3.2mm" }}>
+        {tile("Advance paid", fmtMoney(state.advancePosted), "Booking wallet", "#059669")}
+        {tile("Locked rate", fmtMoney(state.rate), `per ${unit || "unit"}`, blue)}
+        {tile(`${unit || "Qty"} booked`, fmtQty(bookedQty), `${booking.productName}`, gold)}
+        {tile(`${unit || "Qty"} remaining`, fmtQty(remaining), `${fmtQty(delivered)} delivered`, "#dc2626")}
+      </div>
+
+      {/* progress + summary */}
+      <div style={{ padding: "3.6mm 2mm 0", display: "flex", gap: "4mm", alignItems: "stretch" }}>
+        <div style={{ ...card, flex: 1 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <div style={k}>Delivery progress</div>
+            <div style={{ fontWeight: 800, fontSize: "11px" }}>{pct}%</div>
+          </div>
+          <div style={{ height: "3.2mm", background: "#e2e8f0", borderRadius: "2mm", marginTop: "2mm", overflow: "hidden", ...X }}>
+            <div style={{ width: `${pct}%`, height: "100%", background: `linear-gradient(90deg,#059669,#10b981)`, ...X }} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: "9px", color: "#475569", marginTop: "1.4mm" }}>
+            <span>Delivered <b style={{ color: navy }}>{fmtQty(delivered)} {unit}</b></span>
+            <span>Remaining <b style={{ color: "#b91c1c" }}>{fmtQty(remaining)} {unit}</b></span>
+          </div>
+          <div style={{ marginTop: "3mm", fontSize: "9px", color: "#475569", lineHeight: 1.6 }}>
+            The advance buys {unit || "units"} at the locked rate. When it runs out, further goods are charged at that day's rate. Show this slip at every delivery.
+          </div>
+        </div>
+        <div style={{ width: "72mm", flexShrink: 0, borderRadius: "3mm", overflow: "hidden", border: "1px solid #e2e8f0" }}>
+          <div style={{ padding: "2.4mm 3.6mm 1mm" }}>
+            {row("Advance received", fmtMoney(state.advancePosted), { color: "#047857" })}
+            {row("Advance used (delivered)", `− ${fmtMoney(state.advanceApplied || 0)}`)}
+            {state.refunded > 0 && row("Refunded", `− ${fmtMoney(state.refunded)}`, { color: "#b91c1c" })}
+            {state.khataMoved > 0 && row("Moved to khata", `− ${fmtMoney(state.khataMoved)}`)}
+          </div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "3mm 3.6mm", background: `linear-gradient(90deg,${navy},#1e3a8a)`, color: "#fff", ...X }}>
+            <span style={{ fontSize: "8px", letterSpacing: ".12em", color: "#93c5fd", fontWeight: 800 }}>ADVANCE BALANCE</span>
+            <span style={{ fontSize: "18px", fontWeight: 900 }}>{fmtMoney(unused)}</span>
           </div>
         </div>
       </div>
-      <div className="text-[11px] text-slate-600 mb-2">Advance khatam hone ke baad baqi maal us din ke rate par milega. Maal lene par ye slip dikhayein.</div>
-      {booking.notes && <div className="text-xs text-slate-600 mb-2"><span className="font-bold">Notes:</span> {booking.notes}</div>}
-      <div className="border border-slate-300 p-2 text-[11px] text-slate-600 mb-8">
-        <div className="font-black uppercase text-slate-700 mb-1">Terms & Conditions</div>
-        {terms.map((line, idx) => <div key={idx}>{line}</div>)}
+
+      {/* refund policy */}
+      <div style={{ margin: "3.6mm 2mm 0", border: "1px solid #f3d9a4", background: "#fffbeb", borderRadius: "2.6mm", overflow: "hidden", ...X }} data-refund-policy>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#fef3c7", padding: "1.8mm 3.6mm", borderBottom: "1px solid #f3d9a4", ...X }}>
+          <span style={{ fontWeight: 900, fontSize: "9.5px", letterSpacing: ".1em", color: "#78350f" }}>REFUND POLICY</span>
+          <span style={{ fontFamily: '"Noto Nastaliq Urdu", "Noto Naskh Arabic", serif', fontWeight: 700, color: "#78350f", fontSize: "11px" }}>ریفنڈ پالیسی</span>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4mm", padding: "2.4mm 3.6mm" }}>
+          <ol style={{ listStyle: "decimal", margin: 0, paddingLeft: "4mm", fontSize: "9px", color: "#334155", lineHeight: 1.6 }}>{enPol.map((l, i) => <li key={i}>{l}</li>)}</ol>
+          <ol dir="rtl" style={{ listStyle: "persian", margin: 0, paddingRight: "5mm", fontSize: "10.5px", color: "#334155", lineHeight: 1.95, fontFamily: '"Noto Nastaliq Urdu", "Noto Naskh Arabic", serif' }}>{urPol.map((l, i) => <li key={i}>{l}</li>)}</ol>
+        </div>
       </div>
-      <div className="flex justify-between gap-8 text-xs pt-6">
-        <div className="flex-1 border-t border-slate-900 pt-1 text-center">Customer Signature</div>
-        <div className="flex-1 border-t border-slate-900 pt-1 text-center">Authorized Signature</div>
+
+      {/* terms */}
+      <div style={{ margin: "3.2mm 2mm 0", fontSize: "8.5px", color: "#64748b", lineHeight: 1.6 }}>
+        <b style={{ color: navy, letterSpacing: ".08em" }}>TERMS & CONDITIONS</b>
+        <ol style={{ listStyle: "decimal", margin: ".8mm 0 0", paddingLeft: "4mm" }}>{terms.map((l, i) => <li key={i}>{l}</li>)}</ol>
+        {booking.notes && <div style={{ marginTop: ".8mm" }}><b style={{ color: navy }}>Notes:</b> {booking.notes}</div>}
+      </div>
+
+      {/* signatures */}
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: "8mm", padding: "10mm 2mm 3mm" }}>
+        <div style={{ width: "45mm", textAlign: "center" }}><div style={{ borderTop: `1px solid ${navy}`, paddingTop: ".8mm", fontSize: "9px", color: "#475569" }}>Customer signature</div></div>
+        <div style={{ width: "45mm", textAlign: "center", position: "relative" }}>
+          <div style={{ position: "absolute", left: "13mm", bottom: "4mm", width: "17mm", height: "17mm", borderRadius: "50%", border: "2px solid rgba(29,78,216,.45)", color: "rgba(29,78,216,.6)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "5.5px", fontWeight: 800, textAlign: "center", transform: "rotate(-12deg)", lineHeight: 1.25, padding: "1mm" }}>{settings.companyName}</div>
+          <div style={{ borderTop: `1px solid ${navy}`, paddingTop: ".8mm", fontSize: "9px", color: "#475569" }}>For {settings.companyName}</div>
+        </div>
+      </div>
+      <div style={{ background: navy, color: "#94a3b8", fontSize: "8.5px", padding: "2.2mm 4mm", display: "flex", justifyContent: "space-between", borderRadius: "1.6mm", ...X }}>
+        <span>Thank you! · Scan the QR code for live booking balance · Computer generated</span>
+        <span style={{ color: "#fff", fontWeight: 700 }}>{booking.code}</span>
       </div>
     </div>
   );
@@ -23980,6 +24346,8 @@ function bk3WaText(booking, state, settings) {
     `Advance: ${fmtMoney(state.advancePosted)} · Diya: ${fmtQty(state.deliveredQty)} ${booking.unit || ""}`,
     `Baqi: ${fmtQty(state.remainingQty)} ${booking.unit || ""} (${fmtMoney(Math.max(0, state.unusedAdvance))})`,
     `Delivery tak: ${fmtDate(booking.expiryDate)}`,
+    `Refund: request by ${fmtDate(bkRefundLastDay(booking))} (${BK_REFUND_WINDOW_DAYS} days) · paid within ${BK_REFUND_PAY_DAYS} days after approval`,
+    `ریفنڈ: درخواست ${printDate(bkRefundLastDay(booking), true)} تک · منظوری کے بعد ${BK_REFUND_PAY_DAYS} دن میں ادائیگی`,
     `Live: ${docVerifyUrl("b", booking.id)}`,
   ].join("\n");
 }
@@ -23997,6 +24365,7 @@ function BookingVerifyView({ bookingId, bookings, invoices, payments, settings, 
       <VerifyRow l="Baqi" v={`${fmtQty(st.remainingQty)} ${b.unit || ""}`} strong />
       <VerifyRow l="Advance bacha" v={fmtMoney(Math.max(0, st.unusedAdvance))} />
       <VerifyRow l="Delivery tak" v={fmtDate(b.expiryDate)} tone={st.expired ? "text-rose-600" : ""} />
+      <VerifyRow l="Refund request by" v={`${fmtDate(bkRefundLastDay(b))} · ${BK_REFUND_PAY_DAYS} days after approval`} />
       {st.deliveries.length > 0 && (
         <div className="mt-3 text-[12.5px]">
           {st.deliveries.map((d) => <div key={d.invoiceId} className="flex justify-between border-t border-slate-100 py-1"><span>{fmtDate(d.date)} · {d.invoiceNumber}</span><b>{fmtQty(d.qty)} {b.unit || ""}</b></div>)}
