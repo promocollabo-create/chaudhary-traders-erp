@@ -1213,6 +1213,7 @@ const NAV_GROUPS = [
     { id: "outstandingTransfer", label: "Outstanding Transfer", icon: "transfer" },
     { id: "adjustments", label: "Adjustments", icon: "sliders" },
     { id: "vouchers", label: "Payment Vouchers", icon: "voucher" },
+    { id: "purchases", label: "Store Purchases", icon: "box" },
     { id: "paymentsDue", label: "Payments Due", icon: "calendar" },
     { id: "portalRequests", label: "Portal Requests", icon: "users" },
     { id: "cashbook", label: "Cash Book", icon: "cash" },
@@ -1230,6 +1231,7 @@ const NAV_GROUPS = [
     { id: "attendance", label: "Attendance", icon: "calendar" },
     { id: "hrRequests", label: "Leave & Advance", icon: "note" },
     { id: "salarySheet", label: "Salary Sheet", icon: "wallet" },
+    { id: "collTargets", label: "Collection Targets", icon: "chart" },
   ] },
   { title: "Tools", items: [
     { id: "reports", label: "Reports", icon: "chart" },
@@ -4983,7 +4985,10 @@ function PaymentReceipt({ payment, customers, invoices, payments, returns, excha
 }
 
 function Payments({ customers, payments, promises, savePayment, updatePayment, invoices = [], returns = [], exchanges = [], transfers = [], adjustments = [], settings = {}, currentUser = null, logProofAudit }) {
-  const [form, setForm] = useState({ customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "", reference: "" });
+  const finC = useFin();
+  const collectors = collActiveEmployees(finC);
+  const myCollector = currentUser && currentUser.employeeId && collectors.some((e) => e.id === currentUser.employeeId) ? currentUser.employeeId : "";
+  const [form, setForm] = useState({ customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "", reference: "", collectorId: myCollector });
   // Payment Proof (screenshot) — see the "PAYMENT PROOF" block near the end of this file.
   const proofs = usePaymentProofs();
   const [proofFile, setProofFile] = useState(null);
@@ -5020,7 +5025,7 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
     .filter((p) => (p.remainingAmount > 0 && p.status !== "Cancelled") || (editing && editing.promiseId === p.id));
 
   function blankForm() {
-    return { customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "", reference: "" };
+    return { customerId: customers[0]?.id || "", date: todayISO(), amount: "", method: "Cash", note: "", promiseId: "", reference: "", collectorId: myCollector };
   }
 
   function startEdit(p) {
@@ -5029,7 +5034,7 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
     setForm({
       customerId: p.customerId || "", date: p.date || todayISO(), amount: String(p.amount ?? ""),
       method: p.method || "Cash", note: linked ? (p.note || "") : paymentUserNote(p), promiseId: p.promiseId || "",
-      reference: p.reference || "",
+      reference: p.reference || "", collectorId: p.collectorId || "",
     });
     if (formRef.current && formRef.current.scrollIntoView) formRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
   }
@@ -5055,6 +5060,7 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
         method: form.method,
         promiseId,
         reference: String(form.reference || "").trim(),
+        ...collFields(finC, form.collectorId),
         note: editingLinked
           ? (editing.note || "")
           : (promiseId ? `Payment against Promise ${customerPromises.find((p) => p.id === promiseId)?.code || ""}${form.note ? " — " + form.note : ""}` : form.note),
@@ -5067,10 +5073,11 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
       id: uid("pay"), ...form, amount: Number(form.amount), customerName: customer.name,
       promiseId: form.promiseId || "",
       reference: String(form.reference || "").trim(),
+      ...collFields(finC, form.collectorId),
       note: form.promiseId ? `Payment against Promise ${customerPromises.find((p) => p.id === form.promiseId)?.code || ""}${form.note ? " — " + form.note : ""}` : form.note,
     };
     savePayment(newPayment);
-    setForm({ ...form, amount: "", note: "", promiseId: "", reference: "" });
+    setForm({ ...form, amount: "", note: "", promiseId: "", reference: "" }); // collector stays selected for the next entry
     // Screenshot (optional): uploaded AFTER the payment is saved and linked to
     // that payment's id. It never changes the payment. If the upload fails the
     // payment stays recorded and staff are told plainly so they can retry.
@@ -5133,6 +5140,13 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
             </select>
           </Field>
         )}
+        <Field label="Wasool kis ne kiya (Collector)">
+          <select className={inputCls} value={form.collectorId || ""} onChange={(e) => setForm({ ...form, collectorId: e.target.value })} data-collector="1">
+            <option value="">{t("Office / counter par")}</option>
+            {collectors.map((e) => <option key={e.id} value={e.id}>{e.name} · {e.number}</option>)}
+            {form.collectorId && !collectors.some((e) => e.id === form.collectorId) && <option value={form.collectorId}>{editing && editing.collectorName ? editing.collectorName : form.collectorId}</option>}
+          </select>
+        </Field>
         <Field label="Transaction Reference (optional)">
           <input className={inputCls} value={form.reference || ""} placeholder="e.g. TID / cheque no." onChange={(e) => setForm({ ...form, reference: e.target.value })} data-pproof="reference" />
         </Field>
@@ -5189,6 +5203,7 @@ function Payments({ customers, payments, promises, savePayment, updatePayment, i
                   <td className="px-4 py-2 text-slate-500 text-xs">
                     {p.note || "-"}
                     {p.reference && <div className="text-[10px] text-slate-400" dir="ltr">Ref: {p.reference}</div>}
+                    {p.collectorName && <div className="text-[10px] font-bold text-indigo-600">👤 {p.collectorName}</div>}
                   </td>
                   <td className="px-4 py-2" data-payment-row={p.id}>
                     <PaymentProofCell record={proofs.recordFor(p.id)} loaded={proofs.loaded} failed={proofs.failed} canUpload={canUploadProof} onOpen={() => setProofPaymentId(p.id)} />
@@ -11060,6 +11075,7 @@ function App() {
         onOpen={openBranchView} onSaveBranch={saveBranchFull} />
     ),
     vouchers: <VouchersPage currentUser={currentUser} users={users} branches={branches} settings={settings} />,
+    purchases: <PurchasesPage currentUser={currentUser} products={products} />,
     profit: currentUser.role === "admin" ? (
       <ProfitPage currentUser={currentUser} products={products} customers={customers} invoices={invoices} payments={payments}
         returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments}
@@ -11072,11 +11088,12 @@ function App() {
     cashbook: <CashBookPage currentUser={currentUser} invoices={visibleInvoices} payments={visiblePayments} settings={settings} />,
     creditControl: <CreditControlPage currentUser={currentUser} customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges} promises={promises} transfers={transfers} adjustments={adjustments} settings={settings} />,
     urduTranslate: <UrduTranslatePage currentUser={currentUser} customers={customers} products={products} drivers={drivers} branches={branches} settings={settings} />,
-    myHr: <MyHrPage currentUser={currentUser} settings={settings} />,
+    myHr: <MyHrPage currentUser={currentUser} settings={settings} payments={payments} invoices={invoices} />,
     employees: <EmployeesPage currentUser={currentUser} users={users} customers={customers} branches={branches} settings={settings} saveUser={saveUser} deleteUser={deleteUser} />,
     attendance: <AttendancePage currentUser={currentUser} />,
     hrRequests: <HrRequestsPage currentUser={currentUser} settings={settings} onOpenVoucher={openVoucherById} />,
     salarySheet: <SalarySheetPage currentUser={currentUser} settings={settings} onOpenVoucher={openVoucherById} />,
+    collTargets: <CollectionTargetsPage currentUser={currentUser} payments={payments} invoices={invoices} />,
     insights: (
       <InsightsPage customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
         promises={promises} transfers={transfers} adjustments={adjustments} settings={settings} />
@@ -11513,10 +11530,9 @@ function RecvPrintStyles() {
         body.recv-print-slip * { visibility: hidden !important; }
         body.recv-print-slip .recv-slip, body.recv-print-slip .recv-slip * { visibility: visible !important; }
         body.recv-print-slip .recv-slip {
-          position: absolute !important; left: 0; top: 0; width: 100%; margin: 0;
-          padding: 28px 36px; border: 0 !important; background: #fff; font-size: 16px;
+          position: absolute !important; left: 0; top: 0; width: 210mm; margin: 0;
+          padding: 0 !important; border: 0 !important; background: #fff; zoom: 1 !important;
         }
-        body.recv-print-slip .recv-slip .recv-slip-line { margin-top: 56px; }
       }
     `}</style>
   );
@@ -11525,36 +11541,99 @@ function RecvPrintStyles() {
 /* ---------------- Receiving Proof: the Receiving Slip ---------------- */
 
 function RecvSlip({ invoice, settings }) {
-  const items = (invoice.items || []).filter((it) => it && it.name);
+  const boxRef = React.useRef(null);
+  const [zoom, setZoom] = useState(0.78);
+  useEffect(() => {
+    const fit = () => { if (boxRef.current) setZoom(Math.min(1, boxRef.current.clientWidth / (210 * PRINT_PX_PER_MM))); };
+    fit(); window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, []);
   return (
-    <div className="recv-slip border border-slate-300 bg-white px-4 py-4 text-slate-900" data-recv="slip">
-      <div className="text-center">
-        {settings && settings.companyName && (
-          <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">{settings.companyName}</div>
-        )}
-        <div className="text-base font-black uppercase tracking-wide">{recvT("Material Receiving")}</div>
+    <div ref={boxRef} className="border border-slate-300 overflow-hidden" data-recv="slip-box">
+      <div className="recv-slip" data-recv="slip" style={{ zoom, width: "210mm" }}>
+        <RecvSlipHalf invoice={invoice} settings={settings || {}} />
       </div>
-      <div className="mt-3 text-sm space-y-0.5">
-        <div><span className="text-slate-500">{recvT("Invoice")}:</span> <span className="font-bold" dir="ltr">#{invoice.number}</span></div>
-        <div><span className="text-slate-500">{recvT("Customer")}:</span> <span className="font-bold">{invoice.customerName}</span></div>
+    </div>
+  );
+}
+/* Material Receiving — half page (210 × 148.5 mm). Sign: Driver · mohar · Customer */
+function RecvSlipHalf({ invoice, settings }) {
+  const items = (invoice.items || []).filter((it) => it && it.name);
+  const totKg = invWeightKg(invoice);
+  const units = [...new Set(items.map((it) => it.unit).filter(Boolean))];
+  const totQty = roundQty(items.reduce((a, it) => a + (Number(it.qty) || 0), 0));
+  const lbl = { fontSize: "7.5px", letterSpacing: ".16em", color: "#64748B", fontWeight: 800, marginBottom: ".8mm" };
+  const kv = (l, v) => <div style={{ display: "flex", justifyContent: "space-between", gap: "2mm", padding: ".35mm 0", fontSize: "9.5px", color: "#475569" }}><span>{l}</span><b style={{ color: "#0F172A", textAlign: "right" }}>{v}</b></div>;
+  const card = { border: "1px solid #E2E8F0", borderRadius: "2.4mm", padding: "1.8mm 2.9mm" };
+  const th = { fontSize: "7.5px", letterSpacing: ".14em", color: "#64748B", textAlign: "left", padding: "1.3mm 2.6mm", background: "#F8FAFC", borderBottom: "1px solid #E2E8F0" };
+  const td = { padding: "1.4mm 2.6mm", borderBottom: "1px solid #F1F5F9", fontSize: "10.5px" };
+  const vehicle = [invoice.vehicleType, invoice.vehicleNumber].filter(Boolean).join(" · ");
+  const sig = (title, sub, urduSub) => (
+    <div style={{ textAlign: "center", fontSize: "9.5px" }}>
+      <div style={{ borderBottom: "1.5px solid #0F172A", height: "12mm", marginBottom: "1mm" }} />
+      <b style={{ display: "block" }}>{title}</b>
+      <span style={{ display: "block", fontSize: "8.5px", color: "#64748B", fontFamily: urduSub ? '"Noto Nastaliq Urdu", serif' : undefined, lineHeight: urduSub ? 1.9 : 1.4 }}>{sub}</span>
+    </div>
+  );
+  return (
+    <div style={{ width: "210mm", height: "145mm", padding: "4.2mm 5.8mm 0", display: "flex", flexDirection: "column", overflow: "hidden", background: "#fff", color: "#0F172A", fontFamily: "Inter, Arial, sans-serif", fontSize: "10px", boxSizing: "border-box", WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <div style={{ height: "1.6mm", background: "linear-gradient(90deg,#0F1A36 55%,#059669)", margin: "-4.2mm -5.8mm 3.2mm" }} />
+      <div style={{ display: "flex", alignItems: "center", gap: "2.9mm", paddingBottom: "2.4mm", borderBottom: "2.5px solid #0F1A36" }}>
+        <div style={{ width: "11.5mm", height: "11.5mm", background: "#0F1A36", borderRadius: "1.3mm", display: "flex", alignItems: "center", justifyContent: "center", color: "#E6B04E", fontWeight: 900 }}>{settings.logoUrl ? <img src={settings.logoUrl} alt="" style={{ width: "7.5mm", height: "7.5mm", objectFit: "contain" }} /> : uiInitials(settings.companyName)}</div>
+        <div><div style={{ fontSize: "16px", fontWeight: 900, textTransform: "uppercase" }}>{settings.companyName}</div><div style={{ fontSize: "7px", fontWeight: 800, letterSpacing: ".13em", color: "#2747C9" }}>CONSTRUCTION MATERIALS SUPPLIER</div></div>
+        <div style={{ marginLeft: "auto", textAlign: "right", fontSize: "8px", color: "#475569", lineHeight: 1.6 }}>{settings.companyAddress}<br />{settings.companyPhone}</div>
       </div>
-      <div className="border-t border-dashed border-slate-400 my-3" />
-      <div className="text-[11px] uppercase tracking-wide font-bold text-slate-500">{recvT("Materials")}</div>
-      <div className="mt-1 space-y-2">
-        {items.map((it, idx) => (
-          <div key={idx}>
-            <div className="text-sm font-bold">{it.name}</div>
-            <div className="text-sm text-slate-600" dir="ltr">{fmtQty(it.qty)}{it.unit ? " " + it.unit : ""}</div>
-          </div>
-        ))}
+      <div style={{ marginTop: "2.6mm", background: "#0F1A36", color: "#fff", borderRadius: "2.6mm", padding: "2.4mm 3.7mm", display: "flex", alignItems: "center" }}>
+        <div>
+          <div style={{ fontSize: "8px", letterSpacing: ".2em", fontWeight: 800, color: "#6EE7B7" }}>MATERIAL RECEIVING · <span style={{ fontFamily: '"Noto Nastaliq Urdu", serif', letterSpacing: 0, fontSize: "11px" }}>مال کی وصولی</span></div>
+          <div style={{ fontSize: "16px", fontWeight: 800, marginTop: ".3mm" }}>Invoice <span style={{ color: "#93B0FF" }}>#{invoice.number}</span> · {fmtDate(invoice.date)}</div>
+        </div>
+        <div style={{ marginLeft: "auto", display: "flex", gap: "2mm", alignItems: "center" }}>
+          <b style={{ background: "#fff", color: "#0F1A36", borderRadius: "1.6mm", padding: "1mm 2.9mm", fontSize: "14px" }}>MRV-{String(invoice.number || "").replace(/\D/g, "").slice(-4) || "0000"}</b>
+          <span style={{ background: "#D1FAE5", color: "#065F46", fontSize: "8px", fontWeight: 800, letterSpacing: ".12em", borderRadius: "1mm", padding: ".8mm 1.8mm" }}>DELIVERY</span>
+        </div>
       </div>
-      <div className="border-t border-dashed border-slate-400 my-3" />
-      <div className="text-sm">
-        <div>{recvT("Customer Signature")}:</div>
-        <div className="recv-slip-line mt-8 border-b border-slate-900" />
-        <div className="mt-4">{recvT("Date")}:</div>
-        <div className="recv-slip-line mt-8 border-b border-slate-900" />
+      <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr 19.5mm", gap: "2.4mm", marginTop: "2.4mm" }}>
+        <div style={card}>
+          <div style={lbl}>CUSTOMER</div>
+          <div style={{ fontSize: "14px", fontWeight: 800, unicodeBidi: "plaintext", lineHeight: 1.7, marginBottom: ".6mm", fontFamily: /[؀-ۿ]/.test(invoice.customerName || "") ? '"Noto Nastaliq Urdu", serif' : undefined }}>{invoice.customerName}</div>
+          {invoice.customerPhone && kv("Phone", invoice.customerPhone)}
+          {invoice.customerAddress && kv("Site", invoice.customerAddress)}
+        </div>
+        <div style={card}>
+          <div style={lbl}>DRIVER · DELIVERY</div>
+          {kv("Driver", <span style={{ fontSize: "12px" }}>{invoice.driverName || "—"}</span>)}
+          {invoice.driverId && kv("Driver ID", invoice.driverId)}
+          {kv("Vehicle", vehicle || "—")}
+          {kv("Date", fmtDate(invoice.date))}
+        </div>
+        <div style={{ ...card, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "1mm" }}>
+          <QrSvg text={docVerifyUrl("i", invoice.id)} sizeMm={15} />
+          <div style={{ fontSize: "6.5px", letterSpacing: ".12em", color: "#64748B", fontWeight: 800, marginTop: ".5mm" }}>VERIFY</div>
+        </div>
       </div>
+      <div style={{ ...card, padding: 0, overflow: "hidden", marginTop: "2.4mm" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}><tbody>
+          <tr><th style={{ ...th, width: "9mm" }}>#</th><th style={th}>MATERIAL</th><th style={{ ...th, textAlign: "right" }}>QTY</th><th style={th}>UNIT</th><th style={{ ...th, textAlign: "right" }}>WEIGHT</th><th style={{ ...th, textAlign: "right" }}>RECEIVED ✓</th></tr>
+          {items.slice(0, 6).map((it, i) => (
+            <tr key={i}><td style={td}>{i + 1}</td><td style={{ ...td, fontWeight: 800 }}>{it.name}</td><td style={{ ...td, textAlign: "right", fontWeight: 800 }}>{fmtQty(it.qty)}</td><td style={td}>{it.unit}</td>
+              <td style={{ ...td, textAlign: "right" }}>{itemWeightKg(it) > 0 ? fmtW(itemWeightKg(it)) : "—"}</td>
+              <td style={{ ...td, textAlign: "right" }}><span style={{ display: "inline-block", width: "12mm", borderBottom: "1px solid #0F172A", height: "3.5mm" }} /></td></tr>
+          ))}
+          {items.length > 6 && <tr><td colSpan={6} style={{ ...td, fontSize: "8.5px", color: "#64748B" }}>+ {items.length - 6} more items (invoice dekhein)</td></tr>}
+          <tr><td colSpan={2} style={{ ...td, background: "#F0FDF4", fontWeight: 800, borderBottom: 0 }}>Total</td><td style={{ ...td, background: "#F0FDF4", fontWeight: 800, textAlign: "right", borderBottom: 0 }}>{units.length === 1 ? fmtQty(totQty) : ""}</td><td style={{ ...td, background: "#F0FDF4", fontWeight: 800, borderBottom: 0 }}>{units.length === 1 ? units[0] : ""}</td><td style={{ ...td, background: "#F0FDF4", fontWeight: 800, textAlign: "right", borderBottom: 0 }}>{totKg > 0 ? fmtKg(totKg) : ""}</td><td style={{ ...td, background: "#F0FDF4", borderBottom: 0 }} /></tr>
+        </tbody></table>
+      </div>
+      <div style={{ display: "flex", gap: "4mm", marginTop: "2mm", fontSize: "9.5px", color: "#334155", alignItems: "center" }}>
+        {["Poora maal mila", "Maal theek halat mein", "Kami / nuqsan (note): ____________"].map((x) => <span key={x} style={{ display: "flex", gap: "1.3mm", alignItems: "center" }}><i style={{ width: "3.2mm", height: "3.2mm", border: "1.5px solid #0F172A", borderRadius: ".8mm", display: "inline-block" }} />{x}</span>)}
+        <span style={{ marginLeft: "auto", fontFamily: '"Noto Nastaliq Urdu", serif', fontSize: "10.5px", direction: "rtl" }}>مال گن کر وصول کریں</span>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 40mm 1fr", gap: "6mm", marginTop: "auto", marginBottom: "2mm", alignItems: "end" }}>
+        {sig("Driver signature", invoice.driverName || "Driver")}
+        <div style={{ display: "flex", justifyContent: "center" }}><CtDateStamp company={settings} date={invoice.date} sizeMm={29} /></div>
+        {sig("Customer signature", "دستخط وصول کنندہ", true)}
+      </div>
+      <div style={{ margin: "0 -5.8mm", background: "#0F1A36", color: "#CBD5E1", fontSize: "7.5px", padding: "1.3mm 5.8mm", display: "flex" }}>Computer generated · Maal wasool karte waqt gin kar check karein · QR scan se invoice check karein<b style={{ marginLeft: "auto", color: "#fff" }}>#{invoice.number}</b></div>
     </div>
   );
 }
@@ -11611,7 +11690,11 @@ function RecvReceivingPage({ invoice, settings, proofs, failed, onClose, onView 
   // While this page is open, printing (button or Ctrl+P) prints the slip.
   useEffect(() => {
     document.body.classList.add("recv-print-slip");
-    return () => { document.body.classList.remove("recv-print-slip"); };
+    const pg = document.createElement("style");
+    pg.setAttribute("data-recv-page", "1");
+    pg.textContent = "@media print { @page { size: 210mm 148.5mm; margin: 0; } }";
+    document.head.appendChild(pg);
+    return () => { document.body.classList.remove("recv-print-slip"); pg.remove(); };
   }, []);
 
   async function run(work) {
@@ -11653,7 +11736,7 @@ function RecvReceivingPage({ invoice, settings, proofs, failed, onClose, onView 
   const smallBtn = "px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide border";
 
   return (
-    <RecvModal title={<>📦 {recvT("Receiving")}</>} onClose={onClose} hideInPrint={false}>
+    <RecvModal title={<>📦 {recvT("Receiving")}</>} onClose={onClose} hideInPrint={false} wide>
       <RecvSlip invoice={invoice} settings={settings} />
       <button type="button" data-recv="print-slip" onClick={() => window.print()} className="mt-3 w-full px-3 py-2 text-sm font-bold uppercase tracking-wide bg-slate-900 text-white hover:bg-slate-700">
         🖨 {recvT("Print Receiving Slip")}
@@ -13483,6 +13566,70 @@ function InvoicePaperDoc({ invoice, settings, size, include, copies, urdu, recvP
 
 /* ---------------- Payment receipt documents ---------------- */
 
+/* Thermal payment receipt — kala/safaid, bara amount, QR, collector */
+function RcptThermal80({ payment, customer, settings, balances, include, urdu, L, receiptNo, note, copyLabel, small, proof }) {
+  const fs = small ? 0.86 : 1;
+  const px = (n) => `${(n * fs).toFixed(1)}px`;
+  const kv = (l, v) => (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: "2mm", padding: ".6mm 0", borderBottom: "1px dotted #777" }}>
+      <span>{l}</span><b style={{ textAlign: "end" }}>{v}</b>
+    </div>
+  );
+  const lab = (t2) => <div style={{ fontSize: px(8), fontWeight: 800, letterSpacing: ".16em", margin: "2.4mm 0 .8mm" }}>{t2}</div>;
+  const remaining = Number(balances.remaining) || 0;
+  const qrText = payment.invoiceId ? docVerifyUrl("i", payment.invoiceId) : customer && customer.id ? docVerifyUrl("c", customer.id) : "";
+  return (
+    <div style={{ fontFamily: urdu ? undefined : "Inter, Arial, sans-serif", color: "#000", fontSize: px(10.5) }}>
+      <div style={{ textAlign: "center" }}>
+        {settings.logoUrl ? <div style={{ width: "11mm", height: "11mm", background: "#000", borderRadius: "1.6mm", margin: "0 auto 1.2mm", display: "flex", alignItems: "center", justifyContent: "center" }}><img src={settings.logoUrl} alt="" style={{ width: "7mm", height: "7mm", objectFit: "contain", filter: "brightness(0) invert(1)" }} /></div> : null}
+        <div style={{ fontWeight: 900, fontSize: px(16), letterSpacing: ".04em", textTransform: "uppercase" }}>{printD(settings.companyName, urdu)}</div>
+        <div style={{ fontSize: px(8), fontWeight: 800, letterSpacing: ".12em" }}>{L("CONSTRUCTION MATERIALS SUPPLIER")}</div>
+        {settings.companyAddress && <div style={{ fontSize: px(8.5), marginTop: ".8mm" }}>{printD(settings.companyAddress, urdu)}</div>}
+        {settings.companyPhone && <div style={{ fontSize: px(8.5) }}><PrintLtr>{settings.companyPhone}</PrintLtr></div>}
+      </div>
+      <div style={{ background: "#000", color: "#fff", textAlign: "center", fontWeight: 900, letterSpacing: ".2em", fontSize: px(12), padding: "1.4mm 0", margin: "2.4mm -1mm 0" }}>
+        PAYMENT RECEIPT
+        <div style={{ fontFamily: '"Noto Nastaliq Urdu", serif', letterSpacing: 0, fontWeight: 400, fontSize: px(10.5), lineHeight: 1.7, marginTop: ".6mm" }}>ادائیگی کی رسید</div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: "2mm", border: "1.5px solid #000", borderTop: 0, padding: "1.4mm 2mm", margin: "0 -1mm" }}>
+        {qrText ? <QrSvg text={qrText} sizeMm={small ? 13 : 15} /> : null}
+        <div style={{ flex: 1, fontSize: px(9), lineHeight: 1.5 }}>{L("Receipt #")}<br /><b style={{ fontSize: px(10.5) }}><PrintLtr>{receiptNo}</PrintLtr></b><br />{printDate(payment.date, urdu)}{copyLabel ? ` · ${L(copyLabel)}` : ""}</div>
+      </div>
+      {balances.reversed && <div style={{ textAlign: "center", fontWeight: 900, marginTop: "1.5mm" }}>*** REVERSED ***</div>}
+      {lab(L("RECEIVED FROM"))}
+      {kv(L("Customer"), printD(customer.name || "-", urdu))}
+      {(customer.code || customer.phone) && kv(L("Code · Phone"), <PrintLtr>{[customer.code, customer.phone].filter(Boolean).join(" · ")}</PrintLtr>)}
+      {lab(L("PAYMENT"))}
+      {kv(L("Method"), L(payment.method || "Cash"))}
+      {payment.reference && kv(L("Ref / TID"), <PrintLtr>{payment.reference}</PrintLtr>)}
+      {payment.bookingCode && kv(L("Booking"), payment.bookingCode)}
+      {payment.collectorName && kv(L("Collected by"), printD(payment.collectorName, urdu))}
+      <div style={{ border: "2.5px solid #000", borderRadius: "1.6mm", padding: "1.8mm 2mm", marginTop: "2.4mm", textAlign: "center" }}>
+        <div style={{ fontSize: px(8.5), fontWeight: 800, letterSpacing: ".18em" }}>{L("AMOUNT RECEIVED")}</div>
+        <div style={{ fontSize: px(24), fontWeight: 900, lineHeight: 1.2 }}><PrintLtr>{fmtMoney(balances.received)}</PrintLtr></div>
+        <div style={{ fontSize: px(8.5) }}>{finAmountInWords(balances.received)}</div>
+      </div>
+      {include.balance && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", border: "1.5px solid #000", borderRadius: "1.6mm", marginTop: "1.8mm", overflow: "hidden" }}>
+          <div style={{ padding: "1.2mm 1.5mm", textAlign: "center" }}><div style={{ fontSize: px(7.5), fontWeight: 800, letterSpacing: ".1em" }}>{L("PREVIOUS BALANCE")}</div><b style={{ fontSize: px(12.5) }}><PrintLtr>{fmtMoney(balances.previous)}</PrintLtr></b></div>
+          <div style={{ padding: "1.2mm 1.5mm", textAlign: "center", background: "#000", color: "#fff" }}><div style={{ fontSize: px(7.5), fontWeight: 800, letterSpacing: ".1em" }}>{L("REMAINING")}</div><b style={{ fontSize: px(12.5) }}><PrintLtr>{fmtMoney(remaining)}</PrintLtr>{remaining < 0 ? ` (${L("Adv")})` : ""}</b></div>
+        </div>
+      )}
+      {include.balance && Math.abs(remaining) < 0.5 && <div style={{ textAlign: "center", fontWeight: 800, fontSize: px(9.5), marginTop: "1.5mm", border: "1px dashed #000", padding: "1mm", borderRadius: "1mm" }}>✔ ACCOUNT CLEAR — KOI BAQAYA NAHI</div>}
+      {note && <div style={{ marginTop: "1.8mm", fontSize: px(9.5) }}>{L("Note")}: {note}</div>}
+      {proof && (<><PrintRule /><div style={{ textAlign: "center", fontWeight: 700 }}>{L("Payment Proof")}{proof.status ? ` · ${L(proof.status)}` : ""}</div><img src={proof.url} alt="" style={PRINT_THERMAL_IMG} /></>)}
+      {include.signature && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "3mm", marginTop: "7mm", fontSize: px(8.5), textAlign: "center" }}>
+          <div style={{ borderTop: "1px solid #000", paddingTop: ".8mm" }}>{L("Customer sign")}</div>
+          <div style={{ borderTop: "1px solid #000", paddingTop: ".8mm" }}>{L("Received by")}</div>
+        </div>
+      )}
+      <div style={{ fontFamily: '"Noto Nastaliq Urdu", serif', direction: "rtl", textAlign: "center", fontSize: px(10.5), lineHeight: 1.9, marginTop: "2mm" }}>شکریہ! یہ رسید سنبھال کر رکھیں۔</div>
+      <div style={{ borderTop: "1.5px dashed #000", marginTop: "1.5mm", paddingTop: "1.2mm", textAlign: "center", fontSize: px(8) }}>Computer generated · QR scan kar ke check karein</div>
+    </div>
+  );
+}
+
 function ReceiptDoc({ payment, customer, settings, balances, size, include, copies, urdu, proofUrl, proofRecord, fit = true }) {
   const L = (k) => printL(k, urdu);
   const s = PRINT_SIZES[size];
@@ -13494,43 +13641,8 @@ function ReceiptDoc({ payment, customer, settings, balances, size, include, copi
     <div style={printDocStyle(size, urdu, fit)}>
       <PrintCopyWrap copies={copies} thermal={s.thermal || !!fit}>
         {(copyLabel) => s.thermal ? (
-          <div>
-            <div style={{ textAlign: "center", fontWeight: 700, fontSize: "1.3em" }}>{printD(settings.companyName, urdu)}</div>
-            {settings.companyAddress && <div style={{ textAlign: "center" }}>{printD(settings.companyAddress, urdu)}</div>}
-            {settings.companyPhone && <div style={{ textAlign: "center" }}>{L("Ph")}: <PrintLtr>{settings.companyPhone}</PrintLtr></div>}
-            <PrintRule />
-            <div style={{ textAlign: "center", fontWeight: 700 }}>{L("PAYMENT RECEIPT")}</div>
-            <div style={{ textAlign: "center" }}><PrintLtr>{receiptNo}</PrintLtr></div>
-            {copyLabel && <div style={{ textAlign: "center" }}>({L(copyLabel)})</div>}
-            {balances.reversed && <div style={{ textAlign: "center", fontWeight: 700 }}>*** REVERSED ***</div>}
-            <PrintRule />
-            <PrintRow l={L("Date")} v={printDate(payment.date, urdu)} />
-            <PrintRow l={L("Customer")} v={printD(customer.name || "-", urdu)} />
-            {customer.phone && <PrintRow l={L("Ph")} v={customer.phone} />}
-            <PrintRow l={L("Method")} v={L(payment.method || "Cash")} />
-            {payment.reference && <PrintRow l={L("Ref")} v={payment.reference} />}
-            {payment.bookingCode && <PrintRow l={L("Booking")} v={payment.bookingCode} />}
-            <PrintRule />
-            {include.balance && <PrintRow l={L("Previous Balance")} v={fmtMoney(balances.previous).replace("Rs ", "")} />}
-            <PrintRow l={L("Received").toUpperCase()} v={fmtMoney(balances.received)} bold big />
-            {include.balance && <PrintRow l={L("Remaining Balance")} v={fmtMoney(balances.remaining).replace("Rs ", "") + (balances.remaining < 0 ? ` (${L("Adv")})` : "")} bold />}
-            {note && (<><PrintRule /><div>{L("Note")}: {note}</div></>)}
-            {showProof && (
-              <>
-                <PrintRule />
-                <div style={{ textAlign: "center", fontWeight: 700 }}>{L("Payment Proof")}{proofStatus ? ` · ${L(proofStatus)}` : ""}</div>
-                <img src={proofUrl} alt="" style={PRINT_THERMAL_IMG} />
-              </>
-            )}
-            <PrintRule />
-            <div style={{ textAlign: "center" }}>{L("Thank you!")}</div>
-            {include.signature && (
-              <div style={{ textAlign: "center", marginTop: "8mm" }}>
-                <div style={{ borderTop: "1px solid #000", width: "60%", margin: "0 auto" }} />
-                <div>{L("Authorized")}</div>
-              </div>
-            )}
-          </div>
+          <RcptThermal80 payment={payment} customer={customer} settings={settings} balances={balances} include={include} urdu={urdu} L={L}
+            receiptNo={receiptNo} note={note} copyLabel={copyLabel} small={size === "t58"} proof={showProof ? { url: proofUrl, status: proofStatus } : null} />
         ) : (
           <div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", borderBottom: "3px solid #0f172a", paddingBottom: "3mm" }}>
@@ -14884,7 +14996,7 @@ function QrSvg({ text, sizeMm = 20, style }) {
    same time do not overwrite each other's vouchers.
    ============================================================ */
 
-const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests", urduDict: "ct-urdu-dict", bookingReqs: "ct-booking-requests", website: "ct-website", webReqs: "ct-web-requests" };
+const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests", urduDict: "ct-urdu-dict", bookingReqs: "ct-booking-requests", website: "ct-website", webReqs: "ct-web-requests", suppliers: "ct-suppliers", purchases: "ct-purchases" };
 
 const FIN_DEFAULT_SETTINGS = {
   categories: [
@@ -14941,11 +15053,11 @@ Object.entries(FIN_URDU).forEach(([en, ur]) => {
 
 /* ---------------- Store ---------------- */
 
-const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [], urduDict: {}, bookingReqs: [], website: {}, webReqs: [] };
+const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [], urduDict: {}, bookingReqs: [], website: {}, webReqs: [], suppliers: [], purchases: [] };
 const finListeners = new Set();
 // Full (all-branch) copies; finState holds the active branch's view.
 const finRaw = {};
-const FIN_BR_ARRAYS = ["vouchers", "closings", "moves", "portalPay", "portalMsgs", "employees", "attendance", "leaves", "advances", "salarySheets", "creditLog", "creditRequests", "bookingReqs"];
+const FIN_BR_ARRAYS = ["vouchers", "closings", "moves", "portalPay", "portalMsgs", "employees", "attendance", "leaves", "advances", "salarySheets", "creditLog", "creditRequests", "bookingReqs", "purchases"];
 function finBrView(name, v) {
   return FIN_BR_ARRAYS.includes(name) && typeof brScopeList === "function" ? brScopeList(v, brScope, name) : v;
 }
@@ -16267,6 +16379,237 @@ function finCleanPlan(plan) {
     .sort((a, b) => ((a.status === "Paid") === (b.status === "Paid") ? String(a.date).localeCompare(String(b.date)) : a.status === "Paid" ? -1 : 1));
 }
 
+/* ============================================================
+   STORE PURCHASES + SUPPLIERS
+   ct-suppliers  [{ id, name, phone, address, opening }]
+   ct-purchases  [{ id, number PUR-yy-mm-0001, date, supplierId, supplierName, billNo, items[{name,qty,unit,rate,amount}], total, note, status }]
+   Supplier ka baqaya = opening + purchases − (vouchers jin par supplierId hai, un ki paid kishtein)
+   ============================================================ */
+function purNextNumber(list, dateStr) {
+  const d = parseDateValue(dateStr) || new Date();
+  const prefix = `PUR-${String(d.getFullYear()).slice(2)}-${String(d.getMonth() + 1).padStart(2, "0")}-`;
+  let max = 0;
+  (list || []).forEach((x) => { if (x.number && x.number.startsWith(prefix)) max = Math.max(max, Number(x.number.slice(prefix.length)) || 0); });
+  return prefix + String(max + 1).padStart(4, "0");
+}
+function supEntries(fin, supId) {
+  const sp = (fin.suppliers || []).find((x) => x.id === supId);
+  const out = [];
+  (fin.purchases || []).filter((x) => x.supplierId === supId && x.status !== "Cancelled").forEach((x) => out.push({ date: x.date, kind: "Purchase", ref: x.number, note: (x.items || []).map((i) => `${i.name} ${fmtQty(i.qty)} ${i.unit || ""}`).join(", "), debit: Number(x.total) || 0, credit: 0, id: x.id }));
+  (fin.vouchers || []).filter((v) => v.supplierId === supId && v.status !== "Cancelled").forEach((v) => finPlanOf(v).filter((k) => k.status === "Paid").forEach((k) => out.push({ date: (k.paid && k.paid.date) || v.date, kind: "Payment", ref: v.number, note: finKishtMethodText(k), debit: 0, credit: Number(k.amount) || 0, id: `${v.id}:${k.id}` })));
+  out.sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  let bal = Number(sp && sp.opening) || 0;
+  return { opening: Number(sp && sp.opening) || 0, rows: out.map((r) => { bal = roundMoney(bal + r.debit - r.credit); return { ...r, balance: bal }; }), balance: bal };
+}
+function supBalance(fin, supId, exceptVoucherId) {
+  const e = supEntries(fin, supId);
+  const inVouchers = roundMoney((fin.vouchers || []).filter((v) => v.supplierId === supId && v.id !== exceptVoucherId && !["Cancelled", "Rejected", "Paid"].includes(v.status))
+    .reduce((a, v) => a + finPlanOf(v).filter((k) => k.status !== "Paid").reduce((x, k) => x + (Number(k.amount) || 0), 0), 0));
+  return { balance: e.balance, inVouchers, free: roundMoney(Math.max(0, e.balance - inVouchers)) };
+}
+// Voucher banate waqt: kya kharida, kitna baqi
+function SupplierDuePanel({ fin, supplierId, exceptVoucherId }) {
+  const b = supBalance(fin, supplierId, exceptVoucherId);
+  const recent = (fin.purchases || []).filter((x) => x.supplierId === supplierId && x.status !== "Cancelled").sort((a, c) => String(c.date).localeCompare(String(a.date))).slice(0, 4);
+  return (
+    <div className="rounded-xl border border-amber-400/30 bg-amber-400/10 px-3.5 py-2.5 mb-3 text-[13px]" data-supplier-due="1">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 font-semibold">
+        <span className="ct-h">{t("Supplier ka baqi")}: <b className="text-rose-500">{fmtMoney(b.balance)}</b></span>
+        {b.inVouchers > 0 && <span className="text-amber-600">{t("Pehle se voucher mein")}: {fmtMoney(b.inVouchers)}</span>}
+        <span className="text-emerald-600">{t("Voucher ke liye baqi")}: {fmtMoney(b.free)}</span>
+      </div>
+      {recent.length > 0 && <div className="mt-1.5 space-y-0.5 ct-t2 text-[12.5px]">{recent.map((x) => <div key={x.id}>📦 {fmtDate(x.date)} · {x.number}{x.billNo ? ` · Bill ${x.billNo}` : ""} · {(x.items || []).map((i) => `${i.name} ${fmtQty(i.qty)} ${i.unit || ""}`).join(", ")} · <b className="ct-h">{fmtMoney(x.total)}</b></div>)}</div>}
+    </div>
+  );
+}
+function SupplierModal({ initial, onClose, onSaved }) {
+  const [f, setF] = useState(() => initial || { name: "", phone: "", address: "", opening: "" });
+  const [busy, setBusy] = useState(false);
+  async function save() {
+    if (!String(f.name).trim()) { alert(t("Supplier ka naam likhein")); return; }
+    setBusy(true);
+    const id = initial ? initial.id : uid("sup");
+    const rec = { ...(initial || {}), id, name: String(f.name).trim(), phone: String(f.phone || "").trim(), address: String(f.address || "").trim(), opening: roundMoney(Number(f.opening) || 0), createdAt: (initial && initial.createdAt) || new Date().toISOString() };
+    await finMutate("suppliers", (list) => (initial ? list.map((x) => (x.id === id ? rec : x)) : [...list, rec]));
+    setBusy(false);
+    onSaved && onSaved(id);
+    onClose();
+  }
+  return (
+    <Modal title={initial ? "Edit Supplier" : "New Supplier"} onClose={onClose}>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Naam *"><input className={inputCls} value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} autoFocus /></Field>
+        <Field label="Phone"><input className={inputCls} value={f.phone} onChange={(e) => setF({ ...f, phone: e.target.value })} /></Field>
+        <Field label="Address"><input className={inputCls} value={f.address} onChange={(e) => setF({ ...f, address: e.target.value })} /></Field>
+        <Field label="Opening baqi (pehle ka dena)"><input type="number" className={inputCls} value={f.opening} onChange={(e) => setF({ ...f, opening: e.target.value })} /></Field>
+      </div>
+      <div className="flex justify-end gap-2"><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={save} disabled={busy}>Save</Btn></div>
+    </Modal>
+  );
+}
+function PurchaseModal({ fin, currentUser, products, onClose }) {
+  const [f, setF] = useState({ date: todayISO(), supplierId: (fin.suppliers[0] || {}).id || "", billNo: "", note: "" });
+  const [items, setItems] = useState([{ name: "", qty: "", unit: "Bag", rate: "" }]);
+  const [newSup, setNewSup] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const rows = items.map((i) => ({ ...i, amount: roundMoney((Number(i.qty) || 0) * (Number(i.rate) || 0)) }));
+  const total = roundMoney(rows.reduce((a, i) => a + i.amount, 0));
+  const setI = (idx, patch) => setItems(items.map((x, i) => (i === idx ? { ...x, ...patch } : x)));
+  async function save() {
+    const sp = fin.suppliers.find((x) => x.id === f.supplierId);
+    if (!sp) { alert(t("Supplier chunein")); return; }
+    const clean = rows.filter((i) => String(i.name).trim() && Number(i.qty) > 0);
+    if (!clean.length || !(total > 0)) { alert(t("Kam se kam ek cheez, miqdar aur rate likhein")); return; }
+    setBusy(true);
+    const actor = finActor(currentUser);
+    await finMutate("purchases", (list) => [...list, {
+      id: uid("pur"), number: purNextNumber(list, f.date), date: f.date, supplierId: sp.id, supplierName: sp.name, billNo: String(f.billNo).trim(),
+      items: clean.map((i) => ({ name: String(i.name).trim(), qty: Number(i.qty), unit: i.unit, rate: Number(i.rate) || 0, amount: i.amount })),
+      total, note: String(f.note).trim(), status: "Active", createdBy: actor, createdAt: new Date().toISOString(),
+    }]);
+    setBusy(false);
+    onClose();
+  }
+  return (
+    <Modal title="New Store Purchase" onClose={onClose} wide>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-x-4">
+        <Field label="Supplier *">
+          <div className="flex gap-2">
+            <select className={inputCls} value={f.supplierId} data-pur-supplier="1" onChange={(e) => setF({ ...f, supplierId: e.target.value })}>
+              <option value="">{t("— chunein —")}</option>
+              {fin.suppliers.map((sp) => <option key={sp.id} value={sp.id}>{sp.name}</option>)}
+            </select>
+            <Btn variant="ghost" onClick={() => setNewSup(true)}>+ {t("New")}</Btn>
+          </div>
+        </Field>
+        <Field label="Date"><input type="date" className={inputCls} value={f.date} onChange={(e) => setF({ ...f, date: e.target.value })} /></Field>
+        <Field label="Supplier bill no."><input className={inputCls} value={f.billNo} onChange={(e) => setF({ ...f, billNo: e.target.value })} /></Field>
+      </div>
+      <datalist id="pur-products">{(products || []).map((p) => <option key={p.id} value={p.name} />)}</datalist>
+      <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase mb-2">{t("Kya kharida")}</div>
+      <div className="space-y-2">
+        {rows.map((i, idx) => (
+          <div key={idx} className="grid gap-2 items-center" style={{ gridTemplateColumns: "minmax(0,1fr) 90px 100px 110px 110px 32px" }} data-pur-item={idx}>
+            <input className={inputCls} list="pur-products" placeholder={t("Cheez (cement, sariya…)")} value={i.name} onChange={(e) => {
+              const pr = (products || []).find((p) => p.name === e.target.value);
+              setI(idx, { name: e.target.value, ...(pr ? { unit: pr.unit || i.unit } : {}) });
+            }} />
+            <input type="number" className={inputCls} placeholder={t("Miqdar")} value={i.qty} onChange={(e) => setI(idx, { qty: e.target.value })} />
+            <select className={inputCls} value={i.unit} onChange={(e) => setI(idx, { unit: e.target.value })}>{["Bag", "Ton", "KG", "Piece", "Truck", "Ft", "Other"].map((u) => <option key={u}>{u}</option>)}</select>
+            <input type="number" className={inputCls} placeholder={t("Rate")} value={i.rate} onChange={(e) => setI(idx, { rate: e.target.value })} />
+            <div className="text-end font-bold ct-h">{fmtMoney(i.amount)}</div>
+            <button type="button" className="text-rose-500 font-bold" onClick={() => setItems(items.length > 1 ? items.filter((_, k) => k !== idx) : items)}>✕</button>
+          </div>
+        ))}
+      </div>
+      <div className="flex items-center justify-between mt-2 mb-3">
+        <Btn small variant="ghost" onClick={() => setItems([...items, { name: "", qty: "", unit: "Bag", rate: "" }])}>+ {t("Aur cheez")}</Btn>
+        <div className="ct-display text-[22px] font-bold ct-h">{t("Total")} {fmtMoney(total)}</div>
+      </div>
+      <Field label="Note"><input className={inputCls} value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} /></Field>
+      <div className="text-[12px] ct-t3 mb-3">{t("Ye raqam supplier ke khaate mein “dena” ban jati hai. Adaigi Payment Voucher se karein — voucher mein supplier chunein.")}</div>
+      <div className="flex justify-end gap-2"><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={save} disabled={busy}>✓ {t("Save purchase")}</Btn></div>
+      {newSup && <SupplierModal onClose={() => setNewSup(false)} onSaved={(id) => setF((x) => ({ ...x, supplierId: id }))} />}
+    </Modal>
+  );
+}
+function SupplierLedgerModal({ fin, supplier, onClose }) {
+  const e = supEntries(fin, supplier.id);
+  return (
+    <Modal title={`${t("Supplier Ledger")} · ${supplier.name}`} onClose={onClose} wide>
+      <div className="flex flex-wrap gap-4 text-[13px] ct-t2 -mt-1 mb-3"><span>{supplier.phone}</span><span>{t("Opening")} <b className="ct-h">{fmtMoney(e.opening)}</b></span><span>{t("Baqi (dena)")} <b className="text-rose-500">{fmtMoney(e.balance)}</b></span></div>
+      <div className="overflow-x-auto"><table className="w-full text-[13px] min-w-[640px]">
+        <thead><tr className="ct-t3 text-[11px] uppercase">{["Date", "Type", "Ref", "Detail", "Kharida (+)", "Diya (−)", "Baqi"].map((h) => <th key={h} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+        <tbody>
+          <tr className="border-t border-slate-200/60"><td className="py-2 pe-3" colSpan={6}>{t("Opening")}</td><td className="py-2 pe-3 font-bold ct-h">{fmtMoney(e.opening)}</td></tr>
+          {e.rows.map((r) => (
+            <tr key={r.id} className="border-t border-slate-200/60">
+              <td className="py-2 pe-3">{fmtDate(r.date)}</td><td className="py-2 pe-3">{t(r.kind)}</td><td className="py-2 pe-3 font-semibold ct-h">{r.ref}</td><td className="py-2 pe-3 ct-t2">{r.note}</td>
+              <td className="py-2 pe-3 text-rose-500 font-semibold">{r.debit ? fmtMoney(r.debit) : ""}</td><td className="py-2 pe-3 text-emerald-500 font-semibold">{r.credit ? fmtMoney(r.credit) : ""}</td><td className="py-2 pe-3 font-bold ct-h">{fmtMoney(r.balance)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table></div>
+    </Modal>
+  );
+}
+function PurchasesPage({ currentUser, products }) {
+  useLanguage();
+  const fin = useFin();
+  const [tab, setTab] = useState("purchases");
+  const [month, setMonth] = useState(hrMonthOf());
+  const [modal, setModal] = useState(null);
+  if (!fin.loaded) return <HrLoading />;
+  const list = (fin.purchases || []).filter((x) => String(x.date).startsWith(month)).sort((a, b) => String(b.date).localeCompare(String(a.date)) || String(b.number).localeCompare(String(a.number)));
+  const active = list.filter((x) => x.status !== "Cancelled");
+  const monthTotal = roundMoney(active.reduce((a, x) => a + (Number(x.total) || 0), 0));
+  const sups = (fin.suppliers || []).map((sp) => ({ sp, ...supBalance(fin, sp.id) })).sort((a, b) => b.balance - a.balance);
+  const payable = roundMoney(sups.reduce((a, x) => a + Math.max(0, x.balance), 0));
+  async function cancelPur(x) {
+    const why = (prompt(t("Purchase cancel karne ki wajah?")) || "").trim();
+    if (!why) return;
+    const actor = finActor(currentUser);
+    await finMutate("purchases", (l) => l.map((y) => (y.id === x.id ? { ...y, status: "Cancelled", cancellation: { by: actor, at: new Date().toISOString(), reason: why } } : y)));
+  }
+  return (
+    <div>
+      <FinPageHead title="Store Purchases" sub={t("Kya maal kharida, kis supplier se — aur kis ki payment baqi hai")} right={
+        <div className="flex flex-wrap gap-2 items-center">
+          <input type="month" className={`${inputCls} !w-auto`} value={month} onChange={(e) => setMonth(e.target.value || month)} />
+          <Btn variant="ghost" onClick={() => setModal({ kind: "sup" })}>+ {t("Supplier")}</Btn>
+          <Btn onClick={() => { if (!fin.suppliers.length) { setModal({ kind: "sup" }); return; } setModal({ kind: "pur" }); }}>+ {t("New Purchase")}</Btn>
+        </div>
+      } />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <FinKpi label="Is mahine ki khareed" value={fmtMoney(monthTotal)} sub={`${active.length} ${t("bills")}`} />
+        <FinKpi label="Suppliers ko dena" value={fmtMoney(payable)} tone="text-rose-500" sub={`${sups.filter((x) => x.balance > 0).length} ${t("suppliers")}`} />
+        <FinKpi label="Voucher mein (pay hona baqi)" value={fmtMoney(sups.reduce((a, x) => a + x.inVouchers, 0))} tone="text-amber-500" />
+        <FinKpi label="Suppliers" value={String(sups.length)} />
+      </div>
+      <div className="flex gap-2 mb-3">
+        {[["purchases", "Purchases"], ["suppliers", "Suppliers"]].map(([id, l]) => <button key={id} type="button" onClick={() => setTab(id)} className={`rounded-xl px-4 py-2 text-[13px] font-bold ${tab === id ? "ct-em-btn" : "ct-chip ct-h"}`}>{t(l)}</button>)}
+      </div>
+      {tab === "purchases" ? (
+        <section className="ct-card p-3 sm:p-4 overflow-x-auto">
+          {list.length === 0 ? <FinEmpty text="Is mahine koi purchase nahi." /> : (
+            <table className="w-full text-[13px] min-w-[760px]">
+              <thead><tr className="ct-t3 text-[11px] uppercase">{["Date", "No.", "Supplier", "Kya kharida", "Total", ""].map((h) => <th key={h} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+              <tbody>{list.map((x) => (
+                <tr key={x.id} className={`border-t border-slate-200/60 ${x.status === "Cancelled" ? "opacity-50" : ""}`}>
+                  <td className="py-2.5 pe-3">{fmtDate(x.date)}</td>
+                  <td className="py-2.5 pe-3 font-semibold ct-h">{x.number}{x.billNo ? <div className="text-[11px] ct-t3">Bill {x.billNo}</div> : null}</td>
+                  <td className="py-2.5 pe-3 ct-h">{x.supplierName}</td>
+                  <td className="py-2.5 pe-3 ct-t2">{(x.items || []).map((i) => `${i.name} ${fmtQty(i.qty)} ${i.unit || ""} × ${fmtMoney(i.rate)}`).join(" · ")}</td>
+                  <td className="py-2.5 pe-3 font-bold ct-h">{x.status === "Cancelled" ? <s>{fmtMoney(x.total)}</s> : fmtMoney(x.total)}</td>
+                  <td className="py-2.5 text-end">{x.status === "Cancelled" ? <span className="text-[11px] font-bold text-rose-500">{t("Cancelled")}</span> : currentUser.role === "admin" && <Btn small variant="ghost" onClick={() => cancelPur(x)}>✕</Btn>}</td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+        </section>
+      ) : (
+        <section className="ct-card p-3 sm:p-4 overflow-x-auto">
+          {sups.length === 0 ? <FinEmpty text="Koi supplier nahi." /> : (
+            <table className="w-full text-[13px] min-w-[700px]">
+              <thead><tr className="ct-t3 text-[11px] uppercase">{["Supplier", "Phone", "Baqi (dena)", "Voucher mein", ""].map((h) => <th key={h} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+              <tbody>{sups.map(({ sp, balance, inVouchers }) => (
+                <tr key={sp.id} className="border-t border-slate-200/60" data-sup-row={sp.id}>
+                  <td className="py-2.5 pe-3 font-semibold ct-h">{sp.name}</td><td className="py-2.5 pe-3 ct-t2">{sp.phone}</td>
+                  <td className="py-2.5 pe-3 font-bold text-rose-500">{fmtMoney(balance)}</td><td className="py-2.5 pe-3 text-amber-500 font-semibold">{inVouchers ? fmtMoney(inVouchers) : "—"}</td>
+                  <td className="py-2.5 text-end whitespace-nowrap"><Btn small variant="ghost" onClick={() => setModal({ kind: "ledger", sp })}>📒 {t("Ledger")}</Btn><Btn small variant="ghost" onClick={() => setModal({ kind: "sup", sp })}>✎</Btn></td>
+                </tr>
+              ))}</tbody>
+            </table>
+          )}
+        </section>
+      )}
+      {modal && modal.kind === "pur" && <PurchaseModal fin={fin} currentUser={currentUser} products={products} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "sup" && <SupplierModal initial={modal.sp} onClose={() => setModal(null)} />}
+      {modal && modal.kind === "ledger" && <SupplierLedgerModal fin={fin} supplier={modal.sp} onClose={() => setModal(null)} />}
+    </div>
+  );
+}
+
 function VoucherForm({ fin, currentUser, branches, initial, onClose, onSaved }) {
   const settings = fin.settings;
   const editing = !!initial;
@@ -16274,10 +16617,10 @@ function VoucherForm({ fin, currentUser, branches, initial, onClose, onSaved }) 
   const defaultBranch = (branches || []).find((b) => b.id === currentUser.branchId) || (branches || [])[0];
   const [f, setF] = useState(() => initial ? {
     date: initial.date, categoryId: initial.categoryId, payee: initial.payee, payeePhone: initial.payeePhone || "",
-    particulars: initial.particulars || "", amount: String(initial.amount), costCenter: initial.costCenter || "", receiptNo: initial.receiptNo || "",
+    particulars: initial.particulars || "", amount: String(initial.amount), costCenter: initial.costCenter || "", receiptNo: initial.receiptNo || "", supplierId: initial.supplierId || "",
   } : {
     date: todayISO(), categoryId: settings.categories[0] ? settings.categories[0].id : "", payee: "", payeePhone: "",
-    particulars: "", amount: "", costCenter: defaultBranch ? defaultBranch.name : "", receiptNo: "",
+    particulars: "", amount: "", costCenter: defaultBranch ? defaultBranch.name : "", receiptNo: "", supplierId: "",
   });
   const [plan, setPlan] = useState(() => (initial ? finPlanOf(initial).map((k) => ({ ...k })) : []));
   const [planTouched, setPlanTouched] = useState(editing);
@@ -16358,7 +16701,7 @@ function VoucherForm({ fin, currentUser, branches, initial, onClose, onSaved }) 
     const base = {
       date: f.date || todayISO(), categoryId: cat.id, categoryName: cat.name, categoryCode: cat.code || "",
       payee: String(f.payee).trim(), payeePhone: String(f.payeePhone).trim(), particulars: String(f.particulars).trim(),
-      amount: amt, costCenter: f.costCenter, receiptNo: String(f.receiptNo).trim(), plan: clean,
+      amount: amt, costCenter: f.costCenter, receiptNo: String(f.receiptNo).trim(), plan: clean, supplierId: f.supplierId || "",
     };
     const savedId = editing ? initial.id : uid("vch");
     try {
@@ -16422,6 +16765,18 @@ function VoucherForm({ fin, currentUser, branches, initial, onClose, onSaved }) 
           )}
         </Field>
         <Field label="Date"><input type="date" className={inputCls} value={f.date} onChange={set("date")} /></Field>
+        <div className="md:col-span-2">
+          <Field label="Supplier (store purchase ki payment ho to)">
+            <select className={inputCls} value={f.supplierId || ""} data-voucher-supplier="1" onChange={(e) => {
+              const sp = (fin.suppliers || []).find((x) => x.id === e.target.value);
+              setF({ ...f, supplierId: e.target.value, ...(sp ? { payee: sp.name, payeePhone: sp.phone || f.payeePhone } : {}) });
+            }}>
+              <option value="">{t("— Supplier nahi (aam kharcha / salary) —")}</option>
+              {(fin.suppliers || []).map((sp) => <option key={sp.id} value={sp.id}>{sp.name} · {t("baqi")} {fmtMoney(supBalance(fin, sp.id).balance)}</option>)}
+            </select>
+          </Field>
+          {f.supplierId && <SupplierDuePanel fin={fin} supplierId={f.supplierId} exceptVoucherId={editing ? initial.id : ""} />}
+        </div>
         <Field label="Payee (who is paid)">
           <input className={inputCls} list="fin-payees" value={f.payee} onChange={pickPayee} placeholder={t("Name — employee, supplier, anyone")} />
           <datalist id="fin-payees">{payees.map(([n]) => <option key={n} value={n} />)}</datalist>
@@ -19429,6 +19784,7 @@ const HR_ACTIONS = [
   { id: "booking.refund", label: "Booking refund approve / pay karna" },
   { id: "hr.sign", label: "Salary / advance slip check + sign (HR)" },
   { id: "voucher.sign", label: "Payment voucher sign (Accounts) — salary / advance" },
+  { id: "collection.target", label: "Collectors ke mahana target set karna" },
 ];
 const HR_NAV_GROUP = {
   title: "HR",
@@ -19438,16 +19794,17 @@ const HR_NAV_GROUP = {
     { id: "attendance", label: "Attendance", icon: "calendar" },
     { id: "hrRequests", label: "Leave & Advance", icon: "note" },
     { id: "salarySheet", label: "Salary Sheet", icon: "wallet" },
+    { id: "collTargets", label: "Collection Targets", icon: "chart" },
   ],
 };
 const HR_TEMPLATES = {
   manager: {
     label: "Manager", desc: "Invoice check, ledger, voucher approve, leave/advance approve",
-    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "deliverySchedule", "returns", "customers", "ledger", "payments", "promises", "vouchers", "paymentsDue", "reports", "attendance", "hrRequests", "creditControl", "voucher.create", "voucher.approve", "hr.approve", "customer.login", "credit.block", "credit.override", "booking.refund", "hr.sign", "voucher.sign"],
+    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "deliverySchedule", "returns", "customers", "ledger", "payments", "promises", "vouchers", "paymentsDue", "reports", "attendance", "hrRequests", "creditControl", "voucher.create", "voucher.approve", "hr.approve", "customer.login", "credit.block", "credit.override", "booking.refund", "hr.sign", "voucher.sign", "collTargets", "collection.target", "purchases"],
   },
   clerk: {
     label: "Clerk", desc: "Invoice banana, payment add, voucher banana",
-    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "customers", "ledger", "payments", "vouchers", "creditControl", "voucher.create", "customer.login", "voucher.sign"],
+    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "customers", "ledger", "payments", "vouchers", "creditControl", "voucher.create", "customer.login", "voucher.sign", "purchases"],
   },
   cashier: {
     label: "Cashier", desc: "Voucher pay, payments due, cash book",
@@ -19458,7 +19815,7 @@ const HR_TEMPLATES = {
   custom: { label: "Custom", desc: "Khud tick karein", perms: [] },
 };
 // Pages a plain (old) staff login cannot open — only admin or given access.
-const HR_MANAGE_PAGES = ["employees", "salarySheet", "urduTranslate"];
+const HR_MANAGE_PAGES = ["employees", "salarySheet", "urduTranslate", "collTargets"];
 
 function hrEmployeeOf(user) {
   if (!user || !user.employeeId) return null;
@@ -21163,7 +21520,129 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
 
 /* ---------------- My attendance (employee self-service) ---------------- */
 
-function MyHrPage({ currentUser, settings }) {
+/* ============================================================
+   COLLECTION — kis mulazim ne wasooli ki + mahana targets
+   payment.collectorId / collectorName · targets: fin settings.collTargets[month][empId]
+   ============================================================ */
+function collActiveEmployees(fin) { return ((fin && fin.employees) || []).filter((e) => e.status !== "Left"); }
+function collFields(fin, empId) {
+  const e = empId ? ((fin && fin.employees) || []).find((x) => x.id === empId) : null;
+  return e ? { collectorId: e.id, collectorName: e.name } : { collectorId: "", collectorName: "" };
+}
+function collValidPays(payments, invoices, month) {
+  return (payments || []).filter((p) => String(p.date || "").startsWith(month) && p.kind !== "Refund" && !isPaymentLinkedToCancelledInvoice(p, invoices || []));
+}
+function collTargetsOf(settings, month) { return ((settings && settings.collTargets) || {})[month] || {}; }
+async function collSetTarget(month, empId, amount) {
+  await finMutate("settings", (st) => {
+    const all = { ...((st && st.collTargets) || {}) };
+    const m = { ...(all[month] || {}) };
+    if (amount > 0) m[empId] = amount; else delete m[empId];
+    all[month] = m;
+    return { ...st, collTargets: all };
+  });
+}
+function collRows(fin, payments, invoices, month) {
+  const pays = collValidPays(payments, invoices, month);
+  const tg = collTargetsOf(fin.settings, month);
+  const ids = new Set([...Object.keys(tg), ...pays.map((p) => p.collectorId).filter(Boolean)]);
+  const rows = [...ids].map((id) => {
+    const emp = fin.employees.find((e) => e.id === id) || { id, name: (pays.find((p) => p.collectorId === id) || {}).collectorName || "—", number: "", post: "" };
+    const mine = pays.filter((p) => p.collectorId === id);
+    const got = roundMoney(mine.reduce((a, p) => a + (Number(p.amount) || 0), 0));
+    const target = Number(tg[id]) || 0;
+    return { emp, target, got, left: roundMoney(Math.max(0, target - got)), pct: target > 0 ? Math.round((got / target) * 100) : null, count: mine.length, customers: new Set(mine.map((p) => p.customerId)).size };
+  }).sort((a, b) => b.got - a.got);
+  const office = roundMoney(pays.filter((p) => !p.collectorId).reduce((a, p) => a + (Number(p.amount) || 0), 0));
+  return { rows, office, total: roundMoney(pays.reduce((a, p) => a + (Number(p.amount) || 0), 0)) };
+}
+function CollBar({ pct }) {
+  const v = Math.max(0, Math.min(100, pct || 0));
+  return <div className="h-2 rounded-full bg-slate-400/15 overflow-hidden"><div className={`h-full rounded-full ${v >= 100 ? "bg-emerald-500" : v >= 60 ? "bg-sky-500" : "bg-amber-500"}`} style={{ width: `${v}%` }} /></div>;
+}
+function CollectionTargetsPage({ currentUser, payments, invoices }) {
+  useLanguage();
+  const fin = useFin();
+  const [month, setMonth] = useState(hrMonthOf());
+  const [addId, setAddId] = useState("");
+  if (!fin.loaded) return <HrLoading />;
+  const canEdit = hrAllow(currentUser, "collection.target");
+  const { rows, office, total } = collRows(fin, payments, invoices, month);
+  const tTarget = roundMoney(rows.reduce((a, r) => a + r.target, 0));
+  const tGot = roundMoney(rows.reduce((a, r) => a + r.got, 0));
+  const notIn = collActiveEmployees(fin).filter((e) => !rows.some((r) => r.emp.id === e.id));
+  const prevM = hrMonthOf(finAddMonths(`${month}-01`, -1));
+  async function copyPrev() {
+    const prev = collTargetsOf(fin.settings, prevM);
+    if (!Object.keys(prev).length) { alert(t("Pichle mahine koi target nahi tha.")); return; }
+    for (const [id, a] of Object.entries(prev)) { if (!collTargetsOf(finState.settings, month)[id]) await collSetTarget(month, id, a); }
+  }
+  return (
+    <div>
+      <FinPageHead title="Collection Targets" sub={`${hrMonthLabel(month)} · ${t("har collector ka mahana target aur wasooli")}`} right={
+        <div className="flex flex-wrap gap-2 items-center">
+          <input type="month" className={`${inputCls} !w-auto`} value={month} onChange={(e) => setMonth(e.target.value || month)} />
+          {canEdit && <Btn variant="ghost" onClick={copyPrev}>↻ {t("Pichle mahine wale target")}</Btn>}
+        </div>
+      } />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <FinKpi label="Target" value={fmtMoney(tTarget)} sub={`${rows.filter((r) => r.target > 0).length} ${t("collectors")}`} />
+        <FinKpi label="Collectors ne wasool kiya" value={fmtMoney(tGot)} tone="text-emerald-500" sub={tTarget > 0 ? `${Math.round((tGot / tTarget) * 100)}%` : ""} />
+        <FinKpi label="Baqi" value={fmtMoney(Math.max(0, tTarget - tGot))} tone="text-rose-500" />
+        <FinKpi label="Office / counter" value={fmtMoney(office)} sub={`${t("Kul wasooli")} ${fmtMoney(total)}`} />
+      </div>
+      <section className="ct-card p-3 sm:p-4 overflow-x-auto">
+        {rows.length === 0 && <FinEmpty text="Is mahine koi target ya collector wasooli nahi." />}
+        {rows.length > 0 && (
+          <table className="w-full text-[13px] min-w-[760px]">
+            <thead><tr className="ct-t3 text-[11px] uppercase">{["Collector", "Target", "Wasool", "Baqi", "Progress", "Payments"].map((h) => <th key={h} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+            <tbody>{rows.map((r) => (
+              <tr key={r.emp.id} className="border-t border-slate-200/60" data-coll-row={r.emp.id}>
+                <td className="py-2.5 pe-3"><div className="flex items-center gap-2"><HrAvatar emp={r.emp} size={34} /><div><b className="ct-h">{r.emp.name}</b><div className="text-[11.5px] ct-t3">{r.emp.number} · {r.emp.post}</div></div></div></td>
+                <td className="py-2.5 pe-3">{canEdit
+                  ? <input type="number" className={`${inputCls} !py-1 !w-32`} defaultValue={r.target || ""} key={`${month}-${r.emp.id}-${r.target}`} data-coll-target={r.emp.id}
+                      onBlur={(e) => { const v = Number(e.target.value) || 0; if (v !== r.target) collSetTarget(month, r.emp.id, v); }} />
+                  : <b className="ct-h">{r.target ? fmtMoney(r.target) : "—"}</b>}</td>
+                <td className="py-2.5 pe-3 font-bold text-emerald-500">{fmtMoney(r.got)}</td>
+                <td className="py-2.5 pe-3 font-bold text-rose-500">{r.target ? fmtMoney(r.left) : "—"}</td>
+                <td className="py-2.5 pe-3 w-[200px]">{r.pct == null ? <span className="ct-t3 text-[12px]">{t("Target nahi")}</span> : <><CollBar pct={r.pct} /><div className="text-[11.5px] ct-t2 mt-1 font-semibold">{r.pct}%</div></>}</td>
+                <td className="py-2.5 pe-3 ct-t2">{r.count} · {r.customers} {t("customers")}</td>
+              </tr>
+            ))}</tbody>
+          </table>
+        )}
+        {canEdit && notIn.length > 0 && (
+          <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-slate-200/60">
+            <select className={`${inputCls} !w-auto`} value={addId} onChange={(e) => setAddId(e.target.value)}><option value="">{t("+ Collector add karein")}</option>{notIn.map((e) => <option key={e.id} value={e.id}>{e.name} · {e.post}</option>)}</select>
+            <Btn small disabled={!addId} onClick={async () => { const v = Number(prompt(t("Is mahine ka target (Rs)?")) || 0); if (v > 0) { await collSetTarget(month, addId, v); setAddId(""); } }}>{t("Target dein")}</Btn>
+          </div>
+        )}
+      </section>
+      <div className="text-[12px] ct-t3 mt-2">{t("Wasooli Payments mein “Wasool kis ne kiya” se ginti hoti hai. Refund aur cancel invoice ki payment nahi ginti.")}</div>
+    </div>
+  );
+}
+function MyCollectionCard({ emp, fin, payments, invoices }) {
+  const month = hrMonthOf();
+  const target = Number(collTargetsOf(fin.settings, month)[emp.id]) || 0;
+  const mine = collValidPays(payments, invoices, month).filter((p) => p.collectorId === emp.id);
+  const got = roundMoney(mine.reduce((a, p) => a + (Number(p.amount) || 0), 0));
+  if (!target && !got) return null;
+  const pct = target ? Math.round((got / target) * 100) : null;
+  return (
+    <section className="ct-card p-5" data-my-target="1">
+      <div className="text-[11px] font-bold tracking-[.14em] ct-t3 uppercase">{t("Mera collection target")} · {hrMonthLabel(month)}</div>
+      <div className="grid grid-cols-3 gap-3 mt-3">
+        <div><div className="text-[11.5px] ct-t3">{t("Target")}</div><div className="ct-display text-[18px] font-bold ct-h">{target ? fmtMoney(target) : "—"}</div></div>
+        <div><div className="text-[11.5px] ct-t3">{t("Wasool")}</div><div className="ct-display text-[18px] font-bold text-emerald-500">{fmtMoney(got)}</div></div>
+        <div><div className="text-[11.5px] ct-t3">{t("Baqi")}</div><div className="ct-display text-[18px] font-bold text-rose-500">{target ? fmtMoney(Math.max(0, target - got)) : "—"}</div></div>
+      </div>
+      {pct != null && <div className="mt-3"><CollBar pct={pct} /><div className="text-[12px] ct-t2 mt-1 font-semibold">{pct}% · {mine.length} {t("payments")}</div></div>}
+    </section>
+  );
+}
+
+function MyHrPage({ currentUser, settings, payments = [], invoices = [] }) {
   useLanguage();
   const fin = useFin();
   const [month, setMonth] = useState(hrMonthOf());
@@ -21189,6 +21668,7 @@ function MyHrPage({ currentUser, settings }) {
       <FinPageHead title="My Attendance" sub={`${emp.number} · ${emp.post}`} />
       <div className="grid grid-cols-1 lg:grid-cols-[1fr_1.2fr] gap-4">
         <div className="space-y-4">
+          <MyCollectionCard emp={emp} fin={fin} payments={payments} invoices={invoices} />
           <section className="ct-card p-5">
             <div className="flex items-center gap-4">
               <HrAvatar emp={emp} size={72} rounded="rounded-2xl" />
@@ -22109,14 +22589,109 @@ function CrLetterDoc({ cust, ag, w, cs, company, size, fit }) {
     </div>
   );
 }
+
+/* Gol mohar — beech mein tareekh (haath ka sign nahi) */
+function CtDateStamp({ company, date, sizeMm = 29, color = "#1D3B9A" }) {
+  const d = parseDateValue(date) || new Date();
+  const mon = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"][d.getMonth()];
+  const addr = String((company && company.companyAddress) || "").split(",").map((x) => x.trim()).filter(Boolean);
+  const city = addr.length ? addr[addr.length - 1].toUpperCase() : "";
+  const ring = `${String((company && company.companyName) || "").toUpperCase()}${city ? " · " + city : ""} · `;
+  const pid = React.useMemo(() => `stp${Math.random().toString(36).slice(2, 8)}`, []);
+  return (
+    <svg viewBox="0 0 100 100" style={{ width: `${sizeMm}mm`, height: `${sizeMm}mm`, transform: "rotate(-8deg)", opacity: 0.92 }}>
+      <defs><path id={pid} d="M50,50 m-37,0 a37,37 0 1,1 74,0 a37,37 0 1,1 -74,0" /></defs>
+      <circle cx="50" cy="50" r="47" fill="none" stroke={color} strokeWidth="2.4" />
+      <circle cx="50" cy="50" r="30" fill="none" stroke={color} strokeWidth="1.2" />
+      <text fontSize={ring.length > 34 ? 7.2 : 8.6} fontWeight="700" fill={color} letterSpacing="1.4" fontFamily="Inter, Arial, sans-serif"><textPath href={`#${pid}`}>{ring}</textPath></text>
+      <text x="50" y="49" textAnchor="middle" fontSize="12" fontWeight="800" fill={color} fontFamily="Inter, Arial, sans-serif">{String(d.getDate()).padStart(2, "0")} {mon}</text>
+      <text x="50" y="61" textAnchor="middle" fontSize="10" fontWeight="800" fill={color} fontFamily="Inter, Arial, sans-serif">{d.getFullYear()}</text>
+    </svg>
+  );
+}
+/* Warning letter — half page (210 × 148.5 mm), sirf mohar */
+function CrLetterHalf({ cust, ag, w, cs, company }) {
+  const due = finAddDays(w.date, w.n >= cs.warnings ? cs.redAfterDays : cs.gapDays);
+  const left = Math.max(0, finDaysBetween(todayISO(), due));
+  const last = w.n >= cs.warnings;
+  const bills = ag.bills.slice(0, 4);
+  const lbl = { fontSize: "7px", letterSpacing: ".15em", color: "#64748B", fontWeight: 800 };
+  const ur = { fontFamily: '"Noto Nastaliq Urdu", serif', direction: "rtl" };
+  const initials = String(cust.name || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((x) => x[0]).join("").toUpperCase();
+  const why = w.kind === "bounce" ? " Your cheque has bounced." : w.kind === "promise" ? " Your payment promises were not kept." : "";
+  return (
+    <div style={{ width: "210mm", height: "145mm", display: "grid", gridTemplateColumns: "53mm 1fr", overflow: "hidden", background: "#fff", color: "#0F172A", fontFamily: "Inter, Arial, sans-serif", fontSize: "10px", WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <div style={{ background: "linear-gradient(170deg,#7F1D1D,#B91C1C 70%,#C2410C)", color: "#fff", padding: "4.8mm 4.2mm", display: "flex", flexDirection: "column" }}>
+        <div style={{ display: "flex", gap: "2mm", alignItems: "center" }}>
+          <div style={{ width: "9mm", height: "9mm", borderRadius: "1.6mm", background: "rgba(255,255,255,.15)", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900 }}>{company.logoUrl ? <img src={company.logoUrl} alt="" style={{ width: "6mm", height: "6mm", objectFit: "contain", filter: "brightness(0) invert(1)" }} /> : uiInitials(company.companyName)}</div>
+          <b style={{ fontSize: "11px", lineHeight: 1.2, textTransform: "uppercase" }}>{company.companyName}</b>
+        </div>
+        <div style={{ marginTop: "3.5mm", fontSize: "8px", letterSpacing: ".22em", fontWeight: 800, color: "#FDE68A" }}>{last ? "FINAL REMINDER" : "PAYMENT REMINDER"}</div>
+        <div style={{ fontSize: "27px", fontWeight: 900, lineHeight: 1.05, marginTop: "1mm" }}>Warning {w.n}<div style={{ fontSize: "13px", fontWeight: 700, opacity: 0.85 }}>of {cs.warnings}</div></div>
+        <div style={{ ...ur, fontSize: "15px", marginTop: "1.5mm", textAlign: "right", lineHeight: 1.8 }}>ادائیگی کی یاد دہانی</div>
+        <div style={{ display: "flex", gap: "1.6mm", marginTop: "3mm" }}>{Array.from({ length: cs.warnings }).map((_, i) => <i key={i} style={{ flex: 1, height: "1.8mm", borderRadius: "1mm", background: i < w.n ? "#fff" : "rgba(255,255,255,.28)" }} />)}</div>
+        <div style={{ fontSize: "8.5px", opacity: 0.85, marginTop: "1.2mm", textAlign: "right" }}>{cs.warnings} · udhaar band</div>
+        <div style={{ marginTop: "auto", background: "#fff", color: "#7F1D1D", borderRadius: "2.6mm", padding: "2.4mm 2.8mm" }}>
+          <div style={{ fontSize: "7.5px", letterSpacing: ".16em", fontWeight: 800, color: "#9A3412" }}>PAY BY</div>
+          <div style={{ fontSize: "19px", fontWeight: 900, lineHeight: 1.2 }}>{fmtDate(due)}</div>
+          <div style={{ fontSize: "9px", color: "#475569" }}>{left} din baqi</div>
+        </div>
+        <div style={{ marginTop: "2.6mm", display: "flex", gap: "2mm", alignItems: "center", fontSize: "8px", lineHeight: 1.4 }}>
+          <div style={{ background: "#fff", padding: "1mm", borderRadius: "1mm" }}><QrSvg text={docVerifyUrl("w", `${cust.id}~${w.id}`)} sizeMm={11.5} /></div>
+          <span>QR scan kar ke warning aur live baqaya check karein</span>
+        </div>
+      </div>
+      <div style={{ padding: "4.2mm 5.3mm 0", display: "flex", flexDirection: "column", minWidth: 0, position: "relative" }}>
+        <div style={{ display: "flex", alignItems: "flex-start", gap: "2.6mm", paddingBottom: "2.4mm", borderBottom: "2px solid #0F172A" }}>
+          <div><div style={{ fontSize: "15px", fontWeight: 900, textTransform: "uppercase" }}>{company.companyName}</div><div style={{ fontSize: "7px", fontWeight: 800, letterSpacing: ".13em", color: "#2747C9" }}>CONSTRUCTION MATERIALS SUPPLIER</div></div>
+          <div style={{ marginLeft: "auto", textAlign: "right", fontSize: "8px", color: "#475569", lineHeight: 1.6 }}>{company.companyAddress}<br />{company.companyPhone}</div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: "3mm", marginTop: "2.6mm" }}>
+          <div style={{ width: "10.5mm", height: "10.5mm", borderRadius: "2.6mm", background: "#FEE2E2", color: "#B91C1C", fontWeight: 900, display: "flex", alignItems: "center", justifyContent: "center", fontSize: "13px" }}>{initials}</div>
+          <div style={{ minWidth: 0 }}><b style={{ fontSize: "15px" }}>{cust.name}</b><div style={{ fontSize: "9.5px", color: "#475569" }}>{[cust.code, cust.phone].filter(Boolean).join(" · ")}</div></div>
+          <div style={{ marginLeft: "auto", textAlign: "right", fontSize: "9px", color: "#475569", lineHeight: 1.6 }}>Ref <b style={{ color: "#0F172A" }}>{String(cust.code || "").replace(/\D/g, "") ? `WRN-${String(cust.code).replace(/\D/g, "").slice(-4)}-${w.n}` : `WRN-${w.n}/${cs.warnings}`}</b><br />Issued <b style={{ color: "#0F172A" }}>{fmtDate(w.date)}</b></div>
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "1.3fr 1fr 1fr", gap: "2mm", marginTop: "2.6mm" }}>
+          <div style={{ borderRadius: "2.4mm", padding: "1.8mm 2.6mm", background: "#0F172A", color: "#fff" }}><div style={{ ...lbl, color: "#CBD5E1" }}>OUTSTANDING</div><b style={{ fontSize: "17px" }}>Rs {finMoney2(ag.out)}</b><div style={{ fontSize: "8.5px", color: "#CBD5E1" }}>{finAmountInWords(ag.out)}</div></div>
+          <div style={{ borderRadius: "2.4mm", padding: "1.8mm 2.6mm", border: "1px solid #E2E8F0" }}><div style={lbl}>OLDEST BILL</div><b style={{ fontSize: "17px", color: "#B91C1C" }}>{ag.oldest >= 999 ? "Opening" : `${ag.oldest} days`}</b><div style={{ fontSize: "8.5px", color: "#64748B" }}>{(bills.find((b) => b.date) || {}).date ? `since ${fmtDate([...ag.bills].filter((b) => b.date).sort((a, b) => String(a.date).localeCompare(String(b.date)))[0].date)}` : ""}</div></div>
+          <div style={{ borderRadius: "2.4mm", padding: "1.8mm 2.6mm", border: "1px solid #E2E8F0" }}><div style={lbl}>UNPAID BILLS</div><b style={{ fontSize: "17px" }}>{ag.bills.length}</b><div style={{ fontSize: "8.5px", color: "#64748B" }}>{w.kind === "bounce" ? "cheque bounce" : w.kind === "promise" ? "promise broken" : "overdue"}</div></div>
+        </div>
+        <div style={{ fontSize: "10px", lineHeight: 1.6, marginTop: "2.4mm", color: "#1E293B" }}>Dear <b>{cust.name}</b>, your account has an unpaid balance of <b>Rs {finMoney2(ag.out)}</b>.{why} Please clear it by <b style={{ color: "#B91C1C" }}>{fmtDate(due)}</b>{last ? <b style={{ color: "#B91C1C" }}> — this is the final warning; after this, new goods on credit will stop.</b> : " to keep your credit (udhaar) active."}</div>
+        {bills.length > 0 && (
+          <table style={{ width: "100%", borderCollapse: "collapse", marginTop: "1.8mm" }}>
+            <thead><tr>{["BILL", "DATE", "AGE", "BALANCE"].map((h, i) => <th key={h} style={{ fontSize: "7px", letterSpacing: ".14em", color: "#64748B", textAlign: i === 3 ? "right" : "left", padding: "1mm 2mm", borderBottom: "1.5px solid #0F172A" }}>{h}</th>)}</tr></thead>
+            <tbody>{bills.map((b) => (
+              <tr key={b.id}><td style={{ padding: "1mm 2mm", borderBottom: "1px solid #E2E8F0", fontWeight: 800 }}>{b.number}</td><td style={{ padding: "1mm 2mm", borderBottom: "1px solid #E2E8F0" }}>{b.date ? fmtDate(b.date) : "—"}</td>
+                <td style={{ padding: "1mm 2mm", borderBottom: "1px solid #E2E8F0" }}><span style={{ fontSize: "8px", fontWeight: 800, borderRadius: "1mm", padding: ".2mm 1.6mm", background: "#FEE2E2", color: "#B91C1C" }}>{b.age >= 999 ? "opening" : `${b.age} days`}</span></td>
+                <td style={{ padding: "1mm 2mm", borderBottom: "1px solid #E2E8F0", textAlign: "right", fontWeight: 800 }}>{finMoney2(b.left)}</td></tr>
+            ))}{ag.bills.length > bills.length && <tr><td colSpan={4} style={{ padding: "1mm 2mm", fontSize: "8.5px", color: "#64748B" }}>+ {ag.bills.length - bills.length} more bills</td></tr>}</tbody>
+          </table>
+        )}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2.6mm", marginTop: "2mm", marginRight: "27mm", background: "#FFF7ED", border: "1px solid #FED7AA", borderRadius: "2.4mm", padding: "1.6mm 2.6mm" }}>
+          <ol style={{ paddingLeft: "3.4mm", fontSize: "8.6px", lineHeight: 1.65, color: "#334155", listStyle: "decimal", margin: 0 }}>
+            {last ? <li>Not paid by {fmtDate(due)} → <b>new udhaar stops</b> (Red List).</li> : <><li>Not paid by {fmtDate(due)} → <b>Warning {w.n + 1}</b>.</li><li>After {cs.warnings} warnings → <b>new udhaar stops</b>.</li></>}
+            <li>Pay: cash at counter{company.companyPhone ? ` · Easypaisa ${String(company.companyPhone).split(/[\/·,]/)[0].trim()}` : ""} · bank.</li>
+          </ol>
+          <ol style={{ ...ur, fontSize: "10px", lineHeight: 1.85, paddingRight: "3.4mm", paddingLeft: 0, listStyle: "persian", margin: 0, color: "#334155" }}>
+            {last ? <li>مقررہ تاریخ تک ادائیگی نہ ہوئی تو نیا ادھار بند۔</li> : <><li>مقررہ تاریخ تک ادائیگی نہ ہوئی تو اگلی وارننگ۔</li><li>{cs.warnings} وارننگز کے بعد نیا ادھار بند۔</li></>}
+            <li>ادائیگی: کاؤنٹر پر نقد، ایزی پیسہ یا بینک۔</li>
+          </ol>
+        </div>
+        <div style={{ marginTop: "auto" }} /><div style={{ position: "absolute", right: "4.5mm", bottom: "7mm" }}><CtDateStamp company={company} date={w.date} sizeMm={25} /></div>
+        <div style={{ margin: "0 -5.3mm", background: "#F1F5F9", color: "#64748B", fontSize: "7.5px", padding: "1.2mm 5.3mm", display: "flex" }}>Computer generated · Printed {fmtDateTime(new Date().toISOString())}<b style={{ marginLeft: "auto", color: "#0F172A" }}>Warning {w.n}/{cs.warnings}</b></div>
+      </div>
+    </div>
+  );
+}
 function CrLetterPrintDialog({ cust, ag, w, cs, company, onClose }) {
   return (
-    <PrintDialog kind="crletter" title="Print Warning Letter" subtitle={`${cust.name} · Warning ${w.n}/${cs.warnings}`} includeDefs={[]}
-      sizeOrder={["v5", "t80"]} defaultSize="v5" copyLabels={[[1, "1 Copy"], [2, "2 Copies (Customer + Office)"]]}
+    <PrintDialog kind="crletter2" title="Print Warning Letter" subtitle={`${cust.name} · Warning ${w.n}/${cs.warnings}`} includeDefs={[]}
+      sizeOrder={["half", "v5", "t80"]} defaultSize="half" copyLabels={[[1, "1 Copy"], [2, "2 Copies (Customer + Office)"]]}
       fileName={`Payment Warning ${w.n} - ${cust.name} - ${printFileDate(w.date)}`} onClose={onClose}
       renderDoc={(p) => (PRINT_SIZES[p.size].thermal
         ? <HrThermalDoc company={company} title={`PAYMENT WARNING ${w.n}/${cs.warnings}`} qrText={docVerifyUrl("w", `${cust.id}~${w.id}`)} size={p.size} copies={p.copies}
             lines={[["Customer", cust.name, true], ["Date", fmtDate(w.date)], "-", ["Udhaar", `Rs ${finMoney2(ag.out)}`, true, true], ["Purana", ag.oldest >= 999 ? "opening" : `${ag.oldest} din`], ["Pay by", fmtDate(finAddDays(w.date, w.n >= cs.warnings ? cs.redAfterDays : cs.gapDays)), true]]} />
+        : p.size === "half" ? <div style={{ width: "210mm", background: "#fff" }}>{Array.from({ length: p.copies || 1 }).map((_, i) => <div key={i} style={i ? { breakBefore: "page", pageBreakBefore: "always" } : undefined}><CrLetterHalf cust={cust} ag={ag} w={w} cs={cs} company={company} /></div>)}</div>
         : <CrLetterDoc cust={cust} ag={ag} w={w} cs={cs} company={company} size={p.size} fit={p.fit} />)} />
   );
 }
