@@ -1231,6 +1231,7 @@ const NAV_GROUPS = [
     { id: "attendance", label: "Attendance", icon: "calendar" },
     { id: "hrRequests", label: "Leave & Advance", icon: "note" },
     { id: "salarySheet", label: "Salary Sheet", icon: "wallet" },
+    { id: "salaryApprovals", label: "Salary Approvals", icon: "check" },
     { id: "collTargets", label: "Collection Targets", icon: "chart" },
   ] },
   { title: "Tools", items: [
@@ -11093,6 +11094,7 @@ function App() {
     attendance: <AttendancePage currentUser={currentUser} />,
     hrRequests: <HrRequestsPage currentUser={currentUser} settings={settings} onOpenVoucher={openVoucherById} />,
     salarySheet: <SalarySheetPage currentUser={currentUser} settings={settings} onOpenVoucher={openVoucherById} />,
+    salaryApprovals: <SalaryApprovalsPage currentUser={currentUser} settings={settings} />,
     collTargets: <CollectionTargetsPage currentUser={currentUser} payments={payments} invoices={invoices} />,
     insights: (
       <InsightsPage customers={visibleCustomers} invoices={visibleInvoices} payments={visiblePayments} returns={returns} exchanges={exchanges}
@@ -19785,6 +19787,7 @@ const HR_ACTIONS = [
   { id: "hr.sign", label: "Salary / advance slip check + sign (HR)" },
   { id: "voucher.sign", label: "Payment voucher sign (Accounts) — salary / advance" },
   { id: "collection.target", label: "Collectors ke mahana target set karna" },
+  { id: "salary.approve", label: "Salary slip approve (Salary Approvals portal)" },
 ];
 const HR_NAV_GROUP = {
   title: "HR",
@@ -19794,13 +19797,14 @@ const HR_NAV_GROUP = {
     { id: "attendance", label: "Attendance", icon: "calendar" },
     { id: "hrRequests", label: "Leave & Advance", icon: "note" },
     { id: "salarySheet", label: "Salary Sheet", icon: "wallet" },
+    { id: "salaryApprovals", label: "Salary Approvals", icon: "check" },
     { id: "collTargets", label: "Collection Targets", icon: "chart" },
   ],
 };
 const HR_TEMPLATES = {
   manager: {
     label: "Manager", desc: "Invoice check, ledger, voucher approve, leave/advance approve",
-    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "deliverySchedule", "returns", "customers", "ledger", "payments", "promises", "vouchers", "paymentsDue", "reports", "attendance", "hrRequests", "creditControl", "voucher.create", "voucher.approve", "hr.approve", "customer.login", "credit.block", "credit.override", "booking.refund", "hr.sign", "voucher.sign", "collTargets", "collection.target", "purchases"],
+    perms: ["dashboard", "invoices", "invoiceHistory", "orders", "bookings", "deliverySchedule", "returns", "customers", "ledger", "payments", "promises", "vouchers", "paymentsDue", "reports", "attendance", "hrRequests", "creditControl", "voucher.create", "voucher.approve", "hr.approve", "customer.login", "credit.block", "credit.override", "booking.refund", "hr.sign", "voucher.sign", "collTargets", "collection.target", "purchases", "salaryApprovals", "salary.approve"],
   },
   clerk: {
     label: "Clerk", desc: "Invoice banana, payment add, voucher banana",
@@ -19815,7 +19819,7 @@ const HR_TEMPLATES = {
   custom: { label: "Custom", desc: "Khud tick karein", perms: [] },
 };
 // Pages a plain (old) staff login cannot open — only admin or given access.
-const HR_MANAGE_PAGES = ["employees", "salarySheet", "urduTranslate", "collTargets"];
+const HR_MANAGE_PAGES = ["employees", "salarySheet", "salaryApprovals", "urduTranslate", "collTargets"];
 
 function hrEmployeeOf(user) {
   if (!user || !user.employeeId) return null;
@@ -21477,13 +21481,30 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
   const adj = (sheet && sheet.adj) || {};
   const monthEnd = hrMonthDays(month).slice(-1)[0];
   const emps = fin.employees.filter((e) => e.status !== "Left" && (!e.joinDate || e.joinDate <= monthEnd));
-  const rows = isFinal ? sheet.rows : emps.map((e) => hrSalaryRow(fin, e, month, adj[e.id]));
+  const slipMap = (sheet && sheet.slips) || {};
+  const rows = isFinal ? sheet.rows : emps.map((e) => {
+    const sl = slipMap[e.id];
+    if (sl && (sl.status === "Pending" || sl.status === "Approved")) return { ...sl.row, voucherId: sl.status === "Approved" ? (sl.voucherId || "") : "" };
+    return hrSalaryRow(fin, e, month, adj[e.id]);
+  });
+  const slipStatus = (r) => (isFinal ? "Approved" : (slipMap[r.empId] && slipMap[r.empId].status) || "Draft");
+  const locked = (r) => isFinal || ["Pending", "Approved"].includes(slipStatus(r));
+  const hasV = isFinal || rows.some((r) => r.voucherId);
+  const sendable = rows.filter((r) => !locked(r));
+  async function sendAll() {
+    if (!sendable.length) return;
+    if (!confirm(`${sendable.length} ${t("salary slips will be sent for approval. Continue?")}`)) return;
+    setBusy(true);
+    try { await hrSendSlips(month, sendable.map((r) => hrSalaryRow(finState, finState.employees.find((e) => e.id === r.empId), month, ((finState.salarySheets.find((s) => s.month === month) || {}).adj || {})[r.empId])), currentUser); } finally { setBusy(false); }
+  }
   const sum = (k) => roundMoney(rows.reduce((s, r) => s + (Number(r[k]) || 0), 0));
 
   async function setAdj(empId, patch) {
     await finMutate("salarySheets", (list) => {
       const ex = list.find((s) => s.month === month);
       if (ex && ex.status === "Final") return list;
+      const sl = ex && ex.slips && ex.slips[empId];
+      if (sl && (sl.status === "Pending" || sl.status === "Approved")) return list;
       const next = { ...(ex || { id: uid("sal"), month, status: "Draft" }), adj: { ...((ex && ex.adj) || {}), [empId]: { ...(((ex && ex.adj) || {})[empId] || {}), ...patch } } };
       return ex ? list.map((s) => (s.id === ex.id ? next : s)) : [...list, next];
     });
@@ -21521,7 +21542,7 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
     const vids = new Set(rows.map((r) => r.voucherId).filter(Boolean));
     const now = new Date().toISOString();
     await finMutate("vouchers", (list) => list.map((v) => (vids.has(v.id) && v.status !== "Paid" ? { ...v, status: "Cancelled", cancellation: { by: actor, at: now, reason: "Salary sheet reopened" }, history: [...(v.history || []), { at: now, by: actor.name, action: "Cancelled", note: "Salary sheet reopened" }] } : v)));
-    await finMutate("salarySheets", (list) => list.map((s) => (s.month === month ? { ...s, status: "Draft", rows: [], finalAt: null, finalBy: "" } : s)));
+    await finMutate("salarySheets", (list) => list.map((s) => (s.month === month ? { ...s, status: "Draft", rows: [], slips: {}, finalAt: null, finalBy: "" } : s)));
   }
   const voucherOf = (r) => (r.voucherId ? fin.vouchers.find((x) => x.id === r.voucherId) : null);
   const payRows = rows.map((r) => ({ r, pi: hrSalPayInfo(voucherOf(r)) }));
@@ -21540,7 +21561,7 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
               {currentUser.role === "admin" && <Btn variant="ghost" onClick={() => setClosing(true)}>🗓 {t("Closing")}</Btn>}
               {currentUser.role === "admin" && <Btn variant="ghost" onClick={reopen}>↺ {t("Reopen")}</Btn>}
             </>
-          ) : canFinal && <Btn onClick={finalize} disabled={busy || !rows.length}>✓ {t("Final + vouchers")}</Btn>}
+          ) : canFinal && <Btn onClick={sendAll} disabled={busy || !sendable.length} data-send-all>📄 {t("Send all for approval")} ({sendable.length})</Btn>}
         </div>
       } />
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
@@ -21553,7 +21574,7 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
           </>
         ) : (
           <>
-            <FinKpi label="Status" value={<HrPill s="Draft" />} sub={t("Abhi change ho sakti hai")} />
+            <FinKpi label="Status" value={<HrPill s="Draft" />} sub={`${Object.values((sheet && sheet.slips) || {}).filter((x) => x.status === "Approved").length} / ${rows.length} ${t("slips approved")}`} />
             <FinKpi label="Gross salary" value={fmtMoney(sum("salary"))} />
             <FinKpi label="Cuts" value={fmtMoney(sum("leaveCut") + sum("advanceCut") + sum("deduct"))} tone="text-rose-500" sub={`${t("Leave")} ${fmtMoney(sum("leaveCut"))} · ${t("Advance")} ${fmtMoney(sum("advanceCut"))}`} />
             <FinKpi label="Net payable" value={fmtMoney(netAll)} tone="text-emerald-500" />
@@ -21564,7 +21585,7 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
         {rows.length === 0 && <FinEmpty text="No employees for this month." />}
         {rows.length > 0 && (
           <table className="w-full text-[13px] min-w-[980px]">
-            <thead><tr className="ct-t3 text-[11px] uppercase">{["Employee", "Salary", "P / L / Lv / A", "Leave cut", "Advance cut", "Bonus", "Deduct", "Net", ...(isFinal ? ["Payment"] : []), ""].map((h, i) => <th key={i} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+            <thead><tr className="ct-t3 text-[11px] uppercase">{["Employee", "Salary", "P / L / Lv / A", "Leave cut", "Advance cut", "Bonus", "Deduct", "Net", ...(isFinal ? [] : ["Slip"]), ...(hasV ? ["Payment"] : []), ""].map((h, i) => <th key={i} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
             <tbody>
               {rows.map((r) => {
                 const v = voucherOf(r);
@@ -21579,8 +21600,8 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
                       {r.cutDays > 0 ? (
                         <div className="flex items-center gap-1.5">
                           <span className={r.maaf ? "line-through ct-t3" : "text-rose-500 font-bold"}>{fmtMoney(r.leaveCutCalc)}</span>
-                          {!isFinal && <button type="button" onClick={() => setAdj(r.empId, { maaf: !r.maaf })} className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${r.maaf ? "bg-emerald-500 text-white" : "bg-rose-400/15 text-rose-500"}`}>{r.maaf ? t("Maaf") : t("Cut")}</button>}
-                          {isFinal && r.maaf && <span className="text-emerald-500 text-[11px] font-bold">{t("Maaf")}</span>}
+                          {!locked(r) && <button type="button" onClick={() => setAdj(r.empId, { maaf: !r.maaf })} className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${r.maaf ? "bg-emerald-500 text-white" : "bg-rose-400/15 text-rose-500"}`}>{r.maaf ? t("Maaf") : t("Cut")}</button>}
+                          {locked(r) && r.maaf && <span className="text-emerald-500 text-[11px] font-bold">{t("Waived")}</span>}
                         </div>
                       ) : <span className="ct-t3">—</span>}
                     </td>
@@ -21588,14 +21609,15 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
                       {r.advCalc > 0 ? (
                         <div className="flex items-center gap-1.5">
                           <span className={r.advSkip ? "line-through ct-t3" : "text-rose-500 font-bold"}>{fmtMoney(r.advCalc)}</span>
-                          {!isFinal && <button type="button" onClick={() => setAdj(r.empId, { advSkip: !r.advSkip })} className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${r.advSkip ? "bg-emerald-500 text-white" : "bg-rose-400/15 text-rose-500"}`}>{r.advSkip ? t("Skip") : t("Cut")}</button>}
+                          {!locked(r) && <button type="button" onClick={() => setAdj(r.empId, { advSkip: !r.advSkip })} className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${r.advSkip ? "bg-emerald-500 text-white" : "bg-rose-400/15 text-rose-500"}`}>{r.advSkip ? t("Skip") : t("Cut")}</button>}
                         </div>
                       ) : <span className="ct-t3">—</span>}
                     </td>
-                    <td className="py-2.5 pe-3">{isFinal ? (r.bonus ? fmtMoney(r.bonus) : "—") : <input type="number" className={`${inputCls} !py-1 !w-24`} defaultValue={r.bonus || ""} onBlur={(e) => Number(e.target.value || 0) !== r.bonus && setAdj(r.empId, { bonus: Number(e.target.value) || 0 })} />}</td>
-                    <td className="py-2.5 pe-3">{isFinal ? (r.deduct ? fmtMoney(r.deduct) : "—") : <input type="number" className={`${inputCls} !py-1 !w-24`} defaultValue={r.deduct || ""} onBlur={(e) => Number(e.target.value || 0) !== r.deduct && setAdj(r.empId, { deduct: Number(e.target.value) || 0 })} />}</td>
+                    <td className="py-2.5 pe-3">{locked(r) ? (r.bonus ? fmtMoney(r.bonus) : "—") : <input type="number" className={`${inputCls} !py-1 !w-24`} defaultValue={r.bonus || ""} onBlur={(e) => Number(e.target.value || 0) !== r.bonus && setAdj(r.empId, { bonus: Number(e.target.value) || 0 })} />}</td>
+                    <td className="py-2.5 pe-3">{locked(r) ? (r.deduct ? fmtMoney(r.deduct) : "—") : <input type="number" className={`${inputCls} !py-1 !w-24`} defaultValue={r.deduct || ""} onBlur={(e) => Number(e.target.value || 0) !== r.deduct && setAdj(r.empId, { deduct: Number(e.target.value) || 0 })} />}</td>
                     <td className="py-2.5 pe-3 font-black text-emerald-500 text-[14px]">{fmtMoney(r.net)}</td>
-                    {isFinal && (
+                    {!isFinal && <td className="py-2.5 pe-3"><span className={`rounded-full px-2 py-0.5 text-[11px] font-bold whitespace-nowrap ${HR_SLIP_TONE[slipStatus(r)]}`} data-slip-cell>{t(HR_SLIP_LABEL[slipStatus(r)])}</span>{slipStatus(r) === "Returned" && slipMap[r.empId].returned ? <div className="text-[11px] text-rose-500 mt-0.5 max-w-[160px]">{slipMap[r.empId].returned.reason}</div> : null}</td>}
+                    {hasV && (
                       <td className="py-2.5 pe-3 text-[12px] min-w-[170px]" data-pay-cell>
                         {pi.key === "paid" ? (
                           <div className="leading-snug">
@@ -21608,7 +21630,7 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
                       </td>
                     )}
                     <td className="py-2.5 whitespace-nowrap">
-                      {isFinal && (
+                      {(isFinal || r.voucherId) && (
                         <div className="flex items-center gap-1.5">
                           {v && hrChainOn(v) && (
                             <span className="inline-flex gap-0.5" title={HR_CHAIN.map((st) => `${st.label}: ${v.chain[st.id] ? v.chain[st.id].by.name : "—"}`).join("\n")}>
@@ -21629,8 +21651,14 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
           </table>
         )}
       </section>
-      {!isFinal && rows.length > 0 && <div className="text-[12px] ct-t3 mt-2">{t("“Final” dabane par har employee ka approved salary voucher banega — cashier Payments Due se pay karega. Final ke baad slips print karein.")}</div>}
-      {empSheet && <HrEmpSalarySheetModal row={rows.find((x) => x.empId === empSheet.empId) || empSheet} sheet={sheet} month={month} fin={fin} onClose={() => setEmpSheet(null)} onPrint={isFinal ? () => { const rr = rows.find((x) => x.empId === empSheet.empId) || empSheet; setEmpSheet(null); setPrint([rr]); } : null} />}
+      {!isFinal && rows.length > 0 && <div className="text-[12px] ct-t3 mt-2">{t("Click an employee to open the sheet and set deductions, then send the slip for approval. The salary voucher is created on approval, and the slip can be printed only after approval.")}</div>}
+      {empSheet && (() => {
+        const rr = rows.find((x) => x.empId === empSheet.empId) || empSheet;
+        return <HrEmpSalarySheetModal row={rr} sheet={sheet} month={month} fin={fin} currentUser={currentUser} canEdit={canFinal && !locked(rr)}
+          onAdj={(patch) => setAdj(rr.empId, patch)}
+          onSend={async (r2) => { if (r2.note !== (adj[rr.empId] || {}).note) await setAdj(rr.empId, { note: r2.note }); const fresh = hrSalaryRow(finState, finState.employees.find((e) => e.id === rr.empId), month, ((finState.salarySheets.find((s) => s.month === month) || {}).adj || {})[rr.empId]); await hrSendSlips(month, [fresh], currentUser); }}
+          onClose={() => setEmpSheet(null)} onPrint={(isFinal || rr.voucherId) && sheet ? () => { setEmpSheet(null); setPrint([rr]); } : null} />;
+      })()}
       {print && sheet && <HrSalaryPrintDialog sheet={sheet} rows={print} fin={fin} company={settings} currentUser={currentUser} onClose={() => setPrint(null)} />}
       {scanT && <HrScanModal target={scanT} currentUser={currentUser} company={settings} onClose={() => setScanT(null)} onOpenVoucher={(id) => { setScanT(null); onOpenVoucher && onOpenVoucher(id); }} />}
       {closing && <HrClosingModal month={month} fin={fin} currentUser={currentUser} onOpen={(tg) => setScanT(tg)} onClose={() => setClosing(false)} />}
@@ -21654,11 +21682,176 @@ function hrSalPayInfo(v) {
 const HR_PAY_TONE = { paid: "bg-emerald-400/15 text-emerald-600", ready: "bg-sky-400/15 text-sky-600", sign: "bg-amber-400/20 text-amber-600", cancel: "bg-slate-400/15 ct-t3", none: "ct-chip ct-t3" };
 const HR_UR_UI = { fontFamily: '"Noto Nastaliq Urdu", serif', fontWeight: 400, marginInlineStart: 6, fontSize: "0.9em" };
 
-function HrEmpSalarySheetModal({ row, sheet, month, fin, onClose, onPrint }) {
+/* ---------------- Salary slip approval (HR prepares → approver approves → voucher + print) ---------------- */
+function hrSlipOf(sheet, empId) { return (sheet && sheet.slips && sheet.slips[empId]) || null; }
+const HR_SLIP_TONE = { Draft: "ct-chip ct-t2", Pending: "bg-amber-400/20 text-amber-600", Returned: "bg-rose-400/15 text-rose-500", Approved: "bg-emerald-400/15 text-emerald-600" };
+const HR_SLIP_LABEL = { Draft: "Draft", Pending: "Pending approval", Returned: "Returned to HR", Approved: "Approved" };
+function hrMonthEmpIds(fin, month) {
+  const monthEnd = hrMonthDays(month).slice(-1)[0];
+  return fin.employees.filter((e) => e.status !== "Left" && (!e.joinDate || e.joinDate <= monthEnd)).map((e) => e.id);
+}
+async function hrSendSlips(month, rowsList, user) {
+  const actor = finActor(user);
+  const at = new Date().toISOString();
+  await finMutate("salarySheets", (list) => {
+    const ex = list.find((s) => s.month === month);
+    if (ex && ex.status === "Final") return list;
+    const base = ex || { id: uid("sal"), month, status: "Draft", adj: {} };
+    const slips = { ...(base.slips || {}) };
+    rowsList.forEach((row) => {
+      const cur = slips[row.empId];
+      if (cur && (cur.status === "Pending" || cur.status === "Approved")) return;
+      slips[row.empId] = { status: "Pending", row: { ...row, voucherId: "" }, by: actor, at, note: row.note || "", returned: null, history: [...((cur && cur.history) || []), { at, by: actor.name, action: "Sent for approval" }] };
+    });
+    const next = { ...base, slips };
+    return ex ? list.map((s) => (s.id === ex.id ? next : s)) : [...list, next];
+  });
+}
+async function hrReturnSlip(month, empId, user, reason) {
+  const actor = finActor(user);
+  const at = new Date().toISOString();
+  await finMutate("salarySheets", (list) => list.map((s) => {
+    if (s.month !== month || !s.slips || !s.slips[empId] || s.slips[empId].status !== "Pending") return s;
+    const sl = s.slips[empId];
+    return { ...s, slips: { ...s.slips, [empId]: { ...sl, status: "Returned", returned: { by: actor, at, reason }, history: [...(sl.history || []), { at, by: actor.name, action: "Returned", note: reason }] } } };
+  }));
+}
+async function hrApproveSlip(month, empId, user) {
+  const actor = finActor(user);
+  const sh0 = finState.salarySheets.find((s) => s.month === month);
+  const sl0 = hrSlipOf(sh0, empId);
+  if (!sl0 || sl0.status !== "Pending") return "state";
+  if (sl0.by && sl0.by.key === actor.key && user.role !== "admin") return "self";
+  const r = sl0.row;
+  let vid = "";
+  if (r.net > 0) {
+    await finMutate("vouchers", (list) => {
+      const v = hrMakeVoucher(list, { payee: r.name, payeePhone: r.phone, amount: r.net, branchId: r.branchId, particulars: `Salary ${hrMonthLabel(month)} · ${r.number}`, note: `Salary sheet ${month}`, hrRef: { kind: "salary", month, empId }, chain: { log: [] } }, actor);
+      vid = v.id;
+      return [...list, v];
+    });
+  }
+  const at = new Date().toISOString();
+  const ids = hrMonthEmpIds(finState, month);
+  await finMutate("salarySheets", (list) => list.map((s) => {
+    if (s.month !== month) return s;
+    const sl = (s.slips || {})[empId];
+    if (!sl) return s;
+    const row = { ...sl.row, voucherId: vid };
+    const slips = { ...s.slips, [empId]: { ...sl, status: "Approved", approved: { by: actor, at }, voucherId: vid, row, history: [...(sl.history || []), { at, by: actor.name, action: "Approved" }] } };
+    const rows = [...(s.rows || []).filter((x) => x.empId !== empId), row];
+    const allDone = ids.length > 0 && ids.every((id) => slips[id] && slips[id].status === "Approved");
+    return { ...s, slips, rows, ...(allDone ? { status: "Final", finalAt: at, finalBy: actor.name } : {}) };
+  }));
+  return "";
+}
+
+function SalaryApprovalsPage({ currentUser, settings }) {
+  useLanguage();
+  const fin = useFin();
+  const [month, setMonth] = useState(() => { const d = new Date(); return d.getDate() < 20 ? hrMonthOf(finAddMonths(todayISO(), -1)) : hrMonthOf(); });
+  const [view, setView] = useState(null);
+  const [print, setPrint] = useState(null);
+  const [busy, setBusy] = useState("");
+  if (!fin.loaded) return <HrLoading />;
+  const canApprove = hrAllow(currentUser, "salary.approve");
+  const sheet = fin.salarySheets.find((s) => s.month === month) || null;
+  const order = { Pending: 0, Returned: 1, Approved: 2 };
+  const list = Object.entries((sheet && sheet.slips) || {}).map(([empId, sl]) => ({ empId, ...sl })).sort((a, b) => (order[a.status] ?? 3) - (order[b.status] ?? 3) || String(a.row.name).localeCompare(String(b.row.name)));
+  const pending = list.filter((x) => x.status === "Pending").length;
+  const me = finActor(currentUser).key;
+  async function approve(x) {
+    setBusy(x.empId);
+    try {
+      const err = await hrApproveSlip(month, x.empId, currentUser);
+      if (err === "self") alert(t("The person who created this slip cannot approve it."));
+      else if (err) alert(t("This slip was already updated by someone else."));
+    } finally { setBusy(""); }
+  }
+  async function giveBack(x) {
+    const reason = (prompt(t("Reason for returning to HR?")) || "").trim();
+    if (!reason) return;
+    await hrReturnSlip(month, x.empId, currentUser, reason);
+  }
+  const cuts = (r) => [
+    r.cutDays > 0 ? (r.maaf ? `${t("Leave")} ${t("waived")}` : `${t("Leave")} −${fmtMoney(r.leaveCut)}`) : "",
+    r.advCalc > 0 ? (r.advSkip ? `${t("Advance")} ${t("next month")}` : `${t("Advance")} −${fmtMoney(r.advanceCut)}`) : "",
+    r.bonus ? `${t("Bonus")} +${fmtMoney(r.bonus)}` : "",
+    r.deduct ? `${t("Other")} −${fmtMoney(r.deduct)}` : "",
+  ].filter(Boolean).join(" · ") || t("No deductions");
+  return (
+    <div>
+      <FinPageHead title="Salary Approvals" sub={t("Slips created by HR — approve to create the salary voucher and unlock printing")} right={<input type="month" className={`${inputCls} !w-auto`} value={month} onChange={(e) => setMonth(e.target.value || month)} />} />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <FinKpi label="Pending approval" value={pending} tone="text-amber-500" />
+        <FinKpi label="Approved" value={list.filter((x) => x.status === "Approved").length} tone="text-emerald-500" />
+        <FinKpi label="Returned to HR" value={list.filter((x) => x.status === "Returned").length} tone="text-rose-500" />
+        <FinKpi label="Approved net" value={fmtMoney(list.filter((x) => x.status === "Approved").reduce((a, x) => a + (Number(x.row.net) || 0), 0))} />
+      </div>
+      <section className="ct-card p-3 sm:p-4 overflow-x-auto">
+        {list.length === 0 && <FinEmpty text={t("No salary slips sent for approval this month.")} />}
+        {list.length > 0 && (
+          <table className="w-full text-[13px] min-w-[900px]">
+            <thead><tr className="ct-t3 text-[11px] uppercase">{["Employee", "Created by", "Deductions", "Net", "Status", ""].map((h, i) => <th key={i} className={`py-2 pe-3 font-bold ${h === "Net" ? "text-end" : "text-start"}`}>{t(h)}</th>)}</tr></thead>
+            <tbody>
+              {list.map((x) => {
+                const r = x.row;
+                const own = x.by && x.by.key === me && currentUser.role !== "admin";
+                return (
+                  <tr key={x.empId} className="border-t border-slate-200/60 align-top" style={x.status === "Pending" ? { background: "rgba(245,158,11,.07)" } : undefined} data-appr-row={x.empId}>
+                    <td className="py-2.5 pe-3"><b className="ct-h">{r.name}</b><div className="text-[11.5px] ct-t3">{r.number} · {r.post}</div></td>
+                    <td className="py-2.5 pe-3"><div className="ct-h">{x.by ? x.by.name : "—"}</div><div className="text-[11.5px] ct-t3">{fmtDateTime(x.at)}</div></td>
+                    <td className="py-2.5 pe-3 text-[12.5px]">{cuts(r)}{x.note ? <div className="text-emerald-600 text-[12px]">{x.note}</div> : null}{x.status === "Returned" && x.returned ? <div className="text-rose-500 text-[12px]">↩ {x.returned.by.name}: {x.returned.reason}</div> : null}</td>
+                    <td className="py-2.5 pe-3 text-end font-black ct-h text-[14px]">{fmtMoney(r.net)}</td>
+                    <td className="py-2.5 pe-3"><span className={`rounded-full px-2 py-0.5 text-[11px] font-bold whitespace-nowrap ${HR_SLIP_TONE[x.status]}`}>{t(HR_SLIP_LABEL[x.status])}{x.status === "Approved" && x.approved ? ` · ${x.approved.by.name}` : ""}</span></td>
+                    <td className="py-2.5 text-end whitespace-nowrap">
+                      <Btn small variant="ghost" onClick={() => setView(x)}>{t("View sheet")}</Btn>
+                      {x.status === "Pending" && canApprove && <>
+                        <Btn small variant="ghost" onClick={() => giveBack(x)}>↩ {t("Return to HR")}</Btn>
+                        <Btn small onClick={() => approve(x)} disabled={!!busy || own} title={own ? t("You created this slip") : ""} data-approve>✓ {t("Approve")}</Btn>
+                      </>}
+                      {x.status === "Approved" && <Btn small variant="ghost" onClick={() => setPrint([x.row])}>🖨 {t("Print slip")}</Btn>}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+      <div className="text-[12px] ct-t3 mt-2">{t("The person who created a slip cannot approve it. Returning needs a reason. After approval the deductions are locked and the salary voucher is created.")}</div>
+      {view && <HrEmpSalarySheetModal row={view.row} sheet={sheet} month={month} fin={fin} currentUser={currentUser} onClose={() => setView(null)} onPrint={view.status === "Approved" ? () => { const rr = view.row; setView(null); setPrint([rr]); } : null} />}
+      {print && sheet && <HrSalaryPrintDialog sheet={sheet} rows={print} fin={fin} company={settings} currentUser={currentUser} onClose={() => setPrint(null)} />}
+    </div>
+  );
+}
+
+function HrEmpSalarySheetModal({ row, sheet, month, fin, onClose, onPrint, currentUser, canEdit, onAdj, onSend }) {
   const emp = fin.employees.find((e) => e.id === row.empId) || { id: row.empId, name: row.name };
   const st = hrMonthStats(emp, month, fin);
   const v = row.voucherId ? fin.vouchers.find((x) => x.id === row.voucherId) : null;
   const pi = hrSalPayInfo(v);
+  const slip = hrSlipOf(sheet, row.empId);
+  const sst = slip ? slip.status : (sheet && sheet.status === "Final" ? "Approved" : "Draft");
+  const editable = !!(canEdit && onAdj && (sst === "Draft" || sst === "Returned"));
+  const [lockMsg, setLockMsg] = useState(false);
+  const [noteDraft, setNoteDraft] = useState(row.note || "");
+  useEffect(() => {
+    const h = (e) => {
+      if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === "p") {
+        e.preventDefault(); e.stopPropagation();
+        if (onPrint && (sst === "Approved" || v)) onPrint(); else setLockMsg(true);
+      }
+    };
+    window.addEventListener("keydown", h, true);
+    return () => window.removeEventListener("keydown", h, true);
+  }, [onPrint, sst, v]);
+  const tg = (on, a, b, onA, onB, red) => (
+    <div className="flex rounded-lg overflow-hidden border border-slate-300/60 text-[11.5px] font-bold">
+      <button type="button" onClick={onA} className={`px-2.5 py-0.5 ${on ? (red ? "bg-rose-500 text-white" : "bg-emerald-500 text-white") : "ct-t2"}`}>{a}</button>
+      <button type="button" onClick={onB} className={`px-2.5 py-0.5 ${!on ? "bg-emerald-500 text-white" : "ct-t2"}`}>{b}</button>
+    </div>
+  );
   const lateMin = st.cells.reduce((a, c) => a + (c.a && c.a.lateMin > 0 ? Number(c.a.lateMin) : 0), 0);
   const hh = Math.floor(st.hours), mm = Math.round((st.hours - hh) * 60);
   const tone = { present: "", late: "", leave: "bg-sky-400/10", absent: "bg-rose-400/10", off: "ct-chip", none: "" };
@@ -21671,9 +21864,17 @@ function HrEmpSalarySheetModal({ row, sheet, month, fin, onClose, onPrint }) {
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <span className="text-[13px] ct-t2">{row.post || ""} · {t("Salary")} {fmtMoney(row.salary)}</span>
           <span className="flex-1" />
+          <span className={`rounded-full px-2.5 py-1 text-[12px] font-bold ${HR_SLIP_TONE[sst]}`} data-slip-status>{t(HR_SLIP_LABEL[sst])}</span>
           {pi.key !== "none" && <span className={`rounded-full px-2.5 py-1 text-[12px] font-bold ${HR_PAY_TONE[pi.key]}`}>{pi.key === "paid" ? "✓ " : ""}{t(pi.label)}</span>}
-          {onPrint && <Btn small variant="ghost" onClick={onPrint}>🖨 {t("Print slip")}</Btn>}
+          {onPrint ? <Btn small variant="ghost" onClick={onPrint}>🖨 {t("Print slip")} (Ctrl+P)</Btn> : <span className="text-[12px] ct-t3">🔒 {t("Print after approval")}</span>}
         </div>
+        {lockMsg && (
+          <div className="rounded-xl bg-amber-400/15 text-amber-700 px-4 py-3 mb-3 text-[13.5px] font-semibold flex items-center gap-3" data-print-locked>
+            <span className="text-[20px]">🔒</span><div className="flex-1">{t("Printing is locked — this slip is waiting for approval. After approval, Ctrl+P opens Print and Save as PDF.")}<div className="text-[12px] font-normal">{t("Status")}: {t(HR_SLIP_LABEL[sst])}</div></div>
+            <Btn small variant="ghost" onClick={() => setLockMsg(false)}>OK</Btn>
+          </div>
+        )}
+        {sst === "Returned" && slip && slip.returned && <div className="rounded-xl bg-rose-400/10 text-rose-600 px-4 py-2.5 mb-3 text-[13px] font-semibold">↩ {t("Returned by")} {slip.returned.by.name}: {slip.returned.reason}</div>}
         <div className="grid gap-2 mb-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))" }}>
           {tile(t("Working days"), st.working, "", "#64748b")}
           {tile(t("Present"), st.present, `/ ${st.working}`, "#047857")}
@@ -21717,12 +21918,32 @@ function HrEmpSalarySheetModal({ row, sheet, month, fin, onClose, onPrint }) {
               {kv(t("Basic salary"), fmtMoney(row.salary))}
               {kv(`${t("Per day")} (÷ ${row.days})`, fmtMoney(row.perDay))}
               {kv(`${t("Cut days")} (${row.extraLeave} extra + ${row.absent} absent)`, row.cutDays)}
-              {kv(t("Leave / absent deduction"), row.cutDays > 0 ? (row.maaf ? t("Waived") : `− ${fmtMoney(row.leaveCut)}`) : "—", row.cutDays > 0 && !row.maaf ? "text-rose-500" : "text-emerald-600")}
-              {kv(t("Advance instalment"), row.advCalc > 0 ? (row.advSkip ? t("Deferred to next month") : `− ${fmtMoney(row.advanceCut)}`) : "—", row.advCalc > 0 && !row.advSkip ? "text-rose-500" : "ct-t2")}
-              {kv(t("Bonus / overtime"), row.bonus ? `+ ${fmtMoney(row.bonus)}` : "—")}
-              {kv(t("Other deduction"), row.deduct ? `− ${fmtMoney(row.deduct)}` : "—")}
+              {editable && row.cutDays > 0
+                ? <div className="px-4 py-2 text-[13px] border-t border-slate-200/60"><div className="flex justify-between"><span className="ct-t2">{t("Leave / absent")} ({row.cutDays})</span><b className={row.maaf ? "text-emerald-600" : "text-rose-500"}>{row.maaf ? t("Waived") : `− ${fmtMoney(row.leaveCutCalc)}`}</b></div><div className="mt-1 flex justify-end" data-tg-leave>{tg(!row.maaf, t("Deduct"), t("Waive"), () => onAdj({ maaf: false }), () => onAdj({ maaf: true }), true)}</div></div>
+                : kv(t("Leave / absent deduction"), row.cutDays > 0 ? (row.maaf ? t("Waived") : `− ${fmtMoney(row.leaveCut)}`) : "—", row.cutDays > 0 && !row.maaf ? "text-rose-500" : "text-emerald-600")}
+              {editable && row.advCalc > 0
+                ? <div className="px-4 py-2 text-[13px] border-t border-slate-200/60"><div className="flex justify-between"><span className="ct-t2">{t("Advance instalment")}</span><b className={row.advSkip ? "text-emerald-600" : "text-rose-500"}>{row.advSkip ? t("Deferred") : `− ${fmtMoney(row.advCalc)}`}</b></div><div className="mt-1 flex justify-end">{tg(!row.advSkip, t("Deduct"), t("Next month"), () => onAdj({ advSkip: false }), () => onAdj({ advSkip: true }), true)}</div></div>
+                : kv(t("Advance instalment"), row.advCalc > 0 ? (row.advSkip ? t("Deferred to next month") : `− ${fmtMoney(row.advanceCut)}`) : "—", row.advCalc > 0 && !row.advSkip ? "text-rose-500" : "ct-t2")}
+              {editable
+                ? kv(t("Bonus / overtime"), <input type="number" className={`${inputCls} !py-1 !w-28 text-end`} defaultValue={row.bonus || ""} onBlur={(e) => Number(e.target.value || 0) !== row.bonus && onAdj({ bonus: Number(e.target.value) || 0 })} data-emp-bonus />)
+                : kv(t("Bonus / overtime"), row.bonus ? `+ ${fmtMoney(row.bonus)}` : "—")}
+              {editable
+                ? kv(t("Other deduction"), <input type="number" className={`${inputCls} !py-1 !w-28 text-end`} defaultValue={row.deduct || ""} onBlur={(e) => Number(e.target.value || 0) !== row.deduct && onAdj({ deduct: Number(e.target.value) || 0 })} data-emp-deduct />)
+                : kv(t("Other deduction"), row.deduct ? `− ${fmtMoney(row.deduct)}` : "—")}
+              {editable
+                ? <div className="px-4 py-2 border-t border-slate-200/60"><input className={`${inputCls} !py-1.5`} placeholder={t("HR note (e.g. reason for waiver)")} value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} onBlur={() => noteDraft !== (row.note || "") && onAdj({ note: noteDraft })} data-emp-note /></div>
+                : row.note ? kv(t("HR note"), row.note, "text-emerald-600") : null}
               <div className="flex justify-between items-baseline px-4 py-3 text-white" style={{ background: "#0F1B3D" }}><span>{t("Net salary")}</span><b className="text-[20px]">{fmtMoney(row.net)}</b></div>
             </div>
+            {(editable || sst === "Pending") && (
+              <div className="ct-card rounded-xl p-3">
+                <div className="flex justify-between text-[11.5px] font-bold ct-t3 mb-2">
+                  {["HR deductions", "Approval", "Approved", "Print slip"].map((x, i) => <span key={x} className={i === 0 && editable ? "text-amber-600" : i === 1 && sst === "Pending" ? "text-amber-600" : ""}>{i + 1}. {t(x)}</span>)}
+                </div>
+                {editable && onSend && <Btn onClick={() => onSend({ ...row, note: noteDraft })} data-send-slip>📄 {t("Create slip · send for approval")}</Btn>}
+                {sst === "Pending" && <div className="text-[13px] font-semibold text-amber-600">⏳ {t("Waiting for approval in Salary Approvals")}{slip && slip.by ? ` · ${t("sent by")} ${slip.by.name}` : ""}</div>}
+              </div>
+            )}
             {pi.key === "paid" && (
               <div className="rounded-xl overflow-hidden border border-emerald-500/40" data-paid-box>
                 <div className="flex justify-between items-center px-4 py-2.5 bg-emerald-600 text-white"><b>{t("Payment")}</b><span className="border-2 border-white rounded px-2 text-[12px] font-black tracking-widest -rotate-6">PAID</span></div>
@@ -21968,7 +22189,7 @@ function HrClosingModal({ month, fin, currentUser, onOpen, onClose }) {
   const [busy, setBusy] = useState(false);
   const isAdmin = currentUser && currentUser.role === "admin";
   const items = [];
-  fin.salarySheets.filter((sh) => sh.status === "Final" && sh.month <= month).forEach((sh) => {
+  fin.salarySheets.filter((sh) => (sh.status === "Final" || (sh.rows || []).length) && sh.month <= month).forEach((sh) => {
     (sh.rows || []).forEach((r) => {
       const v = r.voucherId ? fin.vouchers.find((x) => x.id === r.voucherId) : null;
       if (!v || v.status === "Cancelled") return;
