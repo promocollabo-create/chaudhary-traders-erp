@@ -20171,7 +20171,7 @@ function HrStamp({ text, tone }) {
 function HrDocFoot({ note }) {
   return (
     <div style={{ marginTop: "3mm", paddingTop: "1mm", borderTop: "1px dashed #cbd5e1", display: "flex", justifyContent: "space-between", gap: "3mm", fontSize: ".7em", color: "#64748b" }}>
-      <span>{note || "QR scan karke status check karein"}</span>
+      <span>{note || "Scan QR to verify status"}</span>
       <span>Printed {fmtDateTime(new Date().toISOString())}</span>
     </div>
   );
@@ -20327,10 +20327,10 @@ function HrLeaveSlipDoc({ lv, emp, fin, company, size, copies, fit }) {
                 <td style={{ ...FIN_CELL, textAlign: "center" }}><b>{lv.days}</b></td>
               </tr></tbody>
             </table>
-            <div style={{ marginTop: "2mm", fontSize: ".95em" }}><b>Wajah:</b> {lv.reason || "—"}</div>
+            <div style={{ marginTop: "2mm", fontSize: ".95em" }}><b>Reason:</b> {lv.reason || "—"}</div>
             <div style={{ display: "flex", gap: "2mm", marginTop: "2mm", fontSize: ".86em" }}>
               <div style={{ ...HR_BOX, flex: 1 }}><b>{hrMonthLabel(month)}:</b> {total} / {hs.leavePerMonth} chhuttiyan</div>
-              <div style={{ ...HR_BOX, flex: 1, color: extra > 0 ? "#be123c" : "#047857" }}><b>Extra:</b> {extra > 0 ? `${extra} din (salary se cut${lv.maaf ? " — maaf" : ""})` : "Koi nahi"}</div>
+              <div style={{ ...HR_BOX, flex: 1, color: extra > 0 ? "#be123c" : "#047857" }}><b>Extra:</b> {extra > 0 ? `${extra} day(s) over limit` : "None"}</div>
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "3mm" }}>
               <HrStamp text={String(lv.status).toUpperCase()} tone={tone} />
@@ -20348,14 +20348,93 @@ function HrLeaveSlipDoc({ lv, emp, fin, company, size, copies, fit }) {
     </div>
   );
 }
+
+const HR_UR = { fontFamily: '"Noto Nastaliq Urdu", serif', direction: "rtl", fontWeight: 400, letterSpacing: 0 };
+function hrNextWorkDay(d, settings) {
+  let x = finAddDays(d, 1);
+  for (let i = 0; i < 14 && !hrWorkDays(x, x, settings).length; i++) x = finAddDays(x, 1);
+  return x;
+}
+function hrDayLabel(d) {
+  try { return new Date(`${d}T00:00:00`).toLocaleDateString("en-GB", { weekday: "short", day: "2-digit", month: "short", year: "numeric" }).replace(/,/g, ""); } catch (e) { return fmtDate(d); }
+}
+function HrLeaveSlipHalf({ lv, emp, fin, company }) {
+  const T = "#0F766E", N = "#0F1B3D", line = "#D6DCE5", mute = "#64748B";
+  const st = lv.status === "Approved" ? ["APPROVED", "منظور", "#047857"] : lv.status === "Rejected" ? ["REJECTED", "مسترد", "#B91C1C"] : ["PENDING", "زیر غور", "#B45309"];
+  const back = hrNextWorkDay(lv.to || lv.from, fin.settings);
+  const box = { border: `1px solid ${line}`, borderRadius: "2mm", padding: "1.8mm 3mm" };
+  const cap = (en, ur) => <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "7.5px", fontWeight: 800, color: mute, letterSpacing: ".12em", marginBottom: ".6mm" }}><span>{en}</span><span style={{ ...HR_UR, fontSize: "8.5px" }}>{ur}</span></div>;
+  const kv = (en, ur, v) => <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "2mm", fontSize: "9.2px", padding: ".5mm 0" }}><span style={{ color: "#475569", whiteSpace: "nowrap" }}>{en} <span style={{ ...HR_UR, fontSize: "8px", color: "#94A3B8" }}>{ur}</span></span><b style={{ textAlign: "right" }}>{v}</b></div>;
+  const sign = (en, ur) => (
+    <div style={{ border: "1px solid #C3CAD6", borderRadius: "1.8mm", height: "20mm", padding: "1.2mm 2.2mm", display: "flex", flexDirection: "column", fontSize: "7.2px", fontWeight: 800, color: "#334155", letterSpacing: ".06em" }}>
+      <div style={{ display: "flex", justifyContent: "space-between" }}><span>{en}</span><span style={{ ...HR_UR, fontSize: "9px" }}>{ur}</span></div>
+      <div style={{ marginTop: "auto", borderTop: "1px solid #475569", paddingTop: ".6mm", display: "flex", justifyContent: "space-between", fontWeight: 600, letterSpacing: 0, color: mute }}><span>Signature</span><span>Date __/__</span></div>
+    </div>
+  );
+  const ho = lv.handover || {};
+  return (
+    <div style={{ width: "210mm", height: "145mm", padding: "4.5mm 7mm 0", boxSizing: "border-box", position: "relative", display: "flex", flexDirection: "column", overflow: "hidden", background: "#fff", color: "#0F172A", fontFamily: "Inter, Arial, sans-serif", fontSize: "10px", lineHeight: 1.35, breakInside: "avoid", pageBreakInside: "avoid", WebkitPrintColorAdjust: "exact", printColorAdjust: "exact" }}>
+      <div style={{ position: "absolute", left: 0, right: 0, top: 0, height: "1.4mm", background: `linear-gradient(90deg,${N},${T})` }} />
+      <div style={{ display: "flex", alignItems: "center", gap: "3mm", marginTop: "1mm", flexShrink: 0 }}>
+        {company.logoUrl
+          ? <div style={{ width: "11mm", height: "11mm", background: N, borderRadius: "2mm", display: "flex", alignItems: "center", justifyContent: "center" }}><img src={company.logoUrl} alt="" style={{ width: "7.5mm", height: "7.5mm", objectFit: "contain" }} /></div>
+          : <div style={{ width: "11mm", height: "11mm", background: N, color: "#F2C14E", borderRadius: "2mm", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: "13px" }}>{uiInitials(company.companyName)}</div>}
+        <div><div style={{ fontSize: "16px", fontWeight: 800, textTransform: "uppercase", lineHeight: 1.1 }}>{company.companyName}</div><div style={{ fontSize: "7.5px", fontWeight: 700, letterSpacing: ".12em", color: T }}>CONSTRUCTION MATERIALS SUPPLIER</div></div>
+        <div style={{ marginLeft: "auto", textAlign: "right", fontSize: "8.5px", color: "#475569", lineHeight: 1.5 }}>{company.companyAddress}{company.companyAddress && <br />}{company.companyPhone ? `Ph: ${company.companyPhone}` : ""}</div>
+      </div>
+      <div style={{ marginTop: "2.6mm", background: N, color: "#fff", borderRadius: "2.5mm", padding: "2.2mm 4mm", display: "flex", alignItems: "center", flexShrink: 0 }}>
+        <div>
+          <div style={{ fontSize: "8px", fontWeight: 700, color: "#5EEAD4", letterSpacing: ".16em", display: "flex", gap: "2.5mm", alignItems: "center" }}>LEAVE SLIP <span style={{ ...HR_UR, fontSize: "10.5px" }}>رخصت کی پرچی</span></div>
+          <div style={{ fontSize: "15px", fontWeight: 800 }}>{emp.name} · <span style={{ color: "#99F6E4" }}>{lv.type} Leave · {lv.days} {Number(lv.days) === 1 ? "day" : "days"}</span></div>
+        </div>
+        <b style={{ marginLeft: "auto", background: "#fff", color: "#0F172A", borderRadius: "1.6mm", padding: "1.2mm 3mm", fontSize: "13px" }}>{lv.number}</b>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1.1fr 22mm", gap: "2.4mm", marginTop: "2.4mm", flexShrink: 0 }}>
+        <div style={box}>{cap("EMPLOYEE", "ملازم")}{kv("Name", "نام", `${emp.name} · ${emp.number || ""}`)}{kv("Designation", "عہدہ", emp.post || "—")}{kv("CNIC", "شناختی کارڈ", emp.cnic || "—")}</div>
+        <div style={box}>{cap("LEAVE DETAILS", "رخصت کی تفصیل")}{kv("Leave type", "قسم", lv.type)}{kv("Reason", "وجہ", lv.reason || "—")}{kv("Applied on", "درخواست", fmtDate(String(lv.createdAt || "").slice(0, 10) || todayISO()))}</div>
+        <div style={{ ...box, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "1mm" }}><QrSvg text={docVerifyUrl("l", lv.id)} sizeMm={15} /><div style={{ fontSize: "6.5px", letterSpacing: ".1em", color: mute, fontWeight: 800, marginTop: ".6mm" }}>VERIFY</div></div>
+      </div>
+      <div style={{ marginTop: "2.4mm", display: "grid", gridTemplateColumns: "1fr 1fr 34mm", border: `1.3px solid ${T}`, borderRadius: "2.5mm", overflow: "hidden", flexShrink: 0 }}>
+        {[["FROM", "سے", hrDayLabel(lv.from), ""], ["TO", "تک", hrDayLabel(lv.to || lv.from), `Back on duty: ${hrDayLabel(back).replace(/ \d{4}$/, "")}`]].map(([en, ur, d, sub]) => (
+          <div key={en} style={{ padding: "3mm 4mm", background: "#F0FDFA", borderRight: "1px solid #99D5CC" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: "7.5px", fontWeight: 800, color: T, letterSpacing: ".12em" }}><span>{en}</span><span style={{ ...HR_UR, fontSize: "8.5px" }}>{ur}</span></div>
+            <b style={{ display: "block", fontSize: "14.5px", fontWeight: 800 }}>{d}</b>
+            <div style={{ fontSize: "8.5px", color: "#475569", minHeight: "3.2mm" }}>{sub}</div>
+          </div>
+        ))}
+        <div style={{ background: T, color: "#fff", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+          <b style={{ fontSize: "22px", lineHeight: 1 }}>{lv.days}</b>
+          <div style={{ fontSize: "7.5px", fontWeight: 800, letterSpacing: ".12em", color: "#CCFBF1", display: "flex", gap: "2mm", alignItems: "center" }}>DAYS <span style={{ ...HR_UR, fontSize: "8.5px" }}>دن</span></div>
+        </div>
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: "2.4mm", flexShrink: 0 }}>
+        <div style={{ border: `2px solid ${st[2]}`, color: st[2], borderRadius: "1.6mm", padding: ".6mm 3.5mm", fontWeight: 800, fontSize: "12px", letterSpacing: ".14em", transform: "rotate(-2deg)", display: "flex", gap: "2.5mm", alignItems: "center" }}>{st[0]} <span style={{ ...HR_UR, fontSize: "11px" }}>{st[1]}</span></div>
+        {lv.decision && <div style={{ fontSize: "8.5px", color: "#475569", textAlign: "right", lineHeight: 1.5 }}>{lv.status === "Rejected" ? "Rejected" : "Approved"} by <b style={{ color: "#0F172A" }}>{lv.decision.by}</b> · {fmtDateTime(lv.decision.at)}{lv.decision.note ? <div>Note: {lv.decision.note}</div> : null}</div>}
+      </div>
+      <div style={{ ...box, marginTop: "2.4mm", flexShrink: 0 }}>
+        {cap("WORK HANDED OVER TO", "کام کس کے حوالے")}
+        {ho.name || ho.note
+          ? <div style={{ fontSize: "10.5px", padding: "1.2mm 0 1.6mm" }}><b>{ho.name || "—"}</b>{ho.note ? <span style={{ color: "#475569" }}> — {ho.note}</span> : null}</div>
+          : <div style={{ borderBottom: "1px dotted #94A3B8", height: "5mm" }} />}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: "2.4mm", marginTop: "auto", marginBottom: "1.8mm", paddingTop: "1.5mm" }}>
+        {sign("EMPLOYEE", "ملازم")}{sign("APPROVED BY", "منظور کنندہ")}{sign("HR / ADMIN", "ایچ آر")}
+      </div>
+      <div style={{ margin: "0 -7mm", background: N, color: "#CBD5E1", fontSize: "7.5px", padding: "1.4mm 7mm", display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
+        <span>Computer generated · scan QR to verify</span><span style={{ ...HR_UR, fontSize: "8.5px" }}>کیو آر اسکین کر کے تصدیق کریں</span><b style={{ color: "#fff" }}>{lv.number}</b>
+      </div>
+    </div>
+  );
+}
 function HrLeavePrintDialog({ lv, emp, fin, company, onClose }) {
   return (
-    <PrintDialog kind="hrleave" title="Print Leave Slip" subtitle={`${lv.number} · ${emp.name}`} includeDefs={[]}
-      sizeOrder={["v5", "t80"]} defaultSize="v5" copyLabels={[[1, "1 Copy"], [2, "2 Copies (Employee + Office)"]]}
+    <PrintDialog kind="hrleave2" title="Print Leave Slip" subtitle={`${lv.number} · ${emp.name}`} includeDefs={[]}
+      sizeOrder={["half", "v5", "t80"]} defaultSize="half" copyLabels={[[1, "1 Copy"], [2, "2 Copies (Employee + Office)"]]}
       fileName={`Leave Slip ${lv.number} - ${emp.name}`} onClose={onClose}
       renderDoc={(p) => (PRINT_SIZES[p.size].thermal
         ? <HrThermalDoc company={company} title={`LEAVE SLIP · ${lv.number}`} qrText={docVerifyUrl("l", lv.id)} size={p.size} copies={p.copies}
             lines={[["Employee", emp.name, true], ["EMP", emp.number], ["Post", emp.post], "-", ["Type", lv.type], ["From", fmtDate(lv.from)], ["To", fmtDate(lv.to)], ["Days", String(lv.days), true], ["Reason", lv.reason || "—"], "-", ["Status", String(lv.status).toUpperCase(), true, true]]} />
+        : p.size === "half" ? <div style={{ width: "210mm", background: "#fff" }}>{Array.from({ length: p.copies || 1 }).map((_, i) => <div key={i} style={i ? { breakBefore: "page", pageBreakBefore: "always" } : undefined}><HrLeaveSlipHalf lv={lv} emp={emp} fin={fin} company={company} /></div>)}</div>
         : <HrLeaveSlipDoc lv={lv} emp={emp} fin={fin} company={company} {...p} />)} />
   );
 }
@@ -20383,14 +20462,14 @@ function HrAdvanceSlipDoc({ adv, emp, fin, company, size, copies, fit }) {
             <HrEmpBlock emp={emp} />
             <div style={{ display: "flex", gap: "2mm", alignItems: "stretch" }}>
               <div style={{ ...HR_BOX, flex: 1 }}>
-                <div style={{ fontSize: ".8em", color: "#64748b" }}>Advance raqam</div>
+                <div style={{ fontSize: ".8em", color: "#64748b" }}>Advance amount</div>
                 <div style={{ fontWeight: 900, fontSize: "1.5em" }}>Rs {finMoney2(adv.amount)}</div>
                 <div style={{ fontSize: ".82em" }}><u>{finAmountInWords(adv.amount)}</u></div>
               </div>
               <div style={{ ...HR_BOX, flex: 1, fontSize: ".9em" }}>
-                <div><b>Wajah:</b> {adv.reason || "—"}</div>
+                <div><b>Reason:</b> {adv.reason || "—"}</div>
                 {adv.voucherId && info.v && <div><b>Voucher:</b> {info.v.number}</div>}
-                <div><b>Wapsi:</b> {adv.months ? `${adv.months} mahine × Rs ${finMoney2(info.per)}` : "—"}</div>
+                <div><b>Repayment:</b> {adv.months ? `${adv.months} months × Rs ${finMoney2(info.per)}` : "—"}</div>
               </div>
             </div>
             {months.length > 0 && (
@@ -20405,11 +20484,11 @@ function HrAdvanceSlipDoc({ adv, emp, fin, company, size, copies, fit }) {
               <HrStamp text={String(info.status).toUpperCase()} tone={tone} />
               <div style={{ fontSize: ".82em", textAlign: "end" }}>
                 {adv.decision && <div>{adv.status === "Rejected" ? "Rejected" : "Approved"}: {adv.decision.by} · {fmtDate(adv.decision.at)}</div>}
-                {info.recovered > 0 && <div>Wapis: Rs {finMoney2(info.recovered)} · Baqi: Rs {finMoney2(info.left)}</div>}
+                {info.recovered > 0 && <div>Recovered: Rs {finMoney2(info.recovered)} · Balance: Rs {finMoney2(info.left)}</div>}
               </div>
             </div>
             <FinSignRow items={HR_PAPER_SIGNS.map((l) => ({ label: l }))} />
-            <HrDocFoot note="Cashier: QR scan karke voucher pay karein" />
+            <HrDocFoot note="Cashier: scan QR to pay the voucher" />
           </div>
         )}
       </PrintCopyWrap>
@@ -20464,10 +20543,10 @@ function HrSalarySlipBody({ sheet, row, fin, company, printNo = 0 }) {
         <tbody>
           {line("Basic salary", row.salary)}
           {row.cutDays > 0 && (row.maaf
-            ? <tr><td style={FIN_CELL}>Extra leave / absent ({row.cutDays} din)</td><td style={{ ...FIN_CELL, ...FIN_NUM, color: "#047857" }}>Maaf</td></tr>
-            : line(`Extra leave / absent (${row.cutDays} din × ${finMoney2(row.perDay)})`, row.leaveCut, true))}
+            ? <tr><td style={FIN_CELL}>Extra leave / absent ({row.cutDays} days)</td><td style={{ ...FIN_CELL, ...FIN_NUM, color: "#047857" }}>Waived</td></tr>
+            : line(`Extra leave / absent (${row.cutDays} days × ${finMoney2(row.perDay)})`, row.leaveCut, true))}
           {(row.advParts || []).map((p) => line(`Advance cut (${p.number})`, p.amount, true))}
-          {row.advSkip && row.advCalc > 0 && <tr><td style={FIN_CELL}>Advance cut</td><td style={{ ...FIN_CELL, ...FIN_NUM, color: "#047857" }}>Is mahine nahi</td></tr>}
+          {row.advSkip && row.advCalc > 0 && <tr><td style={FIN_CELL}>Advance cut</td><td style={{ ...FIN_CELL, ...FIN_NUM, color: "#047857" }}>Deferred to next month</td></tr>}
           {row.bonus > 0 && line("Bonus / overtime", row.bonus)}
           {row.deduct > 0 && line("Other deduction", row.deduct, true)}
           <tr><td style={{ ...FIN_HEAD, textAlign: "left", fontSize: "1em" }}>NET SALARY</td><td style={{ ...FIN_HEAD, ...FIN_NUM, fontSize: "1.15em" }}>Rs {finMoney2(row.net)}</td></tr>
@@ -20503,11 +20582,11 @@ function HrSalarySlipHalf({ sheet, row, fin, company, first = true, printNo = 0 
   const num = { textAlign: "right", fontVariantNumeric: "tabular-nums" };
   const earn = [["Basic salary", finMoney2(row.salary)], ...(row.bonus > 0 ? [["Bonus / overtime", `+ ${finMoney2(row.bonus)}`, "#047857"]] : [["Bonus / overtime", "—"]])];
   const ded = [];
-  if (row.cutDays > 0) ded.push(row.maaf ? [`Leave / absent · ${row.cutDays} din`, "Maaf", "#047857"] : [`Leave / absent · ${row.cutDays} × ${finMoney2(row.perDay)}`, finMoney2(row.leaveCut), "#B91C1C"]);
+  if (row.cutDays > 0) ded.push(row.maaf ? [`Leave / absent · ${row.cutDays} days`, "Waived", "#047857"] : [`Leave / absent · ${row.cutDays} × ${finMoney2(row.perDay)}`, finMoney2(row.leaveCut), "#B91C1C"]);
   (row.advParts || []).forEach((x) => ded.push([`Advance · ${x.number}`, finMoney2(x.amount), "#B91C1C"]));
-  if (row.advSkip && row.advCalc > 0) ded.push(["Advance", "Is mahine nahi", "#047857"]);
+  if (row.advSkip && row.advCalc > 0) ded.push(["Advance", "Deferred to next month", "#047857"]);
   if (row.deduct > 0) ded.push(["Other deduction", finMoney2(row.deduct), "#B91C1C"]);
-  if (!ded.length) ded.push(["Koi katauti nahi", "—"]);
+  if (!ded.length) ded.push(["No deductions", "—"]);
   const gross = roundMoney((Number(row.salary) || 0) + (Number(row.bonus) || 0));
   const totalDed = roundMoney(gross - (Number(row.net) || 0));
   const rows = (list) => list.map(([l, x, c]) => <tr key={l}><td style={td}>{l}</td><td style={{ ...td, ...num, color: c, fontWeight: c ? 600 : 400 }}>{x}</td></tr>);
@@ -20575,7 +20654,7 @@ function HrSalarySlipHalf({ sheet, row, fin, company, first = true, printNo = 0 
           <div style={{ marginTop: "auto", borderTop: "1px solid #0F172A", paddingTop: ".5mm", fontSize: "6.8px", color: "#64748B" }}>Sign / Thumb</div>
         </div>
       </div>
-      <div style={{ margin: "2mm -5.3mm -3.7mm", background: HSH.navy, color: "#CBD5E1", fontSize: "8px", padding: "1.3mm 5.3mm", display: "flex" }}>Sirf ek dafa print · digital record system mein · QR scan kar ke check karein<b style={{ marginLeft: "auto", color: "#fff" }}>{code}</b></div>
+      <div style={{ margin: "2mm -5.3mm -3.7mm", background: HSH.navy, color: "#CBD5E1", fontSize: "8px", padding: "1.3mm 5.3mm", display: "flex" }}>Printed once only · digital record kept in system · scan QR to verify <span style={{ fontFamily: '"Noto Nastaliq Urdu", serif', marginLeft: "3mm" }}>صرف ایک بار پرنٹ · کیو آر سے تصدیق کریں</span><b style={{ marginLeft: "auto", color: "#fff" }}>{code}</b></div>
     </div>
   );
 }
@@ -20616,7 +20695,7 @@ function HrSalaryPrintDialog({ sheet, rows, fin, company, onClose, currentUser, 
       fileName={one ? `Salary Slip ${hrMonthLabel(sheet.month)} - ${one.name}` : `Salary Slips ${hrMonthLabel(sheet.month)}`} onClose={onClose}
       renderDoc={(p) => (PRINT_SIZES[p.size].thermal && one
         ? <HrThermalDoc company={company} title={`SALARY SLIP · ${hrMonthLabel(sheet.month).toUpperCase()}`} qrText={docVerifyUrl("s", hrSalarySlipId(sheet, one.empId))} size={p.size} copies={1}
-            lines={[["Employee", one.name, true], ["EMP", one.number], "-", ["Present", String(one.present)], ["Leave / Absent", `${one.leave} / ${one.absent}`], "-", ["Salary", finMoney2(one.salary)], ["Leave cut", one.maaf ? "Maaf" : finMoney2(one.leaveCut)], ["Advance cut", finMoney2(one.advanceCut)], ...(one.bonus ? [["Bonus", finMoney2(one.bonus)]] : []), ...(one.deduct ? [["Deduction", finMoney2(one.deduct)]] : []), "-", ["NET", `Rs ${finMoney2(one.net)}`, true, true]]} />
+            lines={[["Employee", one.name, true], ["EMP", one.number], "-", ["Present", String(one.present)], ["Leave / Absent", `${one.leave} / ${one.absent}`], "-", ["Salary", finMoney2(one.salary)], ["Leave cut", one.maaf ? "Waived" : finMoney2(one.leaveCut)], ["Advance cut", finMoney2(one.advanceCut)], ...(one.bonus ? [["Bonus", finMoney2(one.bonus)]] : []), ...(one.deduct ? [["Deduction", finMoney2(one.deduct)]] : []), "-", ["NET", `Rs ${finMoney2(one.net)}`, true, true]]} />
         : <HrSalarySlipDoc sheet={sheet} rows={rows} fin={fin} company={company} size={p.size} fit={p.fit} printNos={printNos} />)} />
   );
 }
@@ -21135,7 +21214,7 @@ function HrEmpPicker({ value, onChange, fin }) {
 function LeaveRequestModal({ empId: fixedEmp, currentUser, onClose, onSaved }) {
   const fin = useFin();
   const hs = hrSettingsOf(fin.settings);
-  const [f, setF] = useState({ empId: fixedEmp || "", from: finAddDays(todayISO(), 1), to: finAddDays(todayISO(), 1), type: "Casual", reason: "" });
+  const [f, setF] = useState({ empId: fixedEmp || "", from: finAddDays(todayISO(), 1), to: finAddDays(todayISO(), 1), type: "Casual", reason: "", hoEmp: "", hoNote: "" });
   const days = hrWorkDays(f.from, f.to, fin.settings).length;
   const month = hrMonthOf(f.from);
   const used = f.empId ? hrLeaveUsed(fin, f.empId, month) : 0;
@@ -21147,7 +21226,7 @@ function LeaveRequestModal({ empId: fixedEmp, currentUser, onClose, onSaved }) {
     const actor = finActor(currentUser);
     let rec = null;
     await finMutate("leaves", (list) => {
-      rec = { id: uid("lv"), number: hrNextNo(list, "LV"), empId: f.empId, from: f.from, to: f.to || f.from, days, type: f.type, reason: String(f.reason).trim(), status: "Pending", createdAt: new Date().toISOString(), createdBy: actor.name };
+      rec = { id: uid("lv"), number: hrNextNo(list, "LV"), empId: f.empId, from: f.from, to: f.to || f.from, days, type: f.type, reason: String(f.reason).trim(), ...(f.hoEmp || String(f.hoNote).trim() ? { handover: { empId: f.hoEmp, name: (fin.employees.find((e) => e.id === f.hoEmp) || {}).name || "", note: String(f.hoNote).trim() } } : {}), status: "Pending", createdAt: new Date().toISOString(), createdBy: actor.name };
       return [...list, rec];
     });
     onSaved && onSaved(rec);
@@ -21164,6 +21243,15 @@ function LeaveRequestModal({ empId: fixedEmp, currentUser, onClose, onSaved }) {
         <div className="flex flex-wrap gap-1.5">{HR_LEAVE_TYPES.map((x) => <button key={x} type="button" onClick={() => setF({ ...f, type: x })} className={`rounded-lg px-3 py-1.5 text-[12.5px] font-bold ${f.type === x ? "bg-emerald-500 text-white" : "ct-chip ct-t2"}`}>{t(x)}</button>)}</div>
       </Field>
       <Field label="Reason"><textarea rows={2} className={inputCls} value={f.reason} onChange={(e) => setF({ ...f, reason: e.target.value })} /></Field>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="Work handed over to">
+          <select className={inputCls} value={f.hoEmp} onChange={(e) => setF({ ...f, hoEmp: e.target.value })} data-leave-handover>
+            <option value="">{t("Choose…")}</option>
+            {fin.employees.filter((e) => e.status !== "Left" && e.id !== f.empId).map((e) => <option key={e.id} value={e.id}>{e.number} · {e.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Handover note"><input className={inputCls} value={f.hoNote} placeholder={t("e.g. cash counter, daily bank deposit")} onChange={(e) => setF({ ...f, hoNote: e.target.value })} data-leave-honote /></Field>
+      </div>
       {f.empId && (
         <div className={`rounded-xl px-3 py-2.5 text-[13px] font-semibold ${extra > 0 ? "bg-rose-400/10 text-rose-500" : "bg-emerald-400/10 text-emerald-600"}`}>
           {days} {t("din")} · {hrMonthLabel(month)}: {used}/{hs.leavePerMonth} {t("pehle li")}{extra > 0 ? ` · ${extra} ${t("din extra — salary se cut ho sakte hain")}` : ` · ${t("limit ke andar")}`}
@@ -21201,6 +21289,7 @@ function LeaveDecideModal({ lv, currentUser, onClose }) {
       <div className="rounded-xl ct-chip p-3 text-[13.5px] space-y-1">
         <div><b className="ct-h">{t(lv.type)}</b> · {fmtDate(lv.from)} → {fmtDate(lv.to)} · <b>{lv.days} {t("din")}</b></div>
         {lv.reason && <div className="ct-t2">{lv.reason}</div>}
+        {lv.handover && <div className="ct-t2">🤝 {t("Work handed over to")}: <b className="ct-h">{lv.handover.name || "—"}</b>{lv.handover.note ? ` — ${lv.handover.note}` : ""}</div>}
       </div>
       <div className={`mt-3 rounded-xl px-3 py-2.5 text-[13px] font-semibold ${extra > 0 ? "bg-rose-400/10 text-rose-500" : "bg-emerald-400/10 text-emerald-600"}`}>
         {hrMonthLabel(month)}: {used} + {thisDays} = {used + thisDays} / {hs.leavePerMonth}
@@ -21380,6 +21469,7 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
   const [print, setPrint] = useState(null);
   const [scanT, setScanT] = useState(null);
   const [closing, setClosing] = useState(false);
+  const [empSheet, setEmpSheet] = useState(null);
   if (!fin.loaded) return <HrLoading />;
   const canFinal = hrAllow(currentUser, "hr.approve");
   const sheet = fin.salarySheets.find((s) => s.month === month) || null;
@@ -21434,6 +21524,11 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
     await finMutate("salarySheets", (list) => list.map((s) => (s.month === month ? { ...s, status: "Draft", rows: [], finalAt: null, finalBy: "" } : s)));
   }
   const voucherOf = (r) => (r.voucherId ? fin.vouchers.find((x) => x.id === r.voucherId) : null);
+  const payRows = rows.map((r) => ({ r, pi: hrSalPayInfo(voucherOf(r)) }));
+  const paidRows = payRows.filter((x) => x.pi.key === "paid");
+  const paidAmt = paidRows.reduce((a, x) => a + (Number(x.r.net) || 0), 0);
+  const netAll = sum("net");
+  const paidPct = netAll > 0 ? Math.min(100, Math.round((paidAmt / netAll) * 100)) : 0;
   return (
     <div>
       <FinPageHead title="Salary Sheet" sub={`${hrMonthLabel(month)} · ${t("hazri, leave cut, advance cut — har line par Cut / Maaf")}`} right={
@@ -21449,23 +21544,35 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
         </div>
       } />
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
-        <FinKpi label="Status" value={<HrPill s={isFinal ? "Final" : "Draft"} />} sub={isFinal ? `${sheet.finalBy} · ${fmtDate(sheet.finalAt)}` : t("Abhi change ho sakti hai")} />
-        <FinKpi label="Gross salary" value={fmtMoney(sum("salary"))} />
-        <FinKpi label="Cuts" value={fmtMoney(sum("leaveCut") + sum("advanceCut") + sum("deduct"))} tone="text-rose-500" sub={`${t("Leave")} ${fmtMoney(sum("leaveCut"))} · ${t("Advance")} ${fmtMoney(sum("advanceCut"))}`} />
-        <FinKpi label="Net payable" value={fmtMoney(sum("net"))} tone="text-emerald-500" />
+        {isFinal ? (
+          <>
+            <FinKpi label="Net payable" value={fmtMoney(netAll)} sub={`${t("Final")} · ${sheet.finalBy} · ${fmtDate(sheet.finalAt)}`} />
+            <div data-kpi-paid><FinKpi label="Paid" value={fmtMoney(paidAmt)} tone="text-emerald-500" sub={<span className="block"><span className="block h-2 rounded bg-slate-400/20 overflow-hidden my-1"><span className="block h-full bg-emerald-500" style={{ width: `${paidPct}%` }} /></span>{paidRows.length} / {rows.length} {t("employees")}</span>} /></div>
+            <div data-kpi-left><FinKpi label="Remaining" value={fmtMoney(Math.max(0, netAll - paidAmt))} tone="text-rose-500" sub={`${payRows.filter((x) => x.pi.key === "ready").length} ${t("ready to pay")} · ${payRows.filter((x) => x.pi.key === "sign").length} ${t("signing")}`} /></div>
+            <FinKpi label="Paper slips returned" value={`${paidRows.filter((x) => x.pi.paper).length} / ${paidRows.length}`} sub={t("Admin checks at closing")} />
+          </>
+        ) : (
+          <>
+            <FinKpi label="Status" value={<HrPill s="Draft" />} sub={t("Abhi change ho sakti hai")} />
+            <FinKpi label="Gross salary" value={fmtMoney(sum("salary"))} />
+            <FinKpi label="Cuts" value={fmtMoney(sum("leaveCut") + sum("advanceCut") + sum("deduct"))} tone="text-rose-500" sub={`${t("Leave")} ${fmtMoney(sum("leaveCut"))} · ${t("Advance")} ${fmtMoney(sum("advanceCut"))}`} />
+            <FinKpi label="Net payable" value={fmtMoney(netAll)} tone="text-emerald-500" />
+          </>
+        )}
       </div>
       <section className="ct-card p-3 sm:p-4 overflow-x-auto">
         {rows.length === 0 && <FinEmpty text="No employees for this month." />}
         {rows.length > 0 && (
           <table className="w-full text-[13px] min-w-[980px]">
-            <thead><tr className="ct-t3 text-[11px] uppercase">{["Employee", "Salary", "P / L / Lv / A", "Leave cut", "Advance cut", "Bonus", "Deduct", "Net", ""].map((h, i) => <th key={i} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+            <thead><tr className="ct-t3 text-[11px] uppercase">{["Employee", "Salary", "P / L / Lv / A", "Leave cut", "Advance cut", "Bonus", "Deduct", "Net", ...(isFinal ? ["Payment"] : []), ""].map((h, i) => <th key={i} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
             <tbody>
               {rows.map((r) => {
                 const v = voucherOf(r);
                 const paid = v && finVoucherState(v).key === "paid";
+                const pi = hrSalPayInfo(v);
                 return (
-                  <tr key={r.empId} className="border-t border-slate-200/60 align-top">
-                    <td className="py-2.5 pe-3"><b className="ct-h">{r.name}</b><div className="text-[11.5px] ct-t3">{r.number} · {r.post}</div></td>
+                  <tr key={r.empId} className="border-t border-slate-200/60 align-top" style={paid ? { background: "rgba(16,185,129,.07)" } : undefined} data-sal-row={r.empId}>
+                    <td className="py-2.5 pe-3"><button type="button" className="text-start hover:underline" onClick={() => setEmpSheet(r)} data-emp-open title={t("Open employee sheet")}><b className="ct-h">{r.name}</b></button><div className="text-[11.5px] ct-t3">{r.number} · {r.post}</div></td>
                     <td className="py-2.5 pe-3 ct-h font-semibold">{fmtMoney(r.salary)}</td>
                     <td className="py-2.5 pe-3"><span className="text-emerald-500 font-bold">{r.present}</span> / <span className="text-amber-500 font-bold">{r.late}</span> / <span className="text-sky-500 font-bold">{r.leave}</span> / <span className="text-rose-500 font-bold">{r.absent}</span><div className="text-[11px] ct-t3">{t("extra")} {r.extraLeave} + {t("absent")} {r.absent} = {r.cutDays} {t("din")}</div></td>
                     <td className="py-2.5 pe-3">
@@ -21488,6 +21595,18 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
                     <td className="py-2.5 pe-3">{isFinal ? (r.bonus ? fmtMoney(r.bonus) : "—") : <input type="number" className={`${inputCls} !py-1 !w-24`} defaultValue={r.bonus || ""} onBlur={(e) => Number(e.target.value || 0) !== r.bonus && setAdj(r.empId, { bonus: Number(e.target.value) || 0 })} />}</td>
                     <td className="py-2.5 pe-3">{isFinal ? (r.deduct ? fmtMoney(r.deduct) : "—") : <input type="number" className={`${inputCls} !py-1 !w-24`} defaultValue={r.deduct || ""} onBlur={(e) => Number(e.target.value || 0) !== r.deduct && setAdj(r.empId, { deduct: Number(e.target.value) || 0 })} />}</td>
                     <td className="py-2.5 pe-3 font-black text-emerald-500 text-[14px]">{fmtMoney(r.net)}</td>
+                    {isFinal && (
+                      <td className="py-2.5 pe-3 text-[12px] min-w-[170px]" data-pay-cell>
+                        {pi.key === "paid" ? (
+                          <div className="leading-snug">
+                            <div className="ct-h font-semibold">{pi.at ? fmtDateTime(pi.at) : "—"}</div>
+                            <div className="ct-t2">{t("By")} {pi.by || "—"}{pi.method ? ` · ${pi.method}` : ""}</div>
+                            {pi.receiver && <div className="ct-t3">{t("To")} {pi.receiver.name}{pi.receiver.mobile ? ` · ${pi.receiver.mobile}` : ""}</div>}
+                            <div className="ct-t3">{pi.number}{pi.ref ? ` · ${pi.ref}` : ""}</div>
+                          </div>
+                        ) : <span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${HR_PAY_TONE[pi.key]}`}>{t(pi.label)}</span>}
+                      </td>
+                    )}
                     <td className="py-2.5 whitespace-nowrap">
                       {isFinal && (
                         <div className="flex items-center gap-1.5">
@@ -21511,10 +21630,114 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
         )}
       </section>
       {!isFinal && rows.length > 0 && <div className="text-[12px] ct-t3 mt-2">{t("“Final” dabane par har employee ka approved salary voucher banega — cashier Payments Due se pay karega. Final ke baad slips print karein.")}</div>}
+      {empSheet && <HrEmpSalarySheetModal row={rows.find((x) => x.empId === empSheet.empId) || empSheet} sheet={sheet} month={month} fin={fin} onClose={() => setEmpSheet(null)} onPrint={isFinal ? () => { const rr = rows.find((x) => x.empId === empSheet.empId) || empSheet; setEmpSheet(null); setPrint([rr]); } : null} />}
       {print && sheet && <HrSalaryPrintDialog sheet={sheet} rows={print} fin={fin} company={settings} currentUser={currentUser} onClose={() => setPrint(null)} />}
       {scanT && <HrScanModal target={scanT} currentUser={currentUser} company={settings} onClose={() => setScanT(null)} onOpenVoucher={(id) => { setScanT(null); onOpenVoucher && onOpenVoucher(id); }} />}
       {closing && <HrClosingModal month={month} fin={fin} currentUser={currentUser} onOpen={(tg) => setScanT(tg)} onClose={() => setClosing(false)} />}
     </div>
+  );
+}
+
+// Salary row → payment state for the sheet (updates live when the cashier pays).
+function hrSalPayInfo(v) {
+  if (!v) return { key: "none", label: "—" };
+  if (v.status === "Cancelled") return { key: "cancel", label: "Cancelled" };
+  const paid = finVoucherState(v).key === "paid";
+  if (paid) {
+    const e = hrPaidEntry(v) || {};
+    const ref = e.txnId || (finPlanOf(v).find((k) => k.status === "Paid" && k.chequeNo) || {}).chequeNo || "";
+    return { key: "paid", label: "Paid", at: e.at || "", by: (e.by && e.by.name) || "", receiver: e.receiver || null, method: e.method || "", ref, number: v.number, paper: !!v.paper };
+  }
+  if (hrChainOn(v) && !hrChainDone(v)) return { key: "sign", label: "Signing", method: (finPlanOf(v)[0] || {}).method || "" };
+  return { key: "ready", label: "Ready to pay", method: (finPlanOf(v)[0] || {}).method || "" };
+}
+const HR_PAY_TONE = { paid: "bg-emerald-400/15 text-emerald-600", ready: "bg-sky-400/15 text-sky-600", sign: "bg-amber-400/20 text-amber-600", cancel: "bg-slate-400/15 ct-t3", none: "ct-chip ct-t3" };
+const HR_UR_UI = { fontFamily: '"Noto Nastaliq Urdu", serif', fontWeight: 400, marginInlineStart: 6, fontSize: "0.9em" };
+
+function HrEmpSalarySheetModal({ row, sheet, month, fin, onClose, onPrint }) {
+  const emp = fin.employees.find((e) => e.id === row.empId) || { id: row.empId, name: row.name };
+  const st = hrMonthStats(emp, month, fin);
+  const v = row.voucherId ? fin.vouchers.find((x) => x.id === row.voucherId) : null;
+  const pi = hrSalPayInfo(v);
+  const lateMin = st.cells.reduce((a, c) => a + (c.a && c.a.lateMin > 0 ? Number(c.a.lateMin) : 0), 0);
+  const hh = Math.floor(st.hours), mm = Math.round((st.hours - hh) * 60);
+  const tone = { present: "", late: "", leave: "bg-sky-400/10", absent: "bg-rose-400/10", off: "ct-chip", none: "" };
+  const chip = { present: ["Present", "bg-emerald-400/15 text-emerald-600"], late: ["Late", "bg-amber-400/20 text-amber-600"], leave: ["Leave", "bg-sky-400/15 text-sky-600"], absent: ["Absent", "bg-rose-400/15 text-rose-500"], off: ["Off", "ct-chip ct-t3"], none: ["—", "ct-t3"] };
+  const tile = (l, val, sub, c) => <div className="ct-card rounded-xl px-3 py-2" style={{ borderTop: `3px solid ${c}` }}><div className="text-[11.5px] ct-t3 font-bold">{l}</div><div className="text-[19px] font-black ct-h">{val}{sub ? <span className="text-[12px] ct-t3 font-semibold ms-1">{sub}</span> : null}</div></div>;
+  const kv = (l, val, cls) => <div className="flex justify-between gap-3 px-4 py-2 text-[13px] border-t border-slate-200/60"><span className="ct-t2">{l}</span><b className={cls || "ct-h"}>{val}</b></div>;
+  return (
+    <Modal title={`${row.name} · ${row.number || ""} — ${hrMonthLabel(month)}`} onClose={onClose} wide>
+      <div data-emp-sheet>
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <span className="text-[13px] ct-t2">{row.post || ""} · {t("Salary")} {fmtMoney(row.salary)}</span>
+          <span className="flex-1" />
+          {pi.key !== "none" && <span className={`rounded-full px-2.5 py-1 text-[12px] font-bold ${HR_PAY_TONE[pi.key]}`}>{pi.key === "paid" ? "✓ " : ""}{t(pi.label)}</span>}
+          {onPrint && <Btn small variant="ghost" onClick={onPrint}>🖨 {t("Print slip")}</Btn>}
+        </div>
+        <div className="grid gap-2 mb-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))" }}>
+          {tile(t("Working days"), st.working, "", "#64748b")}
+          {tile(t("Present"), st.present, `/ ${st.working}`, "#047857")}
+          {tile(t("Late"), st.late, lateMin ? `· ${lateMin} min` : "", "#b45309")}
+          {tile(t("Leave"), st.leave, row.extraLeave ? `· ${row.extraLeave} extra` : "", "#0f766e")}
+          {tile(t("Absent"), st.absent, "", "#b91c1c")}
+          {tile(t("Total hours"), `${hh}h`, `${String(mm).padStart(2, "0")}m`, "#1e40af")}
+          {tile(t("Net salary"), fmtMoney(row.net), "", "#0F1B3D")}
+        </div>
+        <div className="flex flex-wrap gap-3 items-start">
+          <div className="ct-card rounded-xl overflow-hidden" style={{ flex: "1 1 520px", minWidth: 0 }}>
+            <div className="px-3 py-2 font-bold ct-h text-[13.5px] border-b border-slate-200/60">{t("Daily attendance — In / Out")}<span style={HR_UR_UI}>روزانہ حاضری</span></div>
+            <div className="overflow-auto" style={{ maxHeight: "52vh" }}>
+              <table className="w-full text-[12.5px]">
+                <thead className="sticky top-0 ct-card"><tr className="ct-t3 text-[11px]">{["Date", "Day", "In", "Out", "Hours", "Late", "Status", "Note"].map((h) => <th key={h} className="py-1.5 px-2.5 text-start font-bold">{t(h)}</th>)}</tr></thead>
+                <tbody>
+                  {st.cells.map((c) => {
+                    const d = new Date(`${c.date}T00:00:00`);
+                    const note = c.st === "leave" && c.lv ? `${c.lv.type} · ${c.lv.number}` : c.st === "off" ? t("Weekly off") : c.st === "absent" ? t("No entry") : "";
+                    const [lbl, cls] = chip[c.st] || chip.none;
+                    return (
+                      <tr key={c.date} className={`whitespace-nowrap border-t border-slate-200/50 ${tone[c.st] || ""}`} data-day={c.date}>
+                        <td className="py-1 px-2.5 font-semibold ct-h">{fmtDate(c.date).replace(/ \d{4}$/, "")}</td>
+                        <td className="py-1 px-2.5 ct-t2">{d.toLocaleDateString("en-GB", { weekday: "short" })}</td>
+                        <td className="py-1 px-2.5">{c.a ? hrHM(c.a.in) : "—"}</td>
+                        <td className="py-1 px-2.5">{c.a && c.a.out ? hrHM(c.a.out) : "—"}</td>
+                        <td className="py-1 px-2.5">{c.hours ? `${Math.floor(c.hours)}h ${String(Math.round((c.hours % 1) * 60)).padStart(2, "0")}m` : "—"}</td>
+                        <td className="py-1 px-2.5">{c.a && c.a.lateMin > 0 ? <b className="text-amber-600">{c.a.lateMin} min</b> : ""}</td>
+                        <td className="py-1 px-2.5"><span className={`rounded-full px-2 py-0.5 text-[10.5px] font-bold ${cls}`}>{t(lbl)}</span></td>
+                        <td className="py-1 px-2.5 ct-t3">{note}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className="flex flex-col gap-3" style={{ flex: "1 1 300px", maxWidth: 380 }}>
+            <div className="ct-card rounded-xl overflow-hidden">
+              <div className="px-4 py-2 font-bold ct-h text-[13.5px]">{t("Salary calculation")}<span style={HR_UR_UI}>تنخواہ کا حساب</span></div>
+              {kv(t("Basic salary"), fmtMoney(row.salary))}
+              {kv(`${t("Per day")} (÷ ${row.days})`, fmtMoney(row.perDay))}
+              {kv(`${t("Cut days")} (${row.extraLeave} extra + ${row.absent} absent)`, row.cutDays)}
+              {kv(t("Leave / absent deduction"), row.cutDays > 0 ? (row.maaf ? t("Waived") : `− ${fmtMoney(row.leaveCut)}`) : "—", row.cutDays > 0 && !row.maaf ? "text-rose-500" : "text-emerald-600")}
+              {kv(t("Advance instalment"), row.advCalc > 0 ? (row.advSkip ? t("Deferred to next month") : `− ${fmtMoney(row.advanceCut)}`) : "—", row.advCalc > 0 && !row.advSkip ? "text-rose-500" : "ct-t2")}
+              {kv(t("Bonus / overtime"), row.bonus ? `+ ${fmtMoney(row.bonus)}` : "—")}
+              {kv(t("Other deduction"), row.deduct ? `− ${fmtMoney(row.deduct)}` : "—")}
+              <div className="flex justify-between items-baseline px-4 py-3 text-white" style={{ background: "#0F1B3D" }}><span>{t("Net salary")}</span><b className="text-[20px]">{fmtMoney(row.net)}</b></div>
+            </div>
+            {pi.key === "paid" && (
+              <div className="rounded-xl overflow-hidden border border-emerald-500/40" data-paid-box>
+                <div className="flex justify-between items-center px-4 py-2.5 bg-emerald-600 text-white"><b>{t("Payment")}</b><span className="border-2 border-white rounded px-2 text-[12px] font-black tracking-widest -rotate-6">PAID</span></div>
+                {kv(t("Paid on"), pi.at ? fmtDateTime(pi.at) : "—")}
+                {kv(t("Paid by (cashier)"), pi.by || "—")}
+                {kv(t("Received by"), pi.receiver ? `${pi.receiver.name}${pi.receiver.mobile ? ` · ${pi.receiver.mobile}` : ""}` : "—")}
+                {kv(t("Voucher"), `${pi.number}${pi.method ? ` · ${pi.method}` : ""}${pi.ref ? ` · ${pi.ref}` : ""}`)}
+                {kv(t("Paper slip"), pi.paper ? t("Returned ✓") : t("Not checked yet"), pi.paper ? "text-emerald-600" : "text-amber-600")}
+              </div>
+            )}
+            {pi.key !== "paid" && sheet && sheet.status === "Final" && <div className={`rounded-xl px-4 py-3 text-[13px] font-semibold ${HR_PAY_TONE[pi.key]}`}>{pi.key === "sign" ? t("Waiting for signatures: HR → Accounts → Admin") : pi.key === "ready" ? t("Ready — cashier can pay from Payments Due") : t(pi.label)}</div>}
+          </div>
+        </div>
+      </div>
+    </Modal>
   );
 }
 
@@ -23481,6 +23704,9 @@ const URDU_UI_EXTRA = {
 "Send": "بھیجیں",
 "Send for approval + Print": "منظوری کے لیے بھیجیں + پرنٹ",
 "Send request": "درخواست بھیجیں",
+"Work handed over to": "کام کس کے حوالے",
+"Handover note": "حوالگی نوٹ",
+"e.g. cash counter, daily bank deposit": "مثلاً کیش کاؤنٹر، روزانہ بینک جمع",
 "Sending…": "بھیجا جا رہا ہے…",
 "Share": "شیئر",
 "Share of sales": "فروخت میں حصہ",
