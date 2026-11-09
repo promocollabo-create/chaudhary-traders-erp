@@ -1191,7 +1191,7 @@ function UiIcon({ name, className = "w-[18px] h-[18px]" }) {
 const NAV_GROUPS = [
   { title: "Overview", items: [
     { id: "dashboard", label: "Dashboard", icon: "dashboard" },
-    { id: "profit", label: "Profit Calculator", icon: "trend", adminOnly: true },
+    { id: "profit", label: "Profit Report", icon: "trend", adminOnly: true },
     { id: "branches", label: "Branches", icon: "branch", superOnly: true },
   ]},
   { title: "Sales", items: [
@@ -1222,6 +1222,8 @@ const NAV_GROUPS = [
     { id: "commission", label: "Commission", icon: "percent" },
     { id: "leads", label: "Leads", icon: "zap" },
     { id: "products", label: "Products", icon: "box" },
+    { id: "productRates", label: "Product Rates", icon: "percent" },
+    { id: "profitCalc", label: "Profit Calculator", icon: "calc" },
     { id: "drivers", label: "Drivers", icon: "truck" },
     { id: "offers", label: "Offers", icon: "gift" },
   ]},
@@ -8793,7 +8795,7 @@ function Products({ products, saveProduct, deleteProduct }) {
           <Field label="Unit">
             <input list="unit-suggestions" className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
           </Field>
-          <Field label="Rate / Unit"><input type="number" className={inputCls} value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} /></Field>
+          <Field label="Rate / Unit">{editing && editing.rates && Number(editing.rates.pur) > 0 ? <div className="text-sm"><b>{fmtMoney(form.price)}</b> <span className="text-slate-500">— {t("set from approved rates in Product Rates")}</span></div> : <input type="number" className={inputCls} value={form.price} onChange={(e) => setForm({ ...form, price: e.target.value })} />}</Field>
           <div className="flex gap-2"><Btn onClick={submit}>Save Product</Btn><Btn variant="ghost" onClick={() => setShowForm(false)}>Cancel</Btn></div>
         </Modal>
       )}
@@ -11057,6 +11059,8 @@ function App() {
     ),
     leads: <Leads leads={leads} saveLead={saveLead} deleteLead={deleteLead} />,
     products: <Products products={products} saveProduct={saveProduct} deleteProduct={deleteProduct} />,
+    productRates: <ProductRatesPage currentUser={currentUser} products={products} saveProduct={saveProduct} />,
+    profitCalc: <ProfitCalcPage products={products} />,
     drivers: <Drivers drivers={drivers} saveDriver={saveDriver} deleteDriver={deleteDriver} nextCode={nextDriverCode} />,
     offers: <Offers offers={offers} saveOffer={saveOffer} deleteOffer={deleteOffer} />,
     reports: (
@@ -14998,7 +15002,7 @@ function QrSvg({ text, sizeMm = 20, style }) {
    same time do not overwrite each other's vouchers.
    ============================================================ */
 
-const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests", urduDict: "ct-urdu-dict", bookingReqs: "ct-booking-requests", website: "ct-website", webReqs: "ct-web-requests", suppliers: "ct-suppliers", purchases: "ct-purchases" };
+const FIN_KEYS = { vouchers: "ct-vouchers", settings: "ct-fin-settings", closings: "ct-cash-closings", moves: "ct-cash-moves", costs: "ct-cost-rates", portalPay: "ct-portal-payments", portalMsgs: "ct-portal-msgs", portalProfiles: "ct-portal-profiles", deliveryPlans: "ct-delivery-plans", employees: "ct-employees", attendance: "ct-attendance", leaves: "ct-leaves", advances: "ct-advances", salarySheets: "ct-salary-sheets", creditState: "ct-credit-state", creditLog: "ct-credit-log", creditRequests: "ct-credit-requests", urduDict: "ct-urdu-dict", bookingReqs: "ct-booking-requests", website: "ct-website", webReqs: "ct-web-requests", suppliers: "ct-suppliers", purchases: "ct-purchases", rateReqs: "ct-rate-requests" };
 
 const FIN_DEFAULT_SETTINGS = {
   categories: [
@@ -15055,7 +15059,7 @@ Object.entries(FIN_URDU).forEach(([en, ur]) => {
 
 /* ---------------- Store ---------------- */
 
-const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [], urduDict: {}, bookingReqs: [], website: {}, webReqs: [], suppliers: [], purchases: [] };
+const finState = { loaded: false, vouchers: [], settings: FIN_DEFAULT_SETTINGS, closings: [], moves: [], costs: {}, portalPay: [], portalMsgs: [], portalProfiles: {}, deliveryPlans: {}, employees: [], attendance: [], leaves: [], advances: [], salarySheets: [], creditState: {}, creditLog: [], creditRequests: [], urduDict: {}, bookingReqs: [], website: {}, webReqs: [], suppliers: [], purchases: [], rateReqs: [] };
 const finListeners = new Set();
 // Full (all-branch) copies; finState holds the active branch's view.
 const finRaw = {};
@@ -16971,6 +16975,14 @@ function VoucherPayModal({ fin, voucher: v, kishtId, currentUser, onClose, onPai
   const chainOn = hrChainOn(v);
   const [rcv, setRcv] = useState(() => ({ name: v.payee || "", mobile: v.payeePhone || "", cnic: "", relation: "Khud" }));
   if (!k) return null;
+  if (v.hrRef && hrIsSelf(currentUser, v.hrRef.empId)) {
+    return (
+      <Modal title="Pay" onClose={onClose}>
+        <div className="rounded-xl bg-rose-400/10 text-rose-600 px-4 py-3 text-[14px] font-semibold" data-self-block>🚫 {t("You cannot pay your own salary or advance.")}<div className="text-[13px] font-normal mt-1">{t(HR_SELF_MSG)}</div></div>
+        <div className="flex justify-end mt-4"><Btn variant="ghost" onClick={onClose}>Close</Btn></div>
+      </Modal>
+    );
+  }
   if (chainOn && !hrChainDone(v)) {
     const nx = hrChainNext(v);
     return (
@@ -18640,7 +18652,7 @@ function ProfitPage({ currentUser, products, customers, invoices, payments, retu
 
   return (
     <div>
-      <FinPageHead title="Profit Calculator" sub={`${fmtDate(from === "0000-01-01" ? (invoices[0] || {}).date || today : from)} — ${fmtDate(to === "9999-12-31" ? today : to)}`}
+      <FinPageHead title="Profit Report" sub={`${fmtDate(from === "0000-01-01" ? (invoices[0] || {}).date || today : from)} — ${fmtDate(to === "9999-12-31" ? today : to)}`}
         right={<FinTabs value={tab} onChange={setTab} tabs={[{ id: "report", label: "Profit report" }, { id: "setup", label: "Purchase rates & setup", count: noCosts ? 1 : 0 }]} />} />
       {tab === "setup" ? <ProfitCostSetup fin={fin} products={products} currentUser={currentUser} /> : (
         <div className="space-y-4">
@@ -19767,8 +19779,12 @@ function hrSettingsOf(s) {
     leavePerMonth: Number.isFinite(Number(h.leavePerMonth)) && h.leavePerMonth !== "" && h.leavePerMonth != null ? Number(h.leavePerMonth) : 3,
     graceMin: Number.isFinite(Number(h.graceMin)) && h.graceMin !== "" && h.graceMin != null ? Number(h.graceMin) : 10,
     weeklyOff: Array.isArray(h.weeklyOff) ? h.weeklyOff : [0],
+    otRate: Number(h.otRate) > 0 ? Number(h.otRate) : 1,
+    otMinMin: Number.isFinite(Number(h.otMinMin)) && h.otMinMin !== "" && h.otMinMin != null ? Number(h.otMinMin) : 30,
   };
 }
+function hrHm2min(hm) { const [a, b] = String(hm || "").split(":").map(Number); return (a || 0) * 60 + (b || 0); }
+function hrDutyHours(emp, hs) { const m = hrHm2min((emp && emp.dutyOut) || hs.dutyOut) - hrHm2min((emp && emp.dutyIn) || hs.dutyIn); return m > 0 ? m / 60 : 9; }
 async function hrSaveSettings(patch) {
   await finMutate("settings", (s) => ({ ...s, hr: { ...((s && s.hr) || {}), ...patch } }));
 }
@@ -19788,6 +19804,7 @@ const HR_ACTIONS = [
   { id: "voucher.sign", label: "Payment voucher sign (Accounts) — salary / advance" },
   { id: "collection.target", label: "Collectors ke mahana target set karna" },
   { id: "salary.approve", label: "Salary slip approve (Salary Approvals portal)" },
+  { id: "rates.approve", label: "Approve product rate changes (purchase, rent, profit)" },
 ];
 const HR_NAV_GROUP = {
   title: "HR",
@@ -19819,7 +19836,7 @@ const HR_TEMPLATES = {
   custom: { label: "Custom", desc: "Khud tick karein", perms: [] },
 };
 // Pages a plain (old) staff login cannot open — only admin or given access.
-const HR_MANAGE_PAGES = ["employees", "salarySheet", "salaryApprovals", "urduTranslate", "collTargets"];
+const HR_MANAGE_PAGES = ["employees", "salarySheet", "salaryApprovals", "urduTranslate", "collTargets", "productRates", "profitCalc"];
 
 function hrEmployeeOf(user) {
   if (!user || !user.employeeId) return null;
@@ -19839,6 +19856,9 @@ function hrPageAllowed(user, pageId) {
   const p = hrPermsOf(user);
   return p.includes("*") || p.includes(pageId);
 }
+// Nobody (except Admin) may decide, edit, sign or pay their own salary / leave / advance.
+function hrIsSelf(user, empId) { return !!(user && user.role !== "admin" && user.employeeId && empId && user.employeeId === empId); }
+const HR_SELF_MSG = "This is your own record — Admin or another authorised person will handle it.";
 function hrAllow(user, perm) {
   if (!user) return false;
   if (user.role === "admin") return true;
@@ -19970,7 +19990,7 @@ function hrMonthStats(emp, month, fin) {
     hrDateRange(l.from, l.to).forEach((d) => { if (d.startsWith(month)) leaveBy[d] = l; });
   });
   const from = [emp.joinDate || "", hs.attendanceFrom || ""].reduce((a, b) => (b > a ? b : a), "");
-  let present = 0, late = 0, leave = 0, absent = 0, hours = 0, working = 0;
+  let present = 0, late = 0, leave = 0, absent = 0, hours = 0, working = 0, otTotal = 0;
   const cells = days.map((d) => {
     const off = hs.weeklyOff.includes(hrDow(d));
     const a = attBy[d];
@@ -19982,15 +20002,22 @@ function hrMonthStats(emp, month, fin) {
     else if (d >= today || (from && d < from)) st = "none";
     else st = "absent";
     const h = a && a.out ? Math.max(0, (Date.parse(a.out) - Date.parse(a.in)) / 3600000) : 0;
+    let otMin = 0;
+    if (a && a.out) {
+      if (off) otMin = Math.round(h * 60);
+      else otMin = Math.max(0, Math.round((Date.parse(a.out) - Date.parse(`${d}T${(emp.dutyOut || hs.dutyOut)}:00`)) / 60000));
+      if (otMin < hs.otMinMin) otMin = 0;
+    }
+    otTotal += otMin;
     if (!off) working++;
     if (st === "present" || st === "late") present++;
     if (st === "late") late++;
     if (st === "leave") leave++;
     if (st === "absent") absent++;
     hours += h;
-    return { date: d, st, a, lv, hours: h, off };
+    return { date: d, st, a, lv, hours: h, off, otMin };
   });
-  return { cells, present, late, leave, absent, hours, working, days: days.length };
+  return { cells, present, late, leave, absent, hours, working, days: days.length, otMin: otTotal };
 }
 const HR_CELL_TONE = {
   present: "bg-emerald-500 text-white", late: "bg-amber-400 text-slate-900", leave: "bg-sky-500 text-white",
@@ -20080,6 +20107,7 @@ function hrChainCanSign(user, v, step) {
   if (!user || !hrChainOn(v) || step === "pay") return false;
   if (user.role === "admin") return true;
   if (step === "admin") return false;
+  if (v.hrRef && hrIsSelf(user, v.hrRef.empId)) return false;
   const key = finUserKey(user);
   // ek shakhs ek hi slip par do step sign nahi kar sakta
   if (HR_CHAIN.some((x) => x.id !== step && v.chain[x.id] && v.chain[x.id].by && v.chain[x.id].by.key === key)) return false;
@@ -20149,12 +20177,18 @@ function hrSalaryRow(fin, emp, month, adj) {
   const advanceCut = roundMoney(advParts.reduce((x, p) => x + p.amount, 0));
   const bonus = Number(a.bonus) || 0;
   const deduct = Number(a.deduct) || 0;
-  const net = roundMoney(Math.max(0, salary - leaveCut - advanceCut + bonus - deduct));
+  const otHoursCalc = roundMoney((s.otMin || 0) / 60);
+  const otHours = a.otHours != null && a.otHours !== "" ? Math.max(0, Number(a.otHours) || 0) : otHoursCalc;
+  const otPerHour = roundMoney((perDay / hrDutyHours(emp, hs)) * hs.otRate);
+  const otPayCalc = roundMoney(otHours * otPerHour);
+  const otPay = a.otSkip ? 0 : otPayCalc;
+  const net = roundMoney(Math.max(0, salary - leaveCut - advanceCut + bonus + otPay - deduct));
   return {
     empId: emp.id, number: emp.number, name: emp.name, post: emp.post, phone: emp.phone || "", branchId: emp.branchId || "",
     salary, days: s.days, present: s.present, late: s.late, leave: s.leave, absent: s.absent, hours: roundMoney(s.hours),
     allowed: hs.leavePerMonth, extraLeave, cutDays, perDay: roundMoney(perDay), leaveCutCalc, leaveCut, maaf: !!a.maaf,
     advParts, advCalc, advanceCut, advSkip: !!a.advSkip, bonus, deduct, note: a.note || "", net,
+    otHoursCalc, otHours, otEdited: a.otHours != null && a.otHours !== "", otPerHour, otPayCalc, otPay, otSkip: !!a.otSkip, otRate: hs.otRate,
   };
 }
 function hrSalarySlipId(sheet, empId) { return `${sheet.id}~${empId}`; }
@@ -20551,7 +20585,8 @@ function HrSalarySlipBody({ sheet, row, fin, company, printNo = 0 }) {
             : line(`Extra leave / absent (${row.cutDays} days × ${finMoney2(row.perDay)})`, row.leaveCut, true))}
           {(row.advParts || []).map((p) => line(`Advance cut (${p.number})`, p.amount, true))}
           {row.advSkip && row.advCalc > 0 && <tr><td style={FIN_CELL}>Advance cut</td><td style={{ ...FIN_CELL, ...FIN_NUM, color: "#047857" }}>Deferred to next month</td></tr>}
-          {row.bonus > 0 && line("Bonus / overtime", row.bonus)}
+          {row.otPay > 0 && line(`Overtime (${row.otHours} h × ${finMoney2(row.otPerHour)})`, row.otPay)}
+          {row.bonus > 0 && line("Bonus", row.bonus)}
           {row.deduct > 0 && line("Other deduction", row.deduct, true)}
           <tr><td style={{ ...FIN_HEAD, textAlign: "left", fontSize: "1em" }}>NET SALARY</td><td style={{ ...FIN_HEAD, ...FIN_NUM, fontSize: "1.15em" }}>Rs {finMoney2(row.net)}</td></tr>
         </tbody>
@@ -20584,14 +20619,14 @@ function HrSalarySlipHalf({ sheet, row, fin, company, first = true, printNo = 0 
   const td = { padding: "1mm 2.6mm", borderBottom: "1px solid #F1F5F9", fontSize: "9.5px" };
   const th = { padding: "1.3mm 2.6mm", fontSize: "7.5px", letterSpacing: ".16em", color: HSH.mute, textAlign: "left", background: "#F8FAFC", borderBottom: `1px solid ${HSH.line}` };
   const num = { textAlign: "right", fontVariantNumeric: "tabular-nums" };
-  const earn = [["Basic salary", finMoney2(row.salary)], ...(row.bonus > 0 ? [["Bonus / overtime", `+ ${finMoney2(row.bonus)}`, "#047857"]] : [["Bonus / overtime", "—"]])];
+  const earn = [["Basic salary", finMoney2(row.salary)], (row.otPay > 0 ? [`Overtime · ${row.otHours} h × ${finMoney2(row.otPerHour)}`, `+ ${finMoney2(row.otPay)}`, "#047857"] : row.otSkip && row.otPayCalc > 0 ? [`Overtime · ${row.otHours} h`, "Not paid"] : ["Overtime", "—"]), ...(row.bonus > 0 ? [["Bonus", `+ ${finMoney2(row.bonus)}`, "#047857"]] : [])];
   const ded = [];
   if (row.cutDays > 0) ded.push(row.maaf ? [`Leave / absent · ${row.cutDays} days`, "Waived", "#047857"] : [`Leave / absent · ${row.cutDays} × ${finMoney2(row.perDay)}`, finMoney2(row.leaveCut), "#B91C1C"]);
   (row.advParts || []).forEach((x) => ded.push([`Advance · ${x.number}`, finMoney2(x.amount), "#B91C1C"]));
   if (row.advSkip && row.advCalc > 0) ded.push(["Advance", "Deferred to next month", "#047857"]);
   if (row.deduct > 0) ded.push(["Other deduction", finMoney2(row.deduct), "#B91C1C"]);
   if (!ded.length) ded.push(["No deductions", "—"]);
-  const gross = roundMoney((Number(row.salary) || 0) + (Number(row.bonus) || 0));
+  const gross = roundMoney((Number(row.salary) || 0) + (Number(row.bonus) || 0) + (Number(row.otPay) || 0));
   const totalDed = roundMoney(gross - (Number(row.net) || 0));
   const rows = (list) => list.map(([l, x, c]) => <tr key={l}><td style={td}>{l}</td><td style={{ ...td, ...num, color: c, fontWeight: c ? 600 : 400 }}>{x}</td></tr>);
   const tile = (l, x, sub, c) => (
@@ -20699,7 +20734,7 @@ function HrSalaryPrintDialog({ sheet, rows, fin, company, onClose, currentUser, 
       fileName={one ? `Salary Slip ${hrMonthLabel(sheet.month)} - ${one.name}` : `Salary Slips ${hrMonthLabel(sheet.month)}`} onClose={onClose}
       renderDoc={(p) => (PRINT_SIZES[p.size].thermal && one
         ? <HrThermalDoc company={company} title={`SALARY SLIP · ${hrMonthLabel(sheet.month).toUpperCase()}`} qrText={docVerifyUrl("s", hrSalarySlipId(sheet, one.empId))} size={p.size} copies={1}
-            lines={[["Employee", one.name, true], ["EMP", one.number], "-", ["Present", String(one.present)], ["Leave / Absent", `${one.leave} / ${one.absent}`], "-", ["Salary", finMoney2(one.salary)], ["Leave cut", one.maaf ? "Waived" : finMoney2(one.leaveCut)], ["Advance cut", finMoney2(one.advanceCut)], ...(one.bonus ? [["Bonus", finMoney2(one.bonus)]] : []), ...(one.deduct ? [["Deduction", finMoney2(one.deduct)]] : []), "-", ["NET", `Rs ${finMoney2(one.net)}`, true, true]]} />
+            lines={[["Employee", one.name, true], ["EMP", one.number], "-", ["Present", String(one.present)], ["Leave / Absent", `${one.leave} / ${one.absent}`], "-", ["Salary", finMoney2(one.salary)], ["Leave cut", one.maaf ? "Waived" : finMoney2(one.leaveCut)], ["Advance cut", finMoney2(one.advanceCut)], ...(one.otPay ? [["Overtime", `${one.otHours}h · ${finMoney2(one.otPay)}`]] : []), ...(one.bonus ? [["Bonus", finMoney2(one.bonus)]] : []), ...(one.deduct ? [["Deduction", finMoney2(one.deduct)]] : []), "-", ["NET", `Rs ${finMoney2(one.net)}`, true, true]]} />
         : <HrSalarySlipDoc sheet={sheet} rows={rows} fin={fin} company={company} size={p.size} fit={p.fit} printNos={printNos} />)} />
   );
 }
@@ -20917,9 +20952,9 @@ function EmployeeForm({ initial, startTab, users, customers, branches, saveUser,
 function HrSettingsModal({ onClose }) {
   const fin = useFin();
   const hs = hrSettingsOf(fin.settings);
-  const [f, setF] = useState({ leavePerMonth: hs.leavePerMonth, graceMin: hs.graceMin, dutyIn: hs.dutyIn, dutyOut: hs.dutyOut, weeklyOff: hs.weeklyOff, attendanceFrom: hs.attendanceFrom });
+  const [f, setF] = useState({ leavePerMonth: hs.leavePerMonth, graceMin: hs.graceMin, dutyIn: hs.dutyIn, dutyOut: hs.dutyOut, weeklyOff: hs.weeklyOff, attendanceFrom: hs.attendanceFrom, otRate: hs.otRate, otMinMin: hs.otMinMin });
   async function save() {
-    await hrSaveSettings({ leavePerMonth: Math.max(0, Number(f.leavePerMonth) || 0), graceMin: Math.max(0, Number(f.graceMin) || 0), dutyIn: f.dutyIn, dutyOut: f.dutyOut, weeklyOff: f.weeklyOff, attendanceFrom: f.attendanceFrom });
+    await hrSaveSettings({ leavePerMonth: Math.max(0, Number(f.leavePerMonth) || 0), graceMin: Math.max(0, Number(f.graceMin) || 0), dutyIn: f.dutyIn, dutyOut: f.dutyOut, weeklyOff: f.weeklyOff, attendanceFrom: f.attendanceFrom, otRate: Number(f.otRate) > 0 ? Number(f.otRate) : 1, otMinMin: Math.max(0, Number(f.otMinMin) || 0) });
     onClose();
   }
   return (
@@ -20929,7 +20964,10 @@ function HrSettingsModal({ onClose }) {
         <Field label="Late after (minutes grace)"><input type="number" className={inputCls} value={f.graceMin} onChange={(e) => setF({ ...f, graceMin: e.target.value })} /></Field>
         <Field label="Default duty start"><input type="time" className={inputCls} value={f.dutyIn} onChange={(e) => setF({ ...f, dutyIn: e.target.value })} /></Field>
         <Field label="Default duty end"><input type="time" className={inputCls} value={f.dutyOut} onChange={(e) => setF({ ...f, dutyOut: e.target.value })} /></Field>
+        <Field label="Overtime rate (× hourly salary)"><input type="number" step="0.25" min="0" className={inputCls} value={f.otRate} onChange={(e) => setF({ ...f, otRate: e.target.value })} data-ot-rate /></Field>
+        <Field label="Minimum overtime per day (minutes)"><input type="number" min="0" className={inputCls} value={f.otMinMin} onChange={(e) => setF({ ...f, otMinMin: e.target.value })} /></Field>
       </div>
+      <div className="text-[12px] ct-t3 -mt-2 mb-3">{t("Overtime = time after duty end on working days, and all worked time on the weekly off. Hourly salary = per-day salary ÷ duty hours.")}</div>
       <div className="text-[12.5px] font-semibold text-slate-600 mb-1.5">{t("Weekly off (chhutti ka din)")}</div>
       <div className="flex flex-wrap gap-1.5 mb-4">
         {HR_WEEKDAYS.map((d, i) => (
@@ -21267,6 +21305,7 @@ function LeaveRequestModal({ empId: fixedEmp, currentUser, onClose, onSaved }) {
 }
 
 async function hrDecideLeave(lv, approve, currentUser, note) {
+  if (hrIsSelf(currentUser, lv.empId)) { alert(t(HR_SELF_MSG)); return; }
   const actor = finActor(currentUser);
   let blocked = "";
   await finMutate("leaves", (list) => list.map((x) => {
@@ -21287,6 +21326,7 @@ function LeaveDecideModal({ lv, currentUser, onClose }) {
   const thisDays = hrWorkDays(lv.from, lv.to, fin.settings).filter((d) => d.startsWith(month)).length;
   const extra = Math.max(0, used + thisDays - hs.leavePerMonth) - Math.max(0, used - hs.leavePerMonth);
   async function go(ok) { await hrDecideLeave(lv, ok, currentUser, note); onClose(); }
+  if (hrIsSelf(currentUser, lv.empId)) return <Modal title={`${t("Leave")} ${lv.number}`} onClose={onClose}><div className="rounded-xl bg-rose-400/10 text-rose-600 px-4 py-3 text-[14px] font-semibold" data-self-block>🚫 {t(HR_SELF_MSG)}</div></Modal>;
   return (
     <Modal title={`${t("Leave")} ${lv.number}`} onClose={onClose}>
       <div className="flex items-center gap-3 mb-3"><HrAvatar emp={emp} size={48} /><div><div className="font-bold ct-h">{emp.name}</div><div className="text-[12.5px] ct-t2">{emp.number} · {emp.post}</div></div></div>
@@ -21346,8 +21386,9 @@ function AdvanceDecideModal({ adv, currentUser, onClose }) {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const per = Math.ceil((Number(adv.amount) || 0) / Math.max(1, months));
+  const self = hrIsSelf(currentUser, adv.empId);
   async function approve() {
-    if (busy) return;
+    if (busy || self) return;
     const cur = finState.advances.find((a) => a.id === adv.id);
     if (!cur || cur.status !== "Pending") { alert(`${t("Already")} ${t(cur ? cur.status : "")}`); onClose(); return; }
     setBusy(true);
@@ -21373,6 +21414,7 @@ function AdvanceDecideModal({ adv, currentUser, onClose }) {
     await finMutate("advances", (list) => list.map((a) => (a.id === adv.id && a.status === "Pending" ? { ...a, status: "Rejected", decision: { by: actor.name, key: actor.key, at: new Date().toISOString(), note: note.trim() } } : a)));
     onClose();
   }
+  if (self) return <Modal title={`${t("Advance")} ${adv.number}`} onClose={onClose}><div className="rounded-xl bg-rose-400/10 text-rose-600 px-4 py-3 text-[14px] font-semibold" data-self-block>🚫 {t(HR_SELF_MSG)}</div></Modal>;
   return (
     <Modal title={`${t("Advance")} ${adv.number}`} onClose={onClose}>
       <div className="flex items-center gap-3 mb-3"><HrAvatar emp={emp} size={48} /><div><div className="font-bold ct-h">{emp.name}</div><div className="text-[12.5px] ct-t2">{emp.number} · {emp.post} · {t("Salary")} {fmtMoney(emp.salary)}</div></div></div>
@@ -21488,9 +21530,11 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
     return hrSalaryRow(fin, e, month, adj[e.id]);
   });
   const slipStatus = (r) => (isFinal ? "Approved" : (slipMap[r.empId] && slipMap[r.empId].status) || "Draft");
-  const locked = (r) => isFinal || ["Pending", "Approved"].includes(slipStatus(r));
+  const isMine = (r) => hrIsSelf(currentUser, r.empId);
+  const locked = (r) => isFinal || isMine(r) || ["Pending", "Approved"].includes(slipStatus(r));
   const hasV = isFinal || rows.some((r) => r.voucherId);
   const sendable = rows.filter((r) => !locked(r));
+  const mineWaiting = rows.filter((r) => isMine(r) && !isFinal && !["Pending", "Approved"].includes(slipStatus(r)));
   async function sendAll() {
     if (!sendable.length) return;
     if (!confirm(`${sendable.length} ${t("salary slips will be sent for approval. Continue?")}`)) return;
@@ -21500,6 +21544,7 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
   const sum = (k) => roundMoney(rows.reduce((s, r) => s + (Number(r[k]) || 0), 0));
 
   async function setAdj(empId, patch) {
+    if (hrIsSelf(currentUser, empId)) { alert(t(HR_SELF_MSG)); return; }
     await finMutate("salarySheets", (list) => {
       const ex = list.find((s) => s.month === month);
       if (ex && ex.status === "Final") return list;
@@ -21585,7 +21630,7 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
         {rows.length === 0 && <FinEmpty text="No employees for this month." />}
         {rows.length > 0 && (
           <table className="w-full text-[13px] min-w-[980px]">
-            <thead><tr className="ct-t3 text-[11px] uppercase">{["Employee", "Salary", "P / L / Lv / A", "Leave cut", "Advance cut", "Bonus", "Deduct", "Net", ...(isFinal ? [] : ["Slip"]), ...(hasV ? ["Payment"] : []), ""].map((h, i) => <th key={i} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
+            <thead><tr className="ct-t3 text-[11px] uppercase">{["Employee", "Salary", "P / L / Lv / A", "Leave cut", "Advance cut", "Overtime", "Bonus", "Deduct", "Net", ...(isFinal ? [] : ["Slip"]), ...(hasV ? ["Payment"] : []), ""].map((h, i) => <th key={i} className="py-2 pe-3 text-start font-bold">{t(h)}</th>)}</tr></thead>
             <tbody>
               {rows.map((r) => {
                 const v = voucherOf(r);
@@ -21593,7 +21638,7 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
                 const pi = hrSalPayInfo(v);
                 return (
                   <tr key={r.empId} className="border-t border-slate-200/60 align-top" style={paid ? { background: "rgba(16,185,129,.07)" } : undefined} data-sal-row={r.empId}>
-                    <td className="py-2.5 pe-3"><button type="button" className="text-start hover:underline" onClick={() => setEmpSheet(r)} data-emp-open title={t("Open employee sheet")}><b className="ct-h">{r.name}</b></button><div className="text-[11.5px] ct-t3">{r.number} · {r.post}</div></td>
+                    <td className="py-2.5 pe-3"><button type="button" className="text-start hover:underline" onClick={() => setEmpSheet(r)} data-emp-open title={t("Open employee sheet")}><b className="ct-h">{r.name}</b></button><div className="text-[11.5px] ct-t3">{r.number} · {r.post}</div>{isMine(r) && <div className="text-[10.5px] font-bold text-rose-500 mt-0.5" data-own-row>{t("Your own salary — Admin will handle")}</div>}</td>
                     <td className="py-2.5 pe-3 ct-h font-semibold">{fmtMoney(r.salary)}</td>
                     <td className="py-2.5 pe-3"><span className="text-emerald-500 font-bold">{r.present}</span> / <span className="text-amber-500 font-bold">{r.late}</span> / <span className="text-sky-500 font-bold">{r.leave}</span> / <span className="text-rose-500 font-bold">{r.absent}</span><div className="text-[11px] ct-t3">{t("extra")} {r.extraLeave} + {t("absent")} {r.absent} = {r.cutDays} {t("din")}</div></td>
                     <td className="py-2.5 pe-3">
@@ -21610,6 +21655,17 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
                         <div className="flex items-center gap-1.5">
                           <span className={r.advSkip ? "line-through ct-t3" : "text-rose-500 font-bold"}>{fmtMoney(r.advCalc)}</span>
                           {!locked(r) && <button type="button" onClick={() => setAdj(r.empId, { advSkip: !r.advSkip })} className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${r.advSkip ? "bg-emerald-500 text-white" : "bg-rose-400/15 text-rose-500"}`}>{r.advSkip ? t("Skip") : t("Cut")}</button>}
+                        </div>
+                      ) : <span className="ct-t3">—</span>}
+                    </td>
+                    <td className="py-2.5 pe-3" data-ot-cell>
+                      {r.otPayCalc > 0 || r.otHours > 0 ? (
+                        <div>
+                          <div className="flex items-center gap-1.5">
+                            <span className={r.otSkip ? "line-through ct-t3" : "text-emerald-600 font-bold"}>{fmtMoney(r.otPayCalc)}</span>
+                            {!locked(r) && <button type="button" onClick={() => setAdj(r.empId, { otSkip: !r.otSkip })} className={`rounded-md px-2 py-0.5 text-[11px] font-bold ${r.otSkip ? "ct-chip ct-t2" : "bg-emerald-500 text-white"}`}>{r.otSkip ? t("Don't pay") : t("Pay")}</button>}
+                          </div>
+                          <div className="text-[11px] ct-t3">{r.otHours} h × {fmtMoney(r.otPerHour)}</div>
                         </div>
                       ) : <span className="ct-t3">—</span>}
                     </td>
@@ -21651,6 +21707,7 @@ function SalarySheetPage({ currentUser, settings, onOpenVoucher }) {
           </table>
         )}
       </section>
+      {mineWaiting.length > 0 && <div className="text-[12px] text-rose-500 font-semibold mt-2">🔒 {t("Your own salary row is locked for you — Admin or another HR user prepares and sends it.")}</div>}
       {!isFinal && rows.length > 0 && <div className="text-[12px] ct-t3 mt-2">{t("Click an employee to open the sheet and set deductions, then send the slip for approval. The salary voucher is created on approval, and the slip can be printed only after approval.")}</div>}
       {empSheet && (() => {
         const rr = rows.find((x) => x.empId === empSheet.empId) || empSheet;
@@ -21722,6 +21779,7 @@ async function hrApproveSlip(month, empId, user) {
   const sl0 = hrSlipOf(sh0, empId);
   if (!sl0 || sl0.status !== "Pending") return "state";
   if (sl0.by && sl0.by.key === actor.key && user.role !== "admin") return "self";
+  if (hrIsSelf(user, empId)) return "own";
   const r = sl0.row;
   let vid = "";
   if (r.net > 0) {
@@ -21746,6 +21804,377 @@ async function hrApproveSlip(month, empId, user) {
   return "";
 }
 
+/* ---------------- Product rates · margin · profit calculator (Admin) ---------------- */
+// Rates live on each product (p.rates). Only approved rates are stored there.
+// Staff with page access may propose a change; Admin or a login with "rates.approve" approves it.
+function prRates(p, over) {
+  const r = { ...((p && p.rates) || {}), ...(over || {}) };
+  const upt = Number(r.unitsPerTon) || 0, pur = Number(r.pur) || 0, rent = Number(r.rent) || 0;
+  const cost = upt > 0 ? (pur + rent) / upt : 0;
+  const pv = Number(r.profitVal) || 0;
+  const pct = r.profitType === "pct";
+  const sale = cost > 0 ? Math.round(cost + (pct ? (cost * pv) / 100 : pv)) : Number(p && p.price) || 0;
+  const profit = cost > 0 ? sale - cost : 0;
+  return {
+    upt, pur, rent, cost, profitType: pct ? "pct" : "rs", profitVal: pv, profit, sale,
+    margin: sale > 0 && cost > 0 ? (profit / sale) * 100 : 0, min: Number(r.minRate) || 0,
+    has: upt > 0 && pur > 0, by: r.approvedBy || "", at: r.approvedAt || "",
+  };
+}
+const PR_FIELDS = [
+  ["unitsPerTon", "Units per ton"], ["pur", "Purchase rate / ton"], ["rent", "Rent / ton"],
+  ["profitType", "Profit type"], ["profitVal", "Profit"], ["minRate", "Min sale rate"],
+];
+function prNum(n, d = 0) { return (Number(n) || 0).toLocaleString("en-PK", { minimumFractionDigits: d, maximumFractionDigits: d }); }
+function prProfitLabel(x, unit) { return x.profitType === "pct" ? `${prNum(x.profitVal, 1)}% ${t("of cost")}` : `Rs ${prNum(x.profitVal)} / ${unit || t("unit")}`; }
+function prFieldText(k, v) { return k === "profitType" ? (v === "pct" ? t("% of cost") : t("Rs per unit")) : prNum(v, k === "profitVal" ? 1 : 0).replace(/\.0$/, ""); }
+function prCanApprove(user) { return hrAllow(user, "rates.approve"); }
+
+async function prApplyRates(p, rates, actor, saveProduct) {
+  const clean = {};
+  PR_FIELDS.forEach(([k]) => { clean[k] = k === "profitType" ? (rates[k] === "pct" ? "pct" : "rs") : Number(rates[k]) || 0; });
+  const x = prRates({ ...p, rates: clean });
+  saveProduct({ ...p, rates: { ...clean, approvedBy: actor.name, approvedAt: new Date().toISOString() }, price: x.sale || p.price });
+  if (x.cost > 0) {
+    // keep the profit report (purchase cost by date) in step with the approved rate
+    await finMutate("costs", (c) => {
+      const from = todayISO();
+      const list = ((c && c[p.id]) || []).filter((r) => r.from !== from);
+      return { ...c, [p.id]: [...list, { rate: roundMoney(x.cost), from, at: new Date().toISOString(), by: actor.name }] };
+    });
+  }
+}
+
+function RateEditModal({ product, isAdmin, onClose, onSubmit }) {
+  const cur = (product && product.rates) || {};
+  const [f, setF] = useState({
+    unitsPerTon: cur.unitsPerTon ?? (/bag/i.test(product.unit || "") ? 20 : /kg/i.test(product.unit || "") ? 1000 : ""),
+    pur: cur.pur ?? "", rent: cur.rent ?? "", profitType: cur.profitType || "rs", profitVal: cur.profitVal ?? "", minRate: cur.minRate ?? "",
+  });
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const now = prRates(product), next = prRates(product, f);
+  const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
+  const changed = PR_FIELDS.some(([k]) => String(cur[k] ?? "") !== String(f[k] ?? ""));
+  async function go() {
+    if (!(Number(f.unitsPerTon) > 0) || !(Number(f.pur) > 0)) { alert(t("Enter units per ton and purchase rate per ton.")); return; }
+    if (!changed) { alert(t("Nothing changed.")); return; }
+    if (!isAdmin && !reason.trim()) { alert(t("Write the reason for this change.")); return; }
+    if (Number(f.minRate) > 0 && Number(f.minRate) > next.sale) { alert(t("Minimum rate cannot be above the sale price.")); return; }
+    setBusy(true);
+    try { await onSubmit(f, reason.trim()); onClose(); } finally { setBusy(false); }
+  }
+  const unit = product.unit || "unit";
+  const cell = (label, a, b, tone) => (
+    <div className="ct-card p-3 min-w-0" style={{ boxShadow: "none" }}>
+      <div className="text-[11px] font-bold uppercase tracking-[.08em] ct-t3">{t(label)}</div>
+      <div className={`text-[18px] font-black tabular-nums ${tone || "ct-h"}`}>{b}</div>
+      {now.has && a !== b && <div className="text-[11.5px] ct-t3 line-through tabular-nums">{a}</div>}
+    </div>
+  );
+  return (
+    <Modal title={`${t("Rates")} · ${product.name}`} onClose={onClose} wide>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4">
+        <Field label={`${t("Units per ton")} (${unit})`}><input type="number" className={inputCls} value={f.unitsPerTon} onChange={set("unitsPerTon")} data-rate-upt="1" /></Field>
+        <Field label="Purchase rate / ton"><input type="number" className={inputCls} value={f.pur} onChange={set("pur")} data-rate-pur="1" /></Field>
+        <Field label="Rent / ton"><input type="number" className={inputCls} value={f.rent} onChange={set("rent")} data-rate-rent="1" /></Field>
+        <Field label="Profit type">
+          <select className={inputCls} value={f.profitType} onChange={set("profitType")} data-rate-ptype="1">
+            <option value="rs">{t("Rs per unit")}</option><option value="pct">{t("% of cost")}</option>
+          </select>
+        </Field>
+        <Field label={f.profitType === "pct" ? `${t("Profit")} (%)` : `${t("Profit")} (Rs / ${unit})`}><input type="number" className={inputCls} value={f.profitVal} onChange={set("profitVal")} data-rate-profit="1" /></Field>
+        <Field label={`${t("Min sale rate")} / ${unit}`}><input type="number" className={inputCls} value={f.minRate} onChange={set("minRate")} data-rate-min="1" /></Field>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3" data-rate-preview="1">
+        {cell(`Cost / ${unit}`, `Rs ${prNum(now.cost, 2)}`, `Rs ${prNum(next.cost, 2)}`)}
+        {cell(`Profit / ${unit}`, `Rs ${prNum(now.profit, 2)}`, `Rs ${prNum(next.profit, 2)}`, next.profit > 0 ? "text-emerald-500" : "text-rose-500")}
+        {cell(`Sale price / ${unit}`, `Rs ${prNum(now.sale)}`, `Rs ${prNum(next.sale)}`)}
+        {cell("Margin", `${prNum(now.margin, 1)}%`, `${prNum(next.margin, 1)}%`, next.margin > 0 ? "text-emerald-500" : "text-rose-500")}
+      </div>
+      {next.upt > 0 && <div className="text-[12.5px] ct-t2 mb-3">{t("Sale price per ton")}: <b className="ct-h">{fmtMoney(next.sale * next.upt)}</b> · {t("Cost per ton")}: <b className="ct-h">{fmtMoney(next.pur + next.rent)}</b></div>}
+      <Field label={isAdmin ? "Note (optional)" : "Reason for change *"}><input className={inputCls} value={reason} onChange={(e) => setReason(e.target.value)} data-rate-reason="1" /></Field>
+      <div className="text-[12px] ct-t3 mb-3">{isAdmin ? t("As Admin, the new rates apply at once and go into the rate history.") : t("The current rates stay in use until Admin or a login with “Approve rates” approves this change.")}</div>
+      <div className="flex justify-end gap-2"><Btn variant="ghost" onClick={onClose}>Cancel</Btn><Btn onClick={go} disabled={busy}>{isAdmin ? `✓ ${t("Save and apply")}` : `➜ ${t("Send for approval")}`}</Btn></div>
+    </Modal>
+  );
+}
+
+function ProductRatesPage({ currentUser, products, saveProduct }) {
+  useLanguage();
+  const fin = useFin();
+  const [edit, setEdit] = useState(null);
+  const [busy, setBusy] = useState("");
+  if (!fin.loaded) return <HrLoading />;
+  const isAdmin = currentUser && currentUser.role === "admin";
+  const canApprove = prCanApprove(currentUser);
+  const me = finActor(currentUser);
+  const reqs = fin.rateReqs || [];
+  const waiting = reqs.filter((r) => r.status === "Waiting").sort((a, b) => String(a.at).localeCompare(String(b.at)));
+  const history = reqs.filter((r) => r.status !== "Waiting").sort((a, b) => String(b.decided ? b.decided.at : b.at).localeCompare(String(a.decided ? a.decided.at : a.at))).slice(0, 40);
+  const list = (products || []).map((p) => ({ p, x: prRates(p) }));
+  const withRates = list.filter((r) => r.x.has);
+  const low = withRates.length ? withRates.reduce((a, b) => (b.x.margin < a.x.margin ? b : a)) : null;
+  const snap = (p) => { const r = (p && p.rates) || {}; const o = {}; PR_FIELDS.forEach(([k]) => { o[k] = r[k] ?? (k === "profitType" ? "rs" : 0); }); return o; };
+
+  async function submit(p, f, reason) {
+    const req = { id: uid("rate"), productId: p.id, productName: p.name, unit: p.unit, old: snap(p), new: { ...snap({ rates: f }) }, reason, by: me, at: new Date().toISOString(), status: "Waiting" };
+    PR_FIELDS.forEach(([k]) => { req.new[k] = k === "profitType" ? (f[k] === "pct" ? "pct" : "rs") : Number(f[k]) || 0; });
+    if (isAdmin) {
+      req.status = "Approved"; req.decided = { by: me, at: req.at, note: t("Set by Admin") };
+      await prApplyRates(p, req.new, me, saveProduct);
+    }
+    await finMutate("rateReqs", (l) => [...l, req], true);
+  }
+  async function decide(r, ok) {
+    if (!canApprove) return;
+    if (r.by && r.by.key === me.key && !isAdmin) { alert(t("You cannot approve your own request.")); return; }
+    let note = "";
+    if (!ok) { note = (prompt(t("Reason for rejecting?")) || "").trim(); if (!note) return; }
+    setBusy(r.id);
+    try {
+      const p = (products || []).find((x) => x.id === r.productId);
+      if (ok && !p) { alert(t("This product no longer exists.")); return; }
+      let stale = false;
+      await finMutate("rateReqs", (l) => l.map((x) => {
+        if (x.id !== r.id) return x;
+        if (x.status !== "Waiting") { stale = true; return x; }
+        return { ...x, status: ok ? "Approved" : "Rejected", decided: { by: me, at: new Date().toISOString(), note } };
+      }), true);
+      if (stale) { alert(t("Someone else already decided this request.")); return; }
+      if (ok) await prApplyRates(p, r.new, me, saveProduct);
+    } finally { setBusy(""); }
+  }
+  const effect = (r) => {
+    const p = (products || []).find((x) => x.id === r.productId) || { price: 0 };
+    const a = prRates(p, r.old), b = prRates(p, r.new);
+    return { a, b };
+  };
+  const changes = (r) => PR_FIELDS.filter(([k]) => String(r.old[k] ?? "") !== String(r.new[k] ?? "")).map(([k, label]) => (
+    <div key={k} className="whitespace-nowrap"><span className="ct-t3">{t(label)}:</span> <span className="line-through ct-t3">{prFieldText(k, r.old[k])}</span> <b className="ct-h">{prFieldText(k, r.new[k])}</b></div>
+  ));
+  const th = (h, end) => <th key={h} className={`py-2 pe-3 font-bold ${end ? "text-end" : "text-start"}`}>{t(h)}</th>;
+  return (
+    <div>
+      <FinPageHead title="Product Rates" sub={t("Purchase rate, rent and profit for every product · only approved rates are used")} right={<span className="rounded-full px-3 py-1 text-[12px] font-bold" style={{ background: "#fef3c7", color: "#92400e" }}>🔒 {t("Cost & margin — restricted")}</span>} />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <FinKpi label="Products with rates" value={`${withRates.length} / ${list.length}`} />
+        <FinKpi label="Waiting approval" value={waiting.length} tone={waiting.length ? "text-amber-500" : "ct-h"} />
+        <FinKpi label="Average margin" value={withRates.length ? `${prNum(withRates.reduce((a, r) => a + r.x.margin, 0) / withRates.length, 1)}%` : "—"} tone="text-emerald-500" />
+        <FinKpi label="Lowest margin" value={low ? `${prNum(low.x.margin, 1)}%` : "—"} sub={low ? low.p.name : ""} tone={low && low.x.margin < 3 ? "text-rose-500" : "ct-h"} />
+      </div>
+
+      <section className="ct-card p-3 sm:p-4 overflow-x-auto mb-4">
+        {list.length === 0 && <FinEmpty text={t("Add products first (Business → Products).")} />}
+        {list.length > 0 && (
+          <table className="w-full text-[13px] min-w-[1100px]" data-rates-table="1">
+            <thead><tr className="ct-t3 text-[11px] uppercase">{[["Product"], ["Unit"], ["Units / ton", 1], ["Purchase / ton", 1], ["Rent / ton", 1], ["Cost / unit", 1], ["Profit set"], ["Profit / unit", 1], ["Sale price", 1], ["Margin", 1], ["Min rate", 1], ["Approved"], [""]].map(([h, e]) => th(h, e))}</tr></thead>
+            <tbody>
+              {list.map(({ p, x }) => {
+                const w = waiting.filter((r) => r.productId === p.id).length;
+                return (
+                  <tr key={p.id} className="border-t border-slate-200/60" data-rate-row={p.name}>
+                    <td className="py-2.5 pe-3 font-bold ct-h">{p.name}{w > 0 && <span className="ms-2 rounded-full px-2 py-0.5 text-[10.5px] font-bold bg-amber-400/20 text-amber-600">{w} {t("waiting")}</span>}</td>
+                    <td className="py-2.5 pe-3 ct-t2">{p.unit}</td>
+                    {x.has ? (<>
+                      <td className="py-2.5 pe-3 text-end tabular-nums">{prNum(x.upt)}</td>
+                      <td className="py-2.5 pe-3 text-end tabular-nums">{prNum(x.pur)}</td>
+                      <td className="py-2.5 pe-3 text-end tabular-nums">{prNum(x.rent)}</td>
+                      <td className="py-2.5 pe-3 text-end tabular-nums">{prNum(x.cost, 2)}</td>
+                      <td className="py-2.5 pe-3 ct-t2 whitespace-nowrap">{prProfitLabel(x, p.unit)}</td>
+                      <td className="py-2.5 pe-3 text-end tabular-nums font-bold text-emerald-500">{prNum(x.profit, 2)}</td>
+                      <td className="py-2.5 pe-3 text-end tabular-nums font-black ct-h" data-rate-sale="1">{prNum(x.sale)}</td>
+                      <td className={`py-2.5 pe-3 text-end tabular-nums font-bold ${x.margin > 0 ? "text-emerald-500" : "text-rose-500"}`} data-rate-margin="1">{prNum(x.margin, 1)}%</td>
+                      <td className="py-2.5 pe-3 text-end tabular-nums">{x.min ? prNum(x.min) : "—"}</td>
+                      <td className="py-2.5 pe-3 text-[12px] whitespace-nowrap">{x.by ? <span className="text-emerald-600">✓ {x.by}</span> : "—"}<div className="ct-t3">{x.at ? fmtDate(x.at.slice(0, 10)) : ""}</div></td>
+                    </>) : (
+                      <td colSpan={10} className="py-2.5 pe-3 ct-t3">{t("No rates yet")} · {t("sale price")} {fmtMoney(p.price)}</td>
+                    )}
+                    <td className="py-2.5 text-end"><Btn small variant="ghost" onClick={() => setEdit(p)}>{x.has ? (isAdmin ? t("Change") : t("Propose change")) : t("Set rates")}</Btn></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="ct-card p-3 sm:p-4 overflow-x-auto mb-4" data-rate-waiting="1">
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+          <div className="ct-display text-[16px] font-bold ct-h">{t("Waiting for approval")}</div>
+          <div className="text-[12px] ct-t3">{t("Only Admin or a login with “Approve rates” can approve · nobody approves their own request")}</div>
+        </div>
+        {waiting.length === 0 && <FinEmpty text={t("No rate changes waiting.")} />}
+        {waiting.length > 0 && (
+          <table className="w-full text-[13px] min-w-[980px]">
+            <thead><tr className="ct-t3 text-[11px] uppercase">{["Requested by", "Product", "Change", "Reason", "Effect", ""].map((h) => th(h))}</tr></thead>
+            <tbody>
+              {waiting.map((r) => {
+                const { a, b } = effect(r);
+                const own = r.by && r.by.key === me.key && !isAdmin;
+                return (
+                  <tr key={r.id} className="border-t border-slate-200/60 align-top" style={{ background: "rgba(245,158,11,.07)" }} data-rate-req={r.productName}>
+                    <td className="py-2.5 pe-3"><b className="ct-h">{r.by ? r.by.name : "—"}</b><div className="text-[11.5px] ct-t3">{fmtDateTime(r.at)}</div></td>
+                    <td className="py-2.5 pe-3 font-bold ct-h">{r.productName}</td>
+                    <td className="py-2.5 pe-3 text-[12.5px]">{changes(r)}</td>
+                    <td className="py-2.5 pe-3 ct-t2">{r.reason || "—"}</td>
+                    <td className="py-2.5 pe-3 text-[12.5px] whitespace-nowrap">
+                      <div>{t("Cost")}: {prNum(a.cost, 2)} → <b className="ct-h">{prNum(b.cost, 2)}</b></div>
+                      <div>{t("Sale")}: {prNum(a.sale)} → <b className="ct-h">{prNum(b.sale)}</b></div>
+                      <div>{t("Margin")}: {prNum(a.margin, 1)}% → <b className={b.margin < a.margin ? "text-rose-500" : "text-emerald-500"}>{prNum(b.margin, 1)}%</b></div>
+                    </td>
+                    <td className="py-2.5 text-end whitespace-nowrap">
+                      {!canApprove ? <span className="text-[12px] ct-t3">{t("Waiting")}</span> : own ? <span className="text-[12px] text-amber-600">{t("Your own request")}</span> : (
+                        <span className="inline-flex gap-2"><Btn small variant="ghost" onClick={() => decide(r, false)} disabled={busy === r.id}>{t("Reject")}</Btn><Btn small onClick={() => decide(r, true)} disabled={busy === r.id}>✓ {t("Approve")}</Btn></span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="ct-card p-3 sm:p-4 overflow-x-auto">
+        <div className="ct-display text-[16px] font-bold ct-h mb-2">{t("Rate history")}</div>
+        {history.length === 0 && <FinEmpty text={t("No rate changes yet.")} />}
+        {history.length > 0 && (
+          <table className="w-full text-[13px] min-w-[900px]">
+            <thead><tr className="ct-t3 text-[11px] uppercase">{["Date", "Product", "Change", "Requested by", "Decision"].map((h) => th(h))}</tr></thead>
+            <tbody>
+              {history.map((r) => (
+                <tr key={r.id} className="border-t border-slate-200/60 align-top">
+                  <td className="py-2 pe-3 whitespace-nowrap">{fmtDateTime(r.decided ? r.decided.at : r.at)}</td>
+                  <td className="py-2 pe-3 font-bold ct-h">{r.productName}</td>
+                  <td className="py-2 pe-3 text-[12.5px]">{changes(r)}</td>
+                  <td className="py-2 pe-3">{r.by ? r.by.name : "—"}{r.reason ? <div className="text-[12px] ct-t3">{r.reason}</div> : null}</td>
+                  <td className="py-2 pe-3"><span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${r.status === "Approved" ? "bg-emerald-400/15 text-emerald-500" : "bg-rose-400/15 text-rose-500"}`}>{t(r.status)}</span> {r.decided ? r.decided.by.name : ""}{r.decided && r.decided.note ? <div className="text-[12px] ct-t3">{r.decided.note}</div> : null}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+      {edit && <RateEditModal product={edit} isAdmin={isAdmin} onClose={() => setEdit(null)} onSubmit={(f, reason) => submit(edit, f, reason)} />}
+    </div>
+  );
+}
+
+function ProfitCalcPage({ products }) {
+  useLanguage();
+  const list = (products || []).map((p) => ({ p, x: prRates(p) })).filter((r) => r.x.has);
+  const [buyId, setBuyId] = useState("");
+  const [qty, setQty] = useState("20");
+  const [inTon, setInTon] = useState(true);
+  const [sellId, setSellId] = useState("");
+  const [rate, setRate] = useState("");
+  const [sellQty, setSellQty] = useState("100");
+  const buy = list.find((r) => r.p.id === buyId) || list[0];
+  const sell = list.find((r) => r.p.id === sellId) || list[0];
+  if (!list.length) return (
+    <div>
+      <FinPageHead title="Profit Calculator" sub={t("Uses the approved rates from Product Rates")} />
+      <section className="ct-card p-4"><FinEmpty text={t("No product has rates yet. Set them in Product Rates.")} /></section>
+    </div>
+  );
+  const bx = buy.x, bu = buy.p.unit || "unit";
+  const q = Number(qty) || 0;
+  const tons = inTon ? q : bx.upt ? q / bx.upt : 0;
+  const units = inTon ? q * bx.upt : q;
+  const purAmt = tons * bx.pur, rentAmt = tons * bx.rent, costAmt = purAmt + rentAmt, saleAmt = units * bx.sale;
+  const sx = sell.x, su = sell.p.unit || "unit";
+  const r = rate === "" ? sx.sale : Number(rate) || 0;
+  const sq = Number(sellQty) || 0;
+  const pu = r - sx.cost, mg = r > 0 ? (pu / r) * 100 : 0;
+  const status = r < sx.cost ? ["loss", "LOSS — below cost", "#fef2f2", "#fca5a5", "#991b1b"]
+    : sx.min && r < sx.min ? ["min", "Below minimum rate — only Admin can approve", "#fff7ed", "#fdba74", "#9a3412"]
+      : r < sx.sale ? ["low", "Below list rate — needs approval", "#fffbeb", "#fcd34d", "#92400e"]
+        : ["ok", "OK — list rate or above", "#ecfdf5", "#6ee7b7", "#065f46"];
+  const lo = Math.min(sx.cost, r || sx.cost) * 0.995, hi = Math.max(sx.sale, r) * 1.005;
+  const pos = (v) => `${Math.max(0, Math.min(100, ((v - lo) / (hi - lo || 1)) * 100))}%`;
+  const row = (label, val, tone) => <div className="flex justify-between items-center py-2 border-b border-slate-200/60 text-[13.5px]"><span className="ct-t2">{label}</span><b className={`tabular-nums ${tone || "ct-h"}`}>{val}</b></div>;
+  const sel = (val, on) => (
+    <select className={inputCls} value={val} onChange={(e) => on(e.target.value)}>{list.map(({ p }) => <option key={p.id} value={p.id}>{p.name}</option>)}</select>
+  );
+  return (
+    <div>
+      <FinPageHead title="Profit Calculator" sub={t("Uses the approved rates from Product Rates · nothing is saved here")} right={<span className="rounded-full px-3 py-1 text-[12px] font-bold" style={{ background: "#fef3c7", color: "#92400e" }}>🔒 {t("Restricted")}</span>} />
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
+        <section className="ct-card p-4 sm:p-5" data-calc-buy="1">
+          <div className="text-[11.5px] font-bold uppercase tracking-[.1em] ct-t3 mb-2">1 · {t("If I buy…")}</div>
+          <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(0,1.4fr) minmax(0,1fr) auto" }}>
+            <Field label="Product">{sel(buy.p.id, setBuyId)}</Field>
+            <Field label="Quantity"><input type="number" className={inputCls} value={qty} onChange={(e) => setQty(e.target.value)} data-calc-qty="1" /></Field>
+            <Field label="In">
+              <div className="flex rounded-xl overflow-hidden border border-slate-300 text-[13px] font-bold">
+                {[[true, "Ton"], [false, bu]].map(([v, l]) => <button key={l} type="button" className="px-3 py-2" style={inTon === v ? { background: "#0F1B3D", color: "#fff" } : undefined} onClick={() => setInTon(v)}>{t(l)}</button>)}
+              </div>
+            </Field>
+          </div>
+          {row(`${t(bu)} (${prNum(bx.upt)} ${t("per ton")})`, prNum(units))}
+          {row(`${t("Purchase")} · ${prNum(tons, tons % 1 ? 2 : 0)} × ${prNum(bx.pur)}`, fmtMoney(purAmt))}
+          {row(`${t("Rent")} · ${prNum(tons, tons % 1 ? 2 : 0)} × ${prNum(bx.rent)}`, fmtMoney(rentAmt))}
+          {row(t("Total cost"), fmtMoney(costAmt))}
+          {row(`${t("Cost")} / ${t(bu)}`, `Rs ${prNum(bx.cost, 2)}`)}
+          {row(`${t("Profit")} · ${prProfitLabel(bx, bu)}`, `Rs ${prNum(bx.profit, 2)}`, "text-emerald-500")}
+          {row(`${t("Sale price")} / ${t(bu)} · / ${t("ton")}`, `Rs ${prNum(bx.sale)} · ${fmtMoney(bx.sale * bx.upt)}`)}
+          {row(t("Total sale value"), fmtMoney(saleAmt))}
+          <div className="flex justify-between items-center rounded-xl px-4 py-3 mt-3" style={{ background: "#ecfdf5", border: "1px solid #a7f3d0" }}>
+            <span className="font-bold" style={{ color: "#065f46" }}>{t("Expected profit")} · {t("margin")} {prNum(bx.margin, 1)}%</span>
+            <b className="text-[24px] tabular-nums" style={{ color: "#047857" }} data-calc-profit="1">{fmtMoney(saleAmt - costAmt)}</b>
+          </div>
+        </section>
+
+        <section className="ct-card p-4 sm:p-5" data-calc-sell="1">
+          <div className="text-[11.5px] font-bold uppercase tracking-[.1em] ct-t3 mb-2">2 · {t("If I sell at this rate…")}</div>
+          <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(0,1.3fr) minmax(0,1fr) minmax(0,.8fr)" }}>
+            <Field label="Product">{sel(sell.p.id, (v) => { setSellId(v); setRate(""); })}</Field>
+            <Field label={`${t("Rate")} / ${t(su)}`}><input type="number" className={inputCls} placeholder={prNum(sx.sale)} value={rate} onChange={(e) => setRate(e.target.value)} data-calc-rate="1" /></Field>
+            <Field label={t(su)}><input type="number" className={inputCls} value={sellQty} onChange={(e) => setSellQty(e.target.value)} /></Field>
+          </div>
+          <div className="relative mx-2 mt-7 mb-7" style={{ height: 10, borderRadius: 6, background: "#e2e8f0" }}>
+            {[[sx.cost, "#dc2626", `${t("Cost")} ${prNum(sx.cost)}`], ...(sx.min ? [[sx.min, "#f59e0b", `${t("Min")} ${prNum(sx.min)}`]] : []), [sx.sale, "#059669", `${t("List")} ${prNum(sx.sale)}`]].map(([v, c, l], i) => (
+              <div key={i} className="absolute" style={{ left: pos(v), top: -6, transform: "translateX(-50%)" }}>
+                <div style={{ width: 3, height: 22, borderRadius: 2, background: c, margin: "0 auto" }} />
+                <div className="text-[10.5px] font-bold whitespace-nowrap" style={{ color: c, position: "absolute", top: -18, left: "50%", transform: "translateX(-50%)" }}>{l}</div>
+              </div>
+            ))}
+            <div className="absolute" style={{ left: pos(r), top: -7, transform: "translateX(-50%)" }}>
+              <div style={{ width: 24, height: 24, borderRadius: 12, background: "#0F1B3D", border: "3px solid #fff", boxShadow: "0 2px 6px rgba(0,0,0,.3)" }} />
+              <div className="text-[11px] font-black ct-h text-center tabular-nums mt-0.5">{prNum(r)}</div>
+            </div>
+          </div>
+          {row(`${t("Profit")} / ${t(su)} ${t("at")} ${prNum(r)}`, `Rs ${prNum(pu, 2)}`, pu >= sx.profit ? "text-emerald-500" : "text-rose-500")}
+          {row(t("Margin at this rate"), `${prNum(mg, 1)}%`, mg >= sx.margin ? "text-emerald-500" : "text-rose-500")}
+          {row(`${t("Normal profit")} / ${t(su)}`, `Rs ${prNum(sx.profit, 2)} · ${prNum(sx.margin, 1)}%`)}
+          {row(t("Less than list by"), `Rs ${prNum(Math.max(0, sx.sale - r), 2)} / ${t(su)}`)}
+          {row(`${t("Profit on")} ${prNum(sq)} ${t(su)}`, <>{fmtMoney(pu * sq)} <span className="ct-t3 font-semibold">({t("normal")} {fmtMoney(sx.profit * sq)})</span></>)}
+          <div className="rounded-xl px-4 py-3 mt-3 font-bold text-[14px]" style={{ background: status[2], border: `1.5px solid ${status[3]}`, color: status[4] }} data-calc-status={status[0]}>{status[0] === "ok" ? "✓" : "⚠"} {t(status[1])}</div>
+        </section>
+      </div>
+
+      <section className="ct-card p-3 sm:p-4 overflow-x-auto">
+        <div className="ct-display text-[16px] font-bold ct-h mb-2">{t("All products — margin at a glance")}</div>
+        <table className="w-full text-[13px] min-w-[900px]">
+          <thead><tr className="ct-t3 text-[11px] uppercase">{[["Product"], ["Unit"], ["Purchase / ton", 1], ["Rent / ton", 1], ["Cost / unit", 1], ["Profit set"], ["Profit / unit", 1], ["Sale price", 1], ["Margin", 1], ["Min rate", 1]].map(([h, e]) => <th key={h} className={`py-2 pe-3 font-bold ${e ? "text-end" : "text-start"}`}>{t(h)}</th>)}</tr></thead>
+          <tbody>
+            {list.map(({ p, x }) => (
+              <tr key={p.id} className="border-t border-slate-200/60">
+                <td className="py-2 pe-3 font-bold ct-h">{p.name}</td><td className="py-2 pe-3 ct-t2">{p.unit}</td>
+                <td className="py-2 pe-3 text-end tabular-nums">{prNum(x.pur)}</td><td className="py-2 pe-3 text-end tabular-nums">{prNum(x.rent)}</td>
+                <td className="py-2 pe-3 text-end tabular-nums">{prNum(x.cost, 2)}</td><td className="py-2 pe-3 ct-t2">{prProfitLabel(x, p.unit)}</td>
+                <td className="py-2 pe-3 text-end tabular-nums text-emerald-500 font-bold">{prNum(x.profit, 2)}</td><td className="py-2 pe-3 text-end tabular-nums font-black ct-h">{prNum(x.sale)}</td>
+                <td className="py-2 pe-3 text-end tabular-nums text-emerald-500 font-bold">{prNum(x.margin, 1)}%</td><td className="py-2 pe-3 text-end tabular-nums">{x.min ? prNum(x.min) : "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </div>
+  );
+}
+
 function SalaryApprovalsPage({ currentUser, settings }) {
   useLanguage();
   const fin = useFin();
@@ -21765,6 +22194,7 @@ function SalaryApprovalsPage({ currentUser, settings }) {
     try {
       const err = await hrApproveSlip(month, x.empId, currentUser);
       if (err === "self") alert(t("The person who created this slip cannot approve it."));
+      else if (err === "own") alert(t(HR_SELF_MSG));
       else if (err) alert(t("This slip was already updated by someone else."));
     } finally { setBusy(""); }
   }
@@ -21776,6 +22206,7 @@ function SalaryApprovalsPage({ currentUser, settings }) {
   const cuts = (r) => [
     r.cutDays > 0 ? (r.maaf ? `${t("Leave")} ${t("waived")}` : `${t("Leave")} −${fmtMoney(r.leaveCut)}`) : "",
     r.advCalc > 0 ? (r.advSkip ? `${t("Advance")} ${t("next month")}` : `${t("Advance")} −${fmtMoney(r.advanceCut)}`) : "",
+    r.otPay ? `${t("Overtime")} ${r.otHours}h +${fmtMoney(r.otPay)}` : r.otSkip && r.otPayCalc ? `${t("Overtime")} ${t("not paid")}` : "",
     r.bonus ? `${t("Bonus")} +${fmtMoney(r.bonus)}` : "",
     r.deduct ? `${t("Other")} −${fmtMoney(r.deduct)}` : "",
   ].filter(Boolean).join(" · ") || t("No deductions");
@@ -21796,7 +22227,7 @@ function SalaryApprovalsPage({ currentUser, settings }) {
             <tbody>
               {list.map((x) => {
                 const r = x.row;
-                const own = x.by && x.by.key === me && currentUser.role !== "admin";
+                const own = (x.by && x.by.key === me && currentUser.role !== "admin") || hrIsSelf(currentUser, x.empId);
                 return (
                   <tr key={x.empId} className="border-t border-slate-200/60 align-top" style={x.status === "Pending" ? { background: "rgba(245,158,11,.07)" } : undefined} data-appr-row={x.empId}>
                     <td className="py-2.5 pe-3"><b className="ct-h">{r.name}</b><div className="text-[11.5px] ct-t3">{r.number} · {r.post}</div></td>
@@ -21807,8 +22238,8 @@ function SalaryApprovalsPage({ currentUser, settings }) {
                     <td className="py-2.5 text-end whitespace-nowrap">
                       <Btn small variant="ghost" onClick={() => setView(x)}>{t("View sheet")}</Btn>
                       {x.status === "Pending" && canApprove && <>
-                        <Btn small variant="ghost" onClick={() => giveBack(x)}>↩ {t("Return to HR")}</Btn>
-                        <Btn small onClick={() => approve(x)} disabled={!!busy || own} title={own ? t("You created this slip") : ""} data-approve>✓ {t("Approve")}</Btn>
+                        <Btn small variant="ghost" onClick={() => (hrIsSelf(currentUser, x.empId) ? alert(t(HR_SELF_MSG)) : giveBack(x))}>↩ {t("Return to HR")}</Btn>
+                        <Btn small onClick={() => approve(x)} disabled={!!busy || own} title={own ? (hrIsSelf(currentUser, x.empId) ? t("Your own salary") : t("You created this slip")) : ""} data-approve>✓ {t("Approve")}</Btn>
                       </>}
                       {x.status === "Approved" && <Btn small variant="ghost" onClick={() => setPrint([x.row])}>🖨 {t("Print slip")}</Btn>}
                     </td>
@@ -21874,14 +22305,16 @@ function HrEmpSalarySheetModal({ row, sheet, month, fin, onClose, onPrint, curre
             <Btn small variant="ghost" onClick={() => setLockMsg(false)}>OK</Btn>
           </div>
         )}
+        {hrIsSelf(currentUser, row.empId) && <div className="rounded-xl bg-rose-400/10 text-rose-600 px-4 py-2.5 mb-3 text-[13px] font-semibold" data-self-block>🔒 {t("Your own salary — Admin will handle. You can view it but not change, send, approve, sign or pay it.")}</div>}
         {sst === "Returned" && slip && slip.returned && <div className="rounded-xl bg-rose-400/10 text-rose-600 px-4 py-2.5 mb-3 text-[13px] font-semibold">↩ {t("Returned by")} {slip.returned.by.name}: {slip.returned.reason}</div>}
-        <div className="grid gap-2 mb-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))" }}>
+        <div className="grid gap-2 mb-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(118px, 1fr))" }}>
           {tile(t("Working days"), st.working, "", "#64748b")}
           {tile(t("Present"), st.present, `/ ${st.working}`, "#047857")}
           {tile(t("Late"), st.late, lateMin ? `· ${lateMin} min` : "", "#b45309")}
           {tile(t("Leave"), st.leave, row.extraLeave ? `· ${row.extraLeave} extra` : "", "#0f766e")}
           {tile(t("Absent"), st.absent, "", "#b91c1c")}
           {tile(t("Total hours"), `${hh}h`, `${String(mm).padStart(2, "0")}m`, "#1e40af")}
+          {tile(t("Overtime"), `${row.otHours || 0}h`, row.otPay ? `· ${fmtMoney(row.otPay)}` : row.otSkip && row.otPayCalc ? `· ${t("not paid")}` : "", "#7c3aed")}
           {tile(t("Net salary"), fmtMoney(row.net), "", "#0F1B3D")}
         </div>
         <div className="flex flex-wrap gap-3 items-start">
@@ -21889,7 +22322,7 @@ function HrEmpSalarySheetModal({ row, sheet, month, fin, onClose, onPrint, curre
             <div className="px-3 py-2 font-bold ct-h text-[13.5px] border-b border-slate-200/60">{t("Daily attendance — In / Out")}<span style={HR_UR_UI}>روزانہ حاضری</span></div>
             <div className="overflow-auto" style={{ maxHeight: "52vh" }}>
               <table className="w-full text-[12.5px]">
-                <thead className="sticky top-0 ct-card"><tr className="ct-t3 text-[11px]">{["Date", "Day", "In", "Out", "Hours", "Late", "Status", "Note"].map((h) => <th key={h} className="py-1.5 px-2.5 text-start font-bold">{t(h)}</th>)}</tr></thead>
+                <thead className="sticky top-0 ct-card"><tr className="ct-t3 text-[11px]">{["Date", "Day", "In", "Out", "Hours", "Late", "OT", "Status", "Note"].map((h) => <th key={h} className="py-1.5 px-2.5 text-start font-bold">{t(h)}</th>)}</tr></thead>
                 <tbody>
                   {st.cells.map((c) => {
                     const d = new Date(`${c.date}T00:00:00`);
@@ -21903,6 +22336,7 @@ function HrEmpSalarySheetModal({ row, sheet, month, fin, onClose, onPrint, curre
                         <td className="py-1 px-2.5">{c.a && c.a.out ? hrHM(c.a.out) : "—"}</td>
                         <td className="py-1 px-2.5">{c.hours ? `${Math.floor(c.hours)}h ${String(Math.round((c.hours % 1) * 60)).padStart(2, "0")}m` : "—"}</td>
                         <td className="py-1 px-2.5">{c.a && c.a.lateMin > 0 ? <b className="text-amber-600">{c.a.lateMin} min</b> : ""}</td>
+                        <td className="py-1 px-2.5">{c.otMin > 0 ? <b className="text-violet-600">{Math.floor(c.otMin / 60)}h {String(c.otMin % 60).padStart(2, "0")}m</b> : ""}</td>
                         <td className="py-1 px-2.5"><span className={`rounded-full px-2 py-0.5 text-[10.5px] font-bold ${cls}`}>{t(lbl)}</span></td>
                         <td className="py-1 px-2.5 ct-t3">{note}</td>
                       </tr>
@@ -21925,8 +22359,18 @@ function HrEmpSalarySheetModal({ row, sheet, month, fin, onClose, onPrint, curre
                 ? <div className="px-4 py-2 text-[13px] border-t border-slate-200/60"><div className="flex justify-between"><span className="ct-t2">{t("Advance instalment")}</span><b className={row.advSkip ? "text-emerald-600" : "text-rose-500"}>{row.advSkip ? t("Deferred") : `− ${fmtMoney(row.advCalc)}`}</b></div><div className="mt-1 flex justify-end">{tg(!row.advSkip, t("Deduct"), t("Next month"), () => onAdj({ advSkip: false }), () => onAdj({ advSkip: true }), true)}</div></div>
                 : kv(t("Advance instalment"), row.advCalc > 0 ? (row.advSkip ? t("Deferred to next month") : `− ${fmtMoney(row.advanceCut)}`) : "—", row.advCalc > 0 && !row.advSkip ? "text-rose-500" : "ct-t2")}
               {editable
-                ? kv(t("Bonus / overtime"), <input type="number" className={`${inputCls} !py-1 !w-28 text-end`} defaultValue={row.bonus || ""} onBlur={(e) => Number(e.target.value || 0) !== row.bonus && onAdj({ bonus: Number(e.target.value) || 0 })} data-emp-bonus />)
-                : kv(t("Bonus / overtime"), row.bonus ? `+ ${fmtMoney(row.bonus)}` : "—")}
+                ? <div className="px-4 py-2 text-[13px] border-t border-slate-200/60" data-ot-edit>
+                    <div className="flex justify-between"><span className="ct-t2">{t("Overtime")} ({row.otHours} h × {fmtMoney(row.otPerHour)})</span><b className={row.otSkip ? "ct-t3 line-through" : "text-emerald-600"}>{row.otPayCalc ? `+ ${fmtMoney(row.otPayCalc)}` : "—"}</b></div>
+                    <div className="mt-1 flex justify-end items-center gap-2">
+                      <span className="text-[11.5px] ct-t3">{t("Hours")}</span>
+                      <input type="number" step="0.25" min="0" className={`${inputCls} !py-0.5 !w-20 text-end`} defaultValue={row.otEdited ? row.otHours : ""} placeholder={String(row.otHoursCalc)} onBlur={(e) => { const v = e.target.value; if (v === "" && row.otEdited) onAdj({ otHours: null }); else if (v !== "" && Number(v) !== row.otHours) onAdj({ otHours: Number(v) }); }} data-ot-hours />
+                      {tg(!row.otSkip, t("Pay"), t("Don't pay"), () => onAdj({ otSkip: false }), () => onAdj({ otSkip: true }))}
+                    </div>
+                  </div>
+                : kv(`${t("Overtime")} (${row.otHours || 0} h)`, row.otPay ? `+ ${fmtMoney(row.otPay)}` : row.otSkip && row.otPayCalc ? t("Not paid") : "—", row.otPay ? "text-emerald-600" : "ct-t2")}
+              {editable
+                ? kv(t("Bonus"), <input type="number" className={`${inputCls} !py-1 !w-28 text-end`} defaultValue={row.bonus || ""} onBlur={(e) => Number(e.target.value || 0) !== row.bonus && onAdj({ bonus: Number(e.target.value) || 0 })} data-emp-bonus />)
+                : kv(t("Bonus"), row.bonus ? `+ ${fmtMoney(row.bonus)}` : "—")}
               {editable
                 ? kv(t("Other deduction"), <input type="number" className={`${inputCls} !py-1 !w-28 text-end`} defaultValue={row.deduct || ""} onBlur={(e) => Number(e.target.value || 0) !== row.deduct && onAdj({ deduct: Number(e.target.value) || 0 })} data-emp-deduct />)
                 : kv(t("Other deduction"), row.deduct ? `− ${fmtMoney(row.deduct)}` : "—")}
@@ -23859,6 +24303,8 @@ const URDU_UI_EXTRA = {
 "Print Warning Letter": "وارننگ لیٹر پرنٹ کریں",
 "Print voucher": "واؤچر پرنٹ کریں",
 "Profit Calculator": "منافع کیلکولیٹر",
+"Profit Report": "منافع رپورٹ",
+"Product Rates": "پروڈکٹ ریٹ",
 "Profit by product": "پروڈکٹ کے حساب سے منافع",
 "Profit margin": "منافع کی شرح",
 "Profit report": "منافع رپورٹ",
